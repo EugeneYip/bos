@@ -42,8 +42,11 @@ const LIFT = 0.22;
  * boundary gives a few enormous flat triangles; across the 6 m of relief on
  * Boston Common they simply dive under the ground. Splitting to this size and
  * re-sampling the terrain at every new vertex makes the surface follow it.
+ *
+ * Boston's parks are gentle, so 38 m is plenty: at 18 m the city's greenery
+ * alone cost 444k triangles of dead-flat ground for no visible gain.
  */
-const MAX_EDGE = 18;
+const MAX_EDGE = 38;
 /**
  * Mean linear luminance of the library's ground albedo maps, measured off the
  * baked textures. Vertex tints are divided by it so the product lands on the
@@ -51,7 +54,7 @@ const MAX_EDGE = 18;
  */
 const MAP_MEAN = 0.075;
 /** Ceiling on the subdivided triangle count, city-wide. */
-const TRI_BUDGET = 900000;
+const TRI_BUDGET = 220000;
 
 export class Parks implements WorldModule {
   readonly name = 'Parks';

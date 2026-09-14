@@ -53,19 +53,22 @@ export const QUALITY: Record<QualityTier, QualitySettings> = {
   medium: {
     shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 1200, maxPixelRatio: 1.25,
     ssao: true, ssaoSamples: 12, ssr: false, bloom: true, motionBlur: false, taa: true,
-    volumetricClouds: true, cloudSteps: 24, detailDistance: 700, treeBudget: 14000,
+    volumetricClouds: true, cloudSteps: 24, detailDistance: 700, treeBudget: 7000,
     anisotropy: 4, waterReflections: true,
   },
   high: {
-    shadowMapSize: 2048, cascadeCount: 4, shadowDistance: 2200, maxPixelRatio: 1.5,
+    // Three cascades rather than four: every shadow-casting mesh in the city
+    // is submitted once per cascade, and the fourth buys very little on a
+    // 2048 map at this distance.
+    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 2200, maxPixelRatio: 1.5,
     ssao: true, ssaoSamples: 20, ssr: true, bloom: true, motionBlur: true, taa: true,
-    volumetricClouds: true, cloudSteps: 48, detailDistance: 1400, treeBudget: 34000,
+    volumetricClouds: true, cloudSteps: 48, detailDistance: 1400, treeBudget: 16000,
     anisotropy: 8, waterReflections: true,
   },
   ultra: {
     shadowMapSize: 4096, cascadeCount: 4, shadowDistance: 3500, maxPixelRatio: 2,
     ssao: true, ssaoSamples: 32, ssr: true, bloom: true, motionBlur: true, taa: true,
-    volumetricClouds: true, cloudSteps: 80, detailDistance: 2600, treeBudget: 60000,
+    volumetricClouds: true, cloudSteps: 80, detailDistance: 2600, treeBudget: 30000,
     anisotropy: 16, waterReflections: true,
   },
 };

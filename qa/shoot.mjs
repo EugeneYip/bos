@@ -9,6 +9,7 @@
  *   node qa/shoot.mjs                        # all viewpoints
  *   node qa/shoot.mjs skyline-charles zakim  # a subset
  *   node qa/shoot.mjs --tag before           # suffix the filenames
+ *   node qa/shoot.mjs --tier high            # force a quality tier (default ultra)
  *   node qa/shoot.mjs --width 1920 --height 1080
  *
  * Exits non-zero if the app fails to boot or logs a WebGL/JS error, so the
@@ -33,6 +34,7 @@ const has = (n) => argv.includes(`--${n}`);
 const WIDTH = Number(flag('width', 1600));
 const HEIGHT = Number(flag('height', 900));
 const TAG = flag('tag', '');
+const TIER = flag('tier', 'ultra');
 const ONLY = argv.filter((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1]?.startsWith('--') !== true);
 
 function log(...a) { console.log('[qa]', ...a); }
@@ -104,7 +106,7 @@ async function main() {
   await page.evaluateOnNewDocument(() => {
     try { localStorage.setItem('bh-onboarded', '1'); } catch { /* private mode */ }
   });
-  await page.goto(`http://localhost:${PORT}/?q=ultra`, { waitUntil: 'networkidle2', timeout: 180000 });
+  await page.goto(`http://localhost:${PORT}/?q=${TIER}`, { waitUntil: 'networkidle2', timeout: 180000 });
   await page.waitForFunction('window.__ready === true', { timeout: 300000 });
   await page.waitForFunction('window.__debug !== undefined', { timeout: 30000 });
   log('app ready');
