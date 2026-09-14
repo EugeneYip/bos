@@ -1,0 +1,9 @@
+# Terrain heightfields and any other baked binary payloads must never be
+# treated as text — CRLF translation would silently corrupt Float32 data.
+*.bin        binary
+*.png        binary
+*.ktx2       binary
+*.glb        binary
+
+# Generated data: keep it out of diffs and language stats.
+public/data/**   linguist-generated=true -diff
