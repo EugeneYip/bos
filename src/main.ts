@@ -11,6 +11,7 @@ import { Buildings } from './world/Buildings';
 import { Landmarks } from './landmarks/Landmarks';
 import { Vegetation } from './world/Vegetation';
 import { Props } from './world/Props';
+import { Traffic } from './world/Traffic';
 import { Physics } from './physics/Physics';
 import { CameraRig } from './controls/CameraRig';
 import { Post } from './post/Post';
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
     new Landmarks(),
     new Vegetation(),
     new Props(),
+    new Traffic(),
     new Physics(),
     new CameraRig(),
     new Post(),
