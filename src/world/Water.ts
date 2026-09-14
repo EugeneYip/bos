@@ -11,6 +11,7 @@ import { buildWaterTextures, type WaterTextures } from './water/textures';
 import { PlanarReflection } from './water/reflection';
 import { WATER_VERT } from './water/shaders/water.vert';
 import { WATER_FRAG } from './water/shaders/water.frag';
+import { GpuTimer } from './water/timing';
 
 /**
  * The Charles, Boston Harbor, Fort Point Channel and every pond between.
@@ -44,6 +45,7 @@ export class Water implements WorldModule {
   private bodies: WaterBody[] = [];
   private time = 0;
   private reflectEnabled = false;
+  private timer: GpuTimer | null = null;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'water';
@@ -100,12 +102,23 @@ export class Water implements WorldModule {
       surf.chunks.map((g) => [g, this.material!] as [THREE.BufferGeometry, THREE.ShaderMaterial]);
     pieces.push([skirt, this.skirtMaterial]);
 
+    this.timer = new GpuTimer(ctx.renderer.getContext());
+
     for (const [g, mat] of pieces) {
       const mesh = new THREE.Mesh(g, mat);
       mesh.name = 'water:chunk';
       mesh.castShadow = false;
       mesh.receiveShadow = false; // shading is fully handled in the shader
       mesh.matrixAutoUpdate = false;
+      // One render order for every chunk keeps the whole surface contiguous
+      // in the opaque list: the city draws first and rejects most of the
+      // water's pixels on depth, and the GPU timer spans a single run of
+      // draws instead of the entire frame.
+      mesh.renderOrder = 6;
+      if (this.timer.supported) {
+        mesh.onBeforeRender = () => this.timer?.begin();
+        mesh.onAfterRender = () => this.timer?.end();
+      }
       this.root.add(mesh);
       this.meshes.push(mesh);
     }
@@ -117,7 +130,10 @@ export class Water implements WorldModule {
       `${(surf.triangles / 1000).toFixed(0)}k tris, reflections ${this.reflectEnabled ? 'on' : 'off'}`,
     );
 
+    this.material.uniforms.uDetail.value = ctx.quality.anisotropy >= 8 ? 1 : 0.55;
+
     ctx.on('quality-changed', () => {
+      this.material!.uniforms.uDetail.value = ctx.quality.anisotropy >= 8 ? 1 : 0.55;
       const want = ctx.quality.waterReflections;
       if (want === this.reflectEnabled) return;
       this.reflectEnabled = want;
@@ -170,17 +186,25 @@ export class Water implements WorldModule {
       uniforms: share ?? {
         uTime: { value: 0 },
         uSeaLevel: { value: SEA_LEVEL },
-        uWind: { value: new THREE.Vector2(0.72, -0.69) }, // prevailing WNW
-        uWaveAmp: { value: 1 },
-        uWaveCount: { value: ctx.quality.cloudSteps > 24 ? 6 : 4 },
+        // Boston's prevailing breeze is WNW; the vector is the direction the
+        // wind blows *toward*, so it runs out over the harbour to the ESE.
+        uWind: { value: new THREE.Vector2(0.82, 0.57) },
+        uWindSpeed: { value: 6.2 },
+        uGustiness: { value: 0.62 },
+        uWaveAmp: { value: 0.92 },
+        uPeak: { value: 0.42 },
+        uCellSize: { value: FIELD_TEXEL },
         uRippleGain: { value: 1 },
         uGlitter: { value: 1 },
         uFoamGain: { value: 1 },
+        uDetail: { value: 1 },
+        uNight: { value: 0 },
 
         uFieldDist: { value: field.distTex },
         uFieldAux: { value: field.auxTex },
         uFieldOrigin: { value: new THREE.Vector2(field.x0, field.z0) },
         uFieldInvSize: { value: new THREE.Vector2(1 / (field.w * field.ts), 1 / (field.h * field.ts)) },
+        uFieldTexel: { value: field.ts },
 
         uWaves: { value: tex.waves },
         uNoise: { value: tex.noise },
@@ -199,17 +223,27 @@ export class Water implements WorldModule {
         // murkier still and tannin-stained. Neither is anywhere near blue.
         uAbsorbA: { value: new THREE.Vector3(0.62, 0.22, 0.48) },  // harbour
         uAbsorbB: { value: new THREE.Vector3(0.95, 0.44, 1.10) },  // river
-        uScatterA: { value: new THREE.Color(0.055, 0.135, 0.115) },
-        uScatterB: { value: new THREE.Color(0.070, 0.105, 0.062) },
-        uBedA: { value: new THREE.Color(0.10, 0.10, 0.09) },
-        uBedB: { value: new THREE.Color(0.13, 0.12, 0.08) },
+        // Nothing here is Caribbean. The harbour's backscatter is an olive
+        // green with a real red component from suspended silt — drop the red
+        // and it immediately reads as a tropical lagoon.
+        uScatterA: { value: new THREE.Color(0.052, 0.082, 0.058) },
+        uScatterB: { value: new THREE.Color(0.064, 0.072, 0.034) },
+        uBedA: { value: new THREE.Color(0.085, 0.088, 0.076) },
+        uBedB: { value: new THREE.Color(0.072, 0.066, 0.041) },
+        // The shallow margin: mud stirred by the tide in the harbour, peat
+        // and tannin along the Charles. This band is most of what tells you
+        // the channel is deep and the edge is not.
+        uSiltA: { value: new THREE.Color(0.150, 0.138, 0.104) },
+        uSiltB: { value: new THREE.Color(0.146, 0.116, 0.062) },
         uFoamColor: { value: new THREE.Color(0.88, 0.90, 0.90) },
 
         uReflMap: { value: this.reflection?.target.texture ?? null },
         uReflMatrix: { value: this.reflection?.textureMatrix ?? new THREE.Matrix4() },
         uReflStrength: { value: this.reflectEnabled ? 1 : 0 },
         uReflMaxLod: { value: 0 },
-        uReflDistort: { value: new THREE.Vector2(0.035, 0.11) },
+        uReflBlur: { value: 9 },
+        uReflSmear: { value: 1 },
+        uReflDistort: { value: new THREE.Vector2(0.030, 0.085) },
         uHorizonFade: { value: new THREE.Vector2(4200, 17000) },
       },
     });
@@ -226,8 +260,21 @@ export class Water implements WorldModule {
     const m = this.material;
     if (!m) return;
 
+    this.timer?.poll();
+    this.timer?.beginFrame();
+
     this.time += dt;
     m.uniforms.uTime.value = this.time;
+
+    // The breeze is not constant. Two slow, incommensurate cycles move the
+    // wind through ~40 degrees and the gust fronts in and out over a couple
+    // of minutes, which is what stops a long look at the river from feeling
+    // like a looping texture.
+    const swing = Math.sin(this.time * 0.021) * 0.30 + Math.sin(this.time * 0.0071) * 0.14;
+    const base = Math.atan2(0.57, 0.82);
+    m.uniforms.uWind.value.set(Math.cos(base + swing), Math.sin(base + swing));
+    m.uniforms.uWindSpeed.value = 5.4 + 2.1 * (0.5 + 0.5 * Math.sin(this.time * 0.013));
+    m.uniforms.uGustiness.value = 0.50 + 0.22 * (0.5 + 0.5 * Math.sin(this.time * 0.0093 + 1.1));
 
     // Track the sky so the water is lit by the same sun and the same
     // atmosphere the rest of the city sees.
@@ -242,16 +289,21 @@ export class Water implements WorldModule {
     const day = THREE.MathUtils.clamp((elev + 0.1) / 0.5, 0, 1);
     const dusk = THREE.MathUtils.clamp(1 - Math.abs(elev) / 0.16, 0, 1);
 
+    // Calibrated against the rendered dome: water may never come out brighter
+    // than the sky above it, and at grazing angles Fresnel alone reaches 0.7,
+    // so the authored radiance has to sit *below* what the atmosphere pass
+    // actually puts on screen. Overshoot here and the harbour turns into a
+    // sheet of white paper, which is the single easiest way to lose it.
     m.uniforms.uSkyZenith.value
-      .setRGB(0.030, 0.065, 0.18)
-      .lerp(new THREE.Color(0.10, 0.26, 0.66), day);
+      .setRGB(0.020, 0.045, 0.125)
+      .lerp(new THREE.Color(0.062, 0.160, 0.420), day);
     m.uniforms.uSkyHorizon.value
-      .setRGB(0.035, 0.055, 0.11)
-      .lerp(new THREE.Color(0.50, 0.64, 0.82), day)
+      .setRGB(0.024, 0.038, 0.075)
+      .lerp(new THREE.Color(0.325, 0.420, 0.545), day)
       // Sunset spills warm light along the horizon, which is most of what a
       // low camera over the Charles actually sees reflected.
       // Sunset warms the horizon, but only briefly and never to orange paint.
-      .lerp(new THREE.Color(0.85, 0.47, 0.26), dusk * 0.32);
+      .lerp(new THREE.Color(0.62, 0.34, 0.18), dusk * 0.38);
     m.uniforms.uSkyAmbient.value
       .setRGB(0.020, 0.030, 0.055)
       .lerp(new THREE.Color(0.30, 0.40, 0.55), day);
@@ -266,9 +318,21 @@ export class Water implements WorldModule {
     const comp = 2.5 / Math.max(expo, 0.1);
 
     // At night the brightest thing the Charles can reflect is the city.
+    const night = 1 - THREE.MathUtils.smoothstep(elev, -0.02, 0.12);
+    m.uniforms.uNight.value = night;
     m.uniforms.uCityGlow.value
       .setRGB(0.95, 0.62, 0.30)
       .multiplyScalar((1 - day * 0.9) * comp);
+
+    // A low sun rakes the surface, so the glitter path has to be long and the
+    // reflected city has to smear vertically; overhead there is nothing to
+    // smear. Dawn and the golden hour are the two moments the water earns
+    // its keep, and both are grazing-angle events.
+    const graze = 1 - THREE.MathUtils.clamp(Math.abs(elev) / 0.6, 0, 1);
+    m.uniforms.uGlitter.value = 0.8 + 1.5 * graze * graze;
+    m.uniforms.uReflSmear.value = 0.55 + 0.75 * night;
+    // Crests sharpen as the wind gets up, and a low sun shows the asymmetry.
+    m.uniforms.uPeak.value = 0.30 + 0.22 * graze;
 
     if (ctx.envMap && !this.envBound) {
       this.envBound = true;
@@ -290,8 +354,12 @@ export class Water implements WorldModule {
 
     if (this.reflection && this.reflectEnabled) {
       m.uniforms.uReflMaxLod.value = this.reflection.maxLod;
+      this.timer?.begin();
       this.reflection.render(ctx.renderer, ctx.scene, ctx.camera, SEA_LEVEL, this.root);
+      this.timer?.end();
     }
+
+    if (this.timer?.supported) ctx.stats['water.ms'] = Number(this.timer.ms.toFixed(2));
   }
 
   resize(width: number, height: number): void {
@@ -306,6 +374,7 @@ export class Water implements WorldModule {
     this.textures?.dispose();
     this.field?.dispose();
     this.reflection?.dispose();
+    this.timer?.dispose();
     this.meshes.length = 0;
   }
 }

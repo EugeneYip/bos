@@ -218,7 +218,7 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
 
   // Torso and head are white so the per-instance tint becomes the clothing.
   parts.push(tag(box(0.34, 0.52, 0.22, 0, 1.18), 0, 0xffffff));
-  parts.push(tag(box(0.19, 0.20, 0.19, 0, 1.54), 0, 0xd8a986));   // head
+  parts.push(tag(box(0.19, 0.20, 0.19, 0, 1.54), 0, 0xf4d8bd));   // head
   // Arms swing opposite the legs, so they get a negative stride.
   for (const z of [-0.22, 0.22]) {
     const arm = box(0.11, 0.44, 0.11, 0, 1.18, z);
@@ -227,14 +227,20 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
   // Legs, hinged at the hip: stride +1 / -1 so they alternate.
   for (const z of [-0.09, 0.09]) {
     const leg = box(0.13, 0.62, 0.14, 0, 0.56, z);
-    parts.push(tag(leg, z > 0 ? 1 : -1, 0x2d3138));
+    parts.push(tag(leg, z > 0 ? 1 : -1, 0x6b7078));
   }
   return merge(parts)!;
 }
 
-/** Clothing colours: Boston dresses in dark neutrals most of the year. */
+/**
+ * Clothing colours. Boston does dress in dark neutrals, but the per-instance
+ * tint multiplies the whole figure including the head, so a palette of true
+ * charcoals rendered everyone as a black cut-out. These are the same hues
+ * lifted into a range that still reads as a coat once the sun and the
+ * tonemapper have had their way with it.
+ */
 export const CLOTHES: number[] = [
-  0x2b2f36, 0x2b2f36, 0x1d2026, 0x3b4048, 0x55585e,
-  0x6d4b3a, 0x8a8f96, 0xb9bcc0, 0x2f4a5e, 0x5d2b2f,
-  0x35543f, 0xc9c4b8, 0x7a6f8a,
+  0x4a5058, 0x5a6169, 0x3e444c, 0x6f757d, 0x8a9098,
+  0x9a5f46, 0xa8adb4, 0xc6c9cd, 0x466f8c, 0x7d4247,
+  0x4e7257, 0xd6d1c4, 0x8f84a2, 0xb5754a, 0x5f7f9c,
 ];

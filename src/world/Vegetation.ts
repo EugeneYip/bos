@@ -1,248 +1,362 @@
 import * as THREE from 'three';
 import type { Ctx, WorldModule } from '../core/Context';
-import type { PropSet } from '../core/types';
-import { loadProps } from '../core/data';
+import type { AreaRecord, PropSet, RoadRecord } from '../core/types';
+import { loadAreas, loadProps, loadRoads } from '../core/data';
 import { SPECIES, autumnFactor } from './vegetation/species';
-import { buildTreeLods } from './vegetation/geometry';
+import { buildTreeLods, type TreeGeometry } from './vegetation/geometry';
+import { createSharedUniforms, createVegMaterial, type Lod, type SharedUniforms } from './vegetation/material';
+import { buildTextures, disposeTextures, type VegTextures } from './vegetation/textures';
+import { LandMask } from './vegetation/landmask';
+import { buildTreeField, type TreeField } from './vegetation/placement';
+import { GroundCover } from './vegetation/groundcover';
 
 /**
- * Boston's 88,226 trees.
+ * Boston's 88 226 trees, plus the grass, shrubs and hedge lines underneath
+ * them.
  *
- * Strategy: every tree is always present in a per-species impostor
- * `InstancedMesh` built once and never touched again. The nearest
- * `quality.treeBudget` trees are *additionally* drawn with real geometry, and
- * the two cross-fade against each other in the shader by camera distance, so
- * there is no popping and no per-frame buffer churn for the 88k far set.
+ * ## Tiers
  *
- * The near set is rebuilt only when the camera has moved far enough to matter,
- * which keeps the cost off the frame budget.
+ * Every tree is always present as an **impostor** — crossed billboards plus a
+ * horizontal canopy card, carrying a painted silhouette of its own species.
+ * Those are written once at load and never touched again, and they are split
+ * into a 4x4 grid of regional meshes so the renderer can frustum-cull whole
+ * districts instead of transforming the entire city every frame.
+ *
+ * The trees nearest the camera are *additionally* drawn with real geometry —
+ * a branch armature plus alpha-tested foliage cards (`vegetation/geometry.ts`)
+ * — in a **near** and a **mid** tier whose instance buffers are refilled only
+ * when the camera has moved far enough to matter. All three tiers cross-fade
+ * against each other with a screen-door dither, so nothing pops, nothing is
+ * alpha-blended, and no buffer churn lands on the frame budget.
+ *
+ * Refilling walks a CSR spatial grid in order of increasing distance, so a
+ * rebuild touches a few thousand trees rather than all 88 000, and the nearest
+ * trees win the budget when it runs out.
+ *
+ * ## Draw calls
+ *
+ * Bark and foliage need different materials (one opaque, one alpha-tested), so
+ * each tier's geometry carries two groups and one `InstancedMesh` issues two
+ * draws. That is 6 species x 2 tiers x 2 roles = 24 for the detailed tiers,
+ * plus whichever impostor tiles are on screen, plus two for ground cover.
  */
 
-const REBUILD_DISTANCE = 40; // metres of camera travel before re-bucketing
+const REBUILD_MOVE = 28;
 
 interface Tier {
   mesh: THREE.InstancedMesh;
-  material: THREE.MeshStandardMaterial;
+  materials: THREE.Material[];
 }
+
+interface SpeciesTier {
+  near: Tier;
+  mid: Tier;
+  far: Tier[];
+  nearCap: number;
+  midCap: number;
+}
+
+/** Tier reach, metres. The near tier has to cover a street; the mid, a park. */
+const NEAR_RADIUS = 90;
+const MID_RADIUS = 270;
+const FADE_BAND = 28;
+const GRID_CELL = 64;
+const FAR_TILES = 4;
 
 export class Vegetation implements WorldModule {
   readonly name = 'Vegetation';
+
   private root = new THREE.Group();
-  private far: Tier[] = [];
-  private near: Tier[] = [];
-  private mid: Tier[] = [];
-  /** Per species: indices into the flat tree arrays. */
-  private bySpecies: Uint32Array[] = [];
-  private pos = new Float32Array(0);
-  private scale = new Float32Array(0);
-  private rot = new Float32Array(0);
-  private count = 0;
+  private tiers: SpeciesTier[] = [];
+  private field?: TreeField;
+  private mask = new LandMask();
+  private textures?: VegTextures;
+  private shared: SharedUniforms = createSharedUniforms();
+  private ground?: GroundCover;
+
+  /** CSR spatial index over every tree. */
+  private gx = 0;
+  private gz = 0;
+  private gMinX = 0;
+  private gMinZ = 0;
+  private cellStart = new Int32Array(0);
+  private cellItems = new Uint32Array(0);
+  /** (di, dj) cell offsets within MID_RADIUS, sorted near to far. */
+  private cellOrder = new Int32Array(0);
+
   private lastRebuild = new THREE.Vector3(1e9, 1e9, 1e9);
-  private uniforms: { value: number }[] = [];
-  private windTime = { value: 0 };
-  private season = { value: 0 };
+  private nearTotal = 0;
+  private midTotal = 0;
+  private drawnNear = 0;
+  private drawnMid = 0;
+  private buildMs = 0;
+  private updateMs = 0;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'vegetation';
     ctx.scene.add(this.root);
+    const t0 = performance.now();
 
     let sets: PropSet[] = [];
+    let areas: AreaRecord[] = [];
+    let roads: RoadRecord[] = [];
     try {
-      sets = await loadProps();
+      [sets, areas, roads] = await Promise.all([loadProps(), loadAreas(), loadRoads()]);
     } catch (err) {
-      console.warn('[Vegetation] no prop data; skipping', err);
+      console.warn('[Vegetation] data unavailable; skipping', err);
       return;
     }
-    const trees = sets.filter((s) => s.kind === 'tree');
-    if (!trees.length) return;
+    if (!sets.some((s) => s.kind === 'tree')) return;
 
-    // Flatten every tree shard into one columnar buffer.
-    this.count = trees.reduce((n, s) => n + s.positions.length / 3, 0);
-    this.pos = new Float32Array(this.count * 3);
-    this.scale = new Float32Array(this.count);
-    this.rot = new Float32Array(this.count);
-    const variant = new Uint8Array(this.count);
+    const tMask = performance.now();
+    this.mask.build(areas, roads);
+    const tField = performance.now();
 
-    let w = 0;
-    for (const s of trees) {
-      const n = s.positions.length / 3;
-      for (let i = 0; i < n; i++, w++) {
-        this.pos[w * 3] = s.positions[i * 3];
-        this.pos[w * 3 + 1] = s.positions[i * 3 + 1];
-        this.pos[w * 3 + 2] = s.positions[i * 3 + 2];
-        this.scale[w] = s.scales[i] ?? 1;
-        this.rot[w] = s.rotations[i] ?? 0;
-        variant[w] = (s.variants?.[i] ?? 0) % SPECIES.length;
-      }
-    }
+    this.field = buildTreeField(sets, {
+      mask: this.mask,
+      sampleHeight: ctx.sampleHeight,
+      infill: true,
+      clump: true,
+    });
+    const field = this.field;
+    const tTex = performance.now();
 
-    // Bucket indices by species so each gets its own instanced mesh.
-    const counts = new Array(SPECIES.length).fill(0);
-    for (let i = 0; i < this.count; i++) counts[variant[i]]++;
-    this.bySpecies = counts.map((c) => new Uint32Array(c));
-    const cursor = new Array(SPECIES.length).fill(0);
-    for (let i = 0; i < this.count; i++) {
-      const v = variant[i];
-      this.bySpecies[v][cursor[v]++] = i;
-    }
+    const aniso = Math.min(ctx.quality.anisotropy, ctx.renderer.capabilities.getMaxAnisotropy());
+    const hiRes = ctx.tier === 'high' || ctx.tier === 'ultra';
+    this.textures = buildTextures(SPECIES, aniso, hiRes);
+    const tex = this.textures;
+    const tGeo = performance.now();
 
-    this.season.value = autumnFactor(ctx.dayOfYear);
+    this.buildGrid(field);
 
+    // Tier budgets. Near geometry is ~430 triangles a tree and mid ~80, so the
+    // near tier is deliberately the smaller of the two.
     const budget = ctx.quality.treeBudget;
+    this.nearTotal = THREE.MathUtils.clamp(Math.round(budget * 0.05), 400, 2600);
+    this.midTotal = THREE.MathUtils.clamp(Math.round(budget * 0.16), 1600, 9000);
+    const nearCap = Math.ceil((this.nearTotal / SPECIES.length) * 1.9);
+    const midCap = Math.ceil((this.midTotal / SPECIES.length) * 1.9);
+
+    let tris = 0;
     for (let s = 0; s < SPECIES.length; s++) {
       const sp = SPECIES[s];
-      const lods = buildTreeLods(sp);
-      const total = this.bySpecies[s].length;
+      const lods = buildTreeLods(sp, 1009 + s * 7717);
+      tris += lods.near.triangles;
 
-      // Far impostors: all of them, filled once.
-      const farTier = this.makeTier(ctx, sp, lods.far, total, 'far');
-      this.fillAll(farTier.mesh, this.bySpecies[s]);
-      this.far.push(farTier);
-
-      // Near + mid: capped, refilled on camera movement.
-      const cap = Math.min(total, Math.max(64, Math.round((budget * total) / this.count)));
-      this.near.push(this.makeTier(ctx, sp, lods.near, cap, 'near'));
-      this.mid.push(this.makeTier(ctx, sp, lods.mid, Math.min(total, cap * 3), 'mid'));
-
+      const near = this.makeTier(ctx, s, lods.near, 'near', nearCap);
+      const mid = this.makeTier(ctx, s, lods.mid, 'mid', midCap);
+      const far = this.makeFarTiles(ctx, s, lods.far);
+      this.tiers.push({ near, mid, far, nearCap, midCap });
+      // Yield so the loading bar keeps painting while the crowns are built.
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    this.rebuild(ctx);
-    ctx.stats.trees = this.count;
-    console.info(`[Vegetation] ${this.count} trees, ${SPECIES.length} species, budget ${budget}`);
+    this.ground = new GroundCover(this.mask, this.root);
+    this.ground.build(ctx, this.shared, tex.grass, tex.shrub);
 
-    ctx.on('quality-changed', () => { this.lastRebuild.set(1e9, 1e9, 1e9); });
+    this.shared.season.value = autumnFactor(ctx.dayOfYear);
+    this.rebuild(ctx);
+    this.ground.rebuild(ctx);
+
+    this.buildMs = performance.now() - t0;
+    ctx.stats.trees = field.count;
+    console.info(
+      `[Vegetation] ${field.count} trees (${field.stats.street} street, ${field.stats.park} park, `
+      + `${field.stats.forest} woodland, ${field.stats.lawn} lawn, +${field.stats.infill} infill), `
+      + `${this.mask.greenCells} green cells, near≤${this.nearTotal} mid≤${this.midTotal}, `
+      + `${Math.round(tris / SPECIES.length)} tris/near tree | `
+      + `load ${(tMask - t0) | 0}ms mask ${(tField - tMask) | 0}ms place ${(tTex - tField) | 0}ms `
+      + `tex ${(tGeo - tTex) | 0}ms geo+mesh ${(performance.now() - tGeo) | 0}ms`,
+    );
+
+    ctx.on('quality-changed', () => {
+      this.lastRebuild.set(1e9, 1e9, 1e9);
+      this.ground?.invalidate();
+    });
   }
 
-  /** One instanced mesh for a (species, lod) pair, with the shared tree shader. */
-  private makeTier(
-    ctx: Ctx,
-    sp: (typeof SPECIES)[number],
-    geo: THREE.BufferGeometry,
-    capacity: number,
-    lod: 'near' | 'mid' | 'far',
-  ): Tier {
-    const material = new THREE.MeshStandardMaterial({
-      name: `tree:${sp.name}:${lod}`,
-      color: 0xffffff,
-      roughness: 0.86,
-      metalness: 0,
-      side: THREE.DoubleSide,
-      // Impostors are flat cards; flat shading would make them read as cards.
-      flatShading: false,
-    });
+  // -------------------------------------------------------------------------
 
-    // Cross-fade window, in metres. The near tier owns 0..fadeNear, mid owns
-    // the middle, and the impostors take over beyond fadeFar.
-    const fadeIn = { value: lod === 'near' ? -1 : lod === 'mid' ? 70 : 300 };
-    const fadeOut = { value: lod === 'near' ? 110 : lod === 'mid' ? 380 : 1e9 };
-    this.uniforms.push(fadeIn, fadeOut);
+  private materialsFor(ctx: Ctx, s: number, lod: Lod, tg: TreeGeometry): THREE.Material[] {
+    const sp = SPECIES[s];
+    const tex = this.textures!;
+    // Every tree lives in exactly one of near/mid, so those two never need to
+    // fade against each other — only against the impostor, which holds *all*
+    // of them. Hence: near and mid are simply on; the impostor fades in over
+    // the last band of the mid tier's reach, with the complementary dither.
+    const fade = {
+      near: { in: -1e6, out: 1e9 },
+      mid: { in: -1e6, out: MID_RADIUS },
+      far: { in: MID_RADIUS - FADE_BAND, out: 1e9 },
+    }[lod];
 
-    const summer = new THREE.Color(sp.summer).convertSRGBToLinear();
-    const autumn = new THREE.Color(sp.autumn).convertSRGBToLinear();
-    const bark = new THREE.Color(sp.bark).convertSRGBToLinear();
+    const leaf = createVegMaterial({
+      species: sp,
+      lod,
+      role: 'leaf',
+      map: lod === 'far' ? tex.impostor[s] : tex.leaf[s],
+      shared: this.shared,
+      fadeIn: fade.in,
+      fadeOut: fade.out,
+      fadeBand: FADE_BAND,
+      envMapIntensity: lod === 'far' ? 1.5 : 1.15,
+    }).material;
+    void ctx;
 
-    material.onBeforeCompile = (shader) => {
-      shader.uniforms.uWindTime = this.windTime;
-      shader.uniforms.uSeason = this.season;
-      shader.uniforms.uFadeIn = fadeIn;
-      shader.uniforms.uFadeOut = fadeOut;
-      shader.uniforms.uSummer = { value: summer };
-      shader.uniforms.uAutumn = { value: autumn };
-      shader.uniforms.uBark = { value: bark };
-      shader.uniforms.uSway = { value: sp.sway };
-      shader.uniforms.uBillboard = { value: lod === 'far' ? 1 : 0 };
+    if (!tg.twoGroups) return [leaf];
 
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', /* glsl */ `
-          #include <common>
-          attribute float foliage;
-          uniform float uWindTime;
-          uniform float uSway;
-          uniform float uBillboard;
-          varying float vFoliage;
-          varying float vFade;
-          uniform float uFadeIn;
-          uniform float uFadeOut;
-        `)
-        .replace('#include <begin_vertex>', /* glsl */ `
-          #include <begin_vertex>
-          vFoliage = foliage;
+    const bark = createVegMaterial({
+      species: sp,
+      lod,
+      role: 'bark',
+      map: tex.bark.get(sp.bark)!,
+      shared: this.shared,
+      fadeIn: fade.in,
+      fadeOut: fade.out,
+      fadeBand: FADE_BAND,
+      envMapIntensity: 1,
+    }).material;
+    return [bark, leaf];
+  }
 
-          // Instance origin in world space, used for the wind phase and for
-          // the distance fade. instanceMatrix's translation is that origin.
-          vec3 iOrigin = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-
-          // Wind: two frequencies, phase-shifted per tree by its position so
-          // the canopy doesn't pulse in unison across the city.
-          float phase = iOrigin.x * 0.07 + iOrigin.z * 0.053;
-          float gust = sin(uWindTime * 0.55 + phase) * 0.62
-                     + sin(uWindTime * 1.53 + phase * 2.3) * 0.28;
-          // Only the crown moves, and more the higher up it sits.
-          float lever = foliage * smoothstep(0.0, 1.0, transformed.y);
-          transformed.x += gust * lever * 0.085 * uSway;
-          transformed.z += gust * lever * 0.055 * uSway;
-
-          if (uBillboard > 0.5) {
-            // Yaw the impostor toward the camera, keeping it upright.
-            vec3 toCam = cameraPosition - iOrigin;
-            float a = atan(toCam.x, toCam.z);
-            float c = cos(a), s = sin(a);
-            transformed.xz = mat2(c, -s, s, c) * transformed.xz;
-          }
-
-          float dist = distance(cameraPosition, iOrigin);
-          vFade = smoothstep(uFadeIn, uFadeIn + 45.0, dist)
-                * (1.0 - smoothstep(uFadeOut - 45.0, uFadeOut, dist));
-        `);
-
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', /* glsl */ `
-          #include <common>
-          varying float vFoliage;
-          varying float vFade;
-          uniform float uSeason;
-          uniform vec3 uSummer;
-          uniform vec3 uAutumn;
-          uniform vec3 uBark;
-        `)
-        .replace('#include <color_fragment>', /* glsl */ `
-          #include <color_fragment>
-          // Autumn turn varies tree to tree, so the canopy is never uniform.
-          float turn = clamp(uSeason * (0.55 + 0.9 * vInstanceJitter), 0.0, 1.0);
-          vec3 leaf = mix(uSummer, uAutumn, turn);
-          diffuseColor.rgb *= mix(uBark, leaf, vFoliage) * (0.82 + 0.36 * vInstanceJitter);
-        `)
-        .replace('#include <dithering_fragment>', /* glsl */ `
-          #include <dithering_fragment>
-          // Fade between LOD tiers with a screen-door dither: alpha blending
-          // 88k instances would cost far more and sort badly.
-          float d = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-          if (vFade < d) discard;
-        `);
-
-      // Per-instance variation, threaded from an instanced attribute.
-      shader.vertexShader = shader.vertexShader
-        .replace('attribute float foliage;', 'attribute float foliage;\nattribute float instanceJitter;\nvarying float vInstanceJitter;')
-        .replace('vFoliage = foliage;', 'vFoliage = foliage;\n          vInstanceJitter = instanceJitter;');
-      shader.fragmentShader = shader.fragmentShader
-        .replace('varying float vFoliage;', 'varying float vFoliage;\nvarying float vInstanceJitter;');
-    };
-    material.customProgramCacheKey = () => `tree-${sp.name}-${lod}`;
-
-    const mesh = new THREE.InstancedMesh(geo, material, capacity);
-    mesh.name = `trees:${sp.name}:${lod}`;
-    mesh.castShadow = lod !== 'far';
-    mesh.receiveShadow = true;
-    mesh.frustumCulled = false; // we cull by tier/budget instead
+  private makeTier(ctx: Ctx, s: number, tg: TreeGeometry, lod: Lod, capacity: number): Tier {
+    const materials = this.materialsFor(ctx, s, lod, tg);
+    const mesh = new THREE.InstancedMesh(
+      tg.geometry,
+      materials.length === 1 ? materials[0] : materials,
+      capacity,
+    );
+    mesh.name = `trees:${SPECIES[s].name}:${lod}`;
+    mesh.frustumCulled = false; // budgeted by distance instead
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.count = 0;
-
-    const jitter = new Float32Array(capacity);
-    for (let i = 0; i < capacity; i++) jitter[i] = Math.random();
-    geo.setAttribute('instanceJitter', new THREE.InstancedBufferAttribute(jitter, 1));
-
+    mesh.userData.noShadow = true;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     this.root.add(mesh);
-    return { mesh, material };
+    return { mesh, materials };
+  }
+
+  /**
+   * Impostors, split into a 4x4 grid of regional meshes. One mesh holding all
+   * 88 000 would have a city-sized bounding sphere and could never be culled;
+   * split, the renderer skips every district behind the camera.
+   */
+  private makeFarTiles(ctx: Ctx, s: number, tg: TreeGeometry): Tier[] {
+    const field = this.field!;
+    const idx = field.bySpecies[s];
+    const materials = this.materialsFor(ctx, s, 'far', tg);
+
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < field.count; i++) {
+      if (field.px[i] < minX) minX = field.px[i];
+      if (field.px[i] > maxX) maxX = field.px[i];
+      if (field.pz[i] < minZ) minZ = field.pz[i];
+      if (field.pz[i] > maxZ) maxZ = field.pz[i];
+    }
+    const spanX = Math.max(1, maxX - minX);
+    const spanZ = Math.max(1, maxZ - minZ);
+    const tileOf = (i: number): number => {
+      const tx = Math.min(FAR_TILES - 1, Math.floor(((field.px[i] - minX) / spanX) * FAR_TILES));
+      const tz = Math.min(FAR_TILES - 1, Math.floor(((field.pz[i] - minZ) / spanZ) * FAR_TILES));
+      return tz * FAR_TILES + tx;
+    };
+
+    const counts = new Int32Array(FAR_TILES * FAR_TILES);
+    for (let k = 0; k < idx.length; k++) counts[tileOf(idx[k])]++;
+
+    const out: Tier[] = [];
+    const cursor = new Int32Array(FAR_TILES * FAR_TILES);
+    const meshes: (THREE.InstancedMesh | null)[] = new Array(FAR_TILES * FAR_TILES).fill(null);
+    for (let t = 0; t < counts.length; t++) {
+      if (!counts[t]) continue;
+      const mesh = new THREE.InstancedMesh(
+        tg.geometry,
+        materials.length === 1 ? materials[0] : materials,
+        counts[t],
+      );
+      mesh.name = `trees:${SPECIES[s].name}:far:${t}`;
+      mesh.userData.noShadow = true;
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      mesh.count = counts[t];
+      meshes[t] = mesh;
+      this.root.add(mesh);
+      out.push({ mesh, materials });
+    }
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const p = new THREE.Vector3();
+    const sc = new THREE.Vector3();
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k];
+      const t = tileOf(i);
+      const mesh = meshes[t];
+      if (!mesh) continue;
+      const h = field.height[i];
+      const w = field.width[i] * h;
+      p.set(field.px[i], field.py[i], field.pz[i]);
+      sc.set(w, h, w);
+      // No yaw: the shader spins the billboard to face the camera itself, and
+      // an instance rotation would fight it.
+      m.compose(p, q, sc);
+      mesh.setMatrixAt(cursor[t]++, m);
+    }
+    for (const mesh of meshes) {
+      if (!mesh) continue;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
+
+  private buildGrid(field: TreeField): void {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < field.count; i++) {
+      if (field.px[i] < minX) minX = field.px[i];
+      if (field.px[i] > maxX) maxX = field.px[i];
+      if (field.pz[i] < minZ) minZ = field.pz[i];
+      if (field.pz[i] > maxZ) maxZ = field.pz[i];
+    }
+    this.gMinX = minX;
+    this.gMinZ = minZ;
+    this.gx = Math.max(1, Math.ceil((maxX - minX) / GRID_CELL) + 1);
+    this.gz = Math.max(1, Math.ceil((maxZ - minZ) / GRID_CELL) + 1);
+
+    const n = this.gx * this.gz;
+    const counts = new Int32Array(n + 1);
+    const cellOf = (i: number): number => {
+      const ci = Math.min(this.gx - 1, Math.max(0, ((field.px[i] - minX) / GRID_CELL) | 0));
+      const cj = Math.min(this.gz - 1, Math.max(0, ((field.pz[i] - minZ) / GRID_CELL) | 0));
+      return cj * this.gx + ci;
+    };
+    for (let i = 0; i < field.count; i++) counts[cellOf(i) + 1]++;
+    for (let c = 0; c < n; c++) counts[c + 1] += counts[c];
+    this.cellStart = counts;
+    this.cellItems = new Uint32Array(field.count);
+    const cursor = counts.slice(0, n);
+    for (let i = 0; i < field.count; i++) this.cellItems[cursor[cellOf(i)]++] = i;
+
+    // Cell offsets covering the mid radius, visited nearest first so the
+    // budget always goes to the trees you can actually see.
+    const reach = Math.ceil(MID_RADIUS / GRID_CELL) + 1;
+    const offs: { d: number; di: number; dj: number }[] = [];
+    for (let dj = -reach; dj <= reach; dj++) {
+      for (let di = -reach; di <= reach; di++) {
+        const d = Math.hypot(Math.max(0, Math.abs(di) - 1), Math.max(0, Math.abs(dj) - 1)) * GRID_CELL;
+        if (d > MID_RADIUS) continue;
+        offs.push({ d, di, dj });
+      }
+    }
+    offs.sort((a, b) => a.d - b.d);
+    this.cellOrder = new Int32Array(offs.length * 2);
+    for (let k = 0; k < offs.length; k++) {
+      this.cellOrder[k * 2] = offs[k].di;
+      this.cellOrder[k * 2 + 1] = offs[k].dj;
+    }
   }
 
   private static _m = new THREE.Matrix4();
@@ -251,68 +365,110 @@ export class Vegetation implements WorldModule {
   private static _p = new THREE.Vector3();
   private static _s = new THREE.Vector3();
 
-  private write(mesh: THREE.InstancedMesh, slot: number, tree: number): void {
-    const sp = SPECIES[0];
-    void sp;
-    const h = this.scale[tree];
-    Vegetation._p.set(this.pos[tree * 3], this.pos[tree * 3 + 1], this.pos[tree * 3 + 2]);
-    Vegetation._q.setFromAxisAngle(Vegetation._up, this.rot[tree]);
-    Vegetation._s.setScalar(h);
+  private write(field: TreeField, mesh: THREE.InstancedMesh, slot: number, i: number): void {
+    const h = field.height[i];
+    const w = field.width[i] * h;
+    Vegetation._p.set(field.px[i], field.py[i], field.pz[i]);
+    Vegetation._q.setFromAxisAngle(Vegetation._up, field.rot[i]);
+    Vegetation._s.set(w, h, w);
     Vegetation._m.compose(Vegetation._p, Vegetation._q, Vegetation._s);
     mesh.setMatrixAt(slot, Vegetation._m);
   }
 
-  private fillAll(mesh: THREE.InstancedMesh, idx: Uint32Array): void {
-    const n = Math.min(idx.length, mesh.instanceMatrix.count);
-    for (let i = 0; i < n; i++) this.write(mesh, i, idx[i]);
-    mesh.count = n;
-    mesh.instanceMatrix.needsUpdate = true;
-  }
-
-  /** Refill the near/mid tiers with the trees closest to the camera. */
+  /** Refill the near and mid tiers with the trees closest to the camera. */
   private rebuild(ctx: Ctx): void {
+    const field = this.field;
+    if (!field) return;
     const cam = ctx.camera.position;
-    for (let s = 0; s < SPECIES.length; s++) {
-      const idx = this.bySpecies[s];
-      const nearMesh = this.near[s].mesh;
-      const midMesh = this.mid[s].mesh;
-      const nearCap = nearMesh.instanceMatrix.count;
-      const midCap = midMesh.instanceMatrix.count;
-      let nn = 0;
-      let nm = 0;
-      // One linear pass with distance thresholds rather than a full sort:
-      // the fade windows make exact ordering unnecessary.
-      for (let i = 0; i < idx.length; i++) {
-        const t = idx[i];
-        const dx = this.pos[t * 3] - cam.x;
-        const dz = this.pos[t * 3 + 2] - cam.z;
+    const ci = Math.floor((cam.x - this.gMinX) / GRID_CELL);
+    const cj = Math.floor((cam.z - this.gMinZ) / GRID_CELL);
+
+    const nearN = new Int32Array(SPECIES.length);
+    const midN = new Int32Array(SPECIES.length);
+    let nearLeft = this.nearTotal;
+    let midLeft = this.midTotal;
+    const nearR2 = NEAR_RADIUS * NEAR_RADIUS;
+    const midR2 = MID_RADIUS * MID_RADIUS;
+
+    for (let k = 0; k < this.cellOrder.length && (nearLeft > 0 || midLeft > 0); k += 2) {
+      const i = ci + this.cellOrder[k];
+      const j = cj + this.cellOrder[k + 1];
+      if (i < 0 || j < 0 || i >= this.gx || j >= this.gz) continue;
+      const c = j * this.gx + i;
+      const end = this.cellStart[c + 1];
+      for (let e = this.cellStart[c]; e < end; e++) {
+        const t = this.cellItems[e];
+        const dx = field.px[t] - cam.x;
+        const dz = field.pz[t] - cam.z;
         const d2 = dx * dx + dz * dz;
-        if (d2 < 115 * 115 && nn < nearCap) this.write(nearMesh, nn++, t);
-        else if (d2 < 385 * 385 && nm < midCap) this.write(midMesh, nm++, t);
+        if (d2 > midR2) continue;
+        const s = field.species[t];
+        const tier = this.tiers[s];
+        if (d2 < nearR2 && nearLeft > 0 && nearN[s] < tier.nearCap) {
+          this.write(field, tier.near.mesh, nearN[s]++, t);
+          nearLeft--;
+        } else if (midLeft > 0 && midN[s] < tier.midCap) {
+          this.write(field, tier.mid.mesh, midN[s]++, t);
+          midLeft--;
+        }
       }
-      nearMesh.count = nn;
-      midMesh.count = nm;
-      nearMesh.instanceMatrix.needsUpdate = true;
-      midMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    this.drawnNear = 0;
+    this.drawnMid = 0;
+    for (let s = 0; s < SPECIES.length; s++) {
+      const tier = this.tiers[s];
+      tier.near.mesh.count = nearN[s];
+      tier.mid.mesh.count = midN[s];
+      tier.near.mesh.instanceMatrix.needsUpdate = true;
+      tier.mid.mesh.instanceMatrix.needsUpdate = true;
+      this.drawnNear += nearN[s];
+      this.drawnMid += midN[s];
     }
     this.lastRebuild.copy(cam);
   }
 
   update(dt: number, ctx: Ctx): void {
-    this.windTime.value += dt;
-    this.season.value = autumnFactor(ctx.dayOfYear);
-    if (!this.near.length) return;
-    if (ctx.camera.position.distanceTo(this.lastRebuild) > REBUILD_DISTANCE) {
+    if (!this.field) return;
+    const t0 = performance.now();
+
+    this.shared.time.value += dt;
+    this.shared.season.value = autumnFactor(ctx.dayOfYear);
+    // A slow shift in the prevailing wind keeps long shots from looking looped.
+    const a = 0.35 + Math.sin(this.shared.time.value * 0.031) * 0.55;
+    const gustiness = 0.75 + 0.35 * Math.sin(this.shared.time.value * 0.11 + 1.3);
+    this.shared.wind.value.set(Math.cos(a), Math.sin(a), gustiness);
+
+    if (ctx.camera.position.distanceToSquared(this.lastRebuild) > REBUILD_MOVE * REBUILD_MOVE) {
       this.rebuild(ctx);
     }
+    if (this.ground?.needsRebuild(ctx.camera.position)) this.ground.rebuild(ctx);
+
+    this.updateMs = this.updateMs * 0.9 + (performance.now() - t0) * 0.1;
+    ctx.stats['veg.near'] = this.drawnNear;
+    ctx.stats['veg.mid'] = this.drawnMid;
+    ctx.stats['veg.grass'] = this.ground?.drawnGrass ?? 0;
+    ctx.stats['veg.shrubs'] = this.ground?.drawnBush ?? 0;
+    ctx.stats['veg.ms'] = Math.round(this.updateMs * 100) / 100;
+    ctx.stats['veg.buildMs'] = Math.round(this.buildMs);
   }
 
   dispose(ctx: Ctx): void {
     ctx.scene.remove(this.root);
-    for (const t of [...this.near, ...this.mid, ...this.far]) {
-      t.mesh.geometry.dispose();
-      t.material.dispose();
+    this.ground?.dispose();
+    const seen = new Set<THREE.Material>();
+    for (const t of this.tiers) {
+      for (const x of [t.near, t.mid, ...t.far]) {
+        x.mesh.geometry.dispose();
+        for (const m of x.materials) {
+          if (!seen.has(m)) {
+            seen.add(m);
+            m.dispose();
+          }
+        }
+      }
     }
-    this.near.length = this.mid.length = this.far.length = 0;
+    disposeTextures(this.textures);
+    this.tiers.length = 0;
   }
 }
