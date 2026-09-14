@@ -303,7 +303,10 @@ void main() {
   // breakup channel keeps them from merging into a continuous sheet.
   float sparkle = mix(1.0, 0.62 + 0.9 * o0.z, clamp(f0, 0.0, 1.0) * 0.8);
   float spec = D * Vs * NoL * fres * uGlitter * sparkle;
-  color += uSunColor * min(spec, 46.0) * smoothstep(-0.04, 0.09, uSunDir.y);
+  // A glitter path is many small highlights, not a sheet. Clamped at 46 the
+  // lobe saturated whole square kilometres of the Charles into flat white
+  // under a low sun; 7 keeps the sparkle and loses the sheet.
+  color += uSunColor * min(spec, 7.0) * smoothstep(-0.04, 0.09, uSunDir.y);
 
   // -------------------------------------------------------------- foam ----
   float foam = 0.0;
