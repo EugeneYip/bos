@@ -1,0 +1,1 @@
+{"width":1154,"height":964,"sizeX":10380.907,"sizeZ":8664.255,"originX":-5478.812,"originZ":-4509.856,"spacingX":9.00338812891864,"spacingZ":8.99714930212182,"bin":"terrain.bin","dtype":"float32","endian":"little","layout":"row-major from north-west; index = j*width + i; x = originX + i*spacingX, z = originZ + j*spacingZ","min":-1.6,"max":76.39,"mean":6.42}

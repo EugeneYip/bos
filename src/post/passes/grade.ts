@@ -16,7 +16,7 @@ import { COMMON, TONEMAP } from '../core/glsl';
  * which is where a colourist actually works.
  *
  * This is the only pass in the whole engine that performs an sRGB encode.
- * `renderer.toneMapping` is forced to `NoToneMapping` by the Post module so
+ * 'renderer.toneMapping' is forced to 'NoToneMapping' by the Post module so
  * three never applies ACES a second time.
  */
 const GRADE_FRAG = /* glsl */ `
@@ -72,7 +72,7 @@ uniform float uLutSize;
 vec3 fetchScene(vec2 uv) { return max(texture2D(tColor, uv).rgb, vec3(0.0)); }
 
 #ifdef USE_LUT
-// 3D LUT packed as a horizontal strip of `uLutSize` slices, tetrahedral-free
+// 3D LUT packed as a horizontal strip of 'uLutSize' slices, tetrahedral-free
 // but with proper slice interpolation (the visible difference from tetrahedral
 // only shows on extreme looks).
 vec3 sampleLut(vec3 c) {

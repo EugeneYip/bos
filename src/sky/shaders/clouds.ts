@@ -117,7 +117,7 @@ bool sphereRoots( vec3 ro, vec3 rd, float rad, out float t0, out float t1 ) {
 
 /**
  * Segment of the ray that lies inside the cloud shell.
- * `ro` is relative to the planet centre. Returns (start, end); end < start
+ * 'ro' is relative to the planet centre. Returns (start, end); end < start
  * means the ray never enters the deck.
  */
 vec2 cloudShellRange( vec3 ro, vec3 rd ) {
@@ -299,7 +299,7 @@ void main() {
 `;
 
 /**
- * Billboard fallback for the `low` tier: one analytic layer on the shell,
+ * Billboard fallback for the 'low' tier: one analytic layer on the shell,
  * with a three-tap horizontal self-shadow so it still has a lit side and a
  * shaded side. No 3D textures, no march, about a tenth of the cost.
  */

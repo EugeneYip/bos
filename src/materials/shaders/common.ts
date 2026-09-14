@@ -2,11 +2,11 @@
  * Shared GLSL prelude for every procedural surface shader.
  *
  * Everything in here is *tileable by construction*: each noise function takes an
- * explicit integer `period` and wraps its lattice coordinates with `mod()` before
+ * explicit integer 'period' and wraps its lattice coordinates with 'mod()' before
  * hashing, so a texture baked over [0,1) with a period of N repeats seamlessly.
  *
  * Colour authoring convention: palette constants are written as sRGB (the values
- * you'd read off a colour picker) and converted to linear with `bosSrgb()`.
+ * you'd read off a colour picker) and converted to linear with 'bosSrgb()'.
  * The albedo render target is allocated as SRGB8_ALPHA8, so the hardware
  * re-encodes on write and decodes on sample — the shader must emit **linear**.
  */
@@ -156,14 +156,14 @@ float bosBillow(vec2 p, vec2 period, int octaves, float gain) {
   return sum / max(norm, 1e-4);
 }
 
-/** Domain-warped fBm. `w` is the warp strength in lattice units. */
+/** Domain-warped fBm. 'w' is the warp strength in lattice units. */
 float bosWarpFbm(vec2 p, vec2 period, int octaves, float gain, float w) {
   vec2 q = vec2(bosFbm(p + vec2(1.7, 9.2), period, 3, 0.5),
                 bosFbm(p + vec2(8.3, 2.8), period, 3, 0.5));
   return bosFbm(p + w * q, period, octaves, gain);
 }
 
-/** Anisotropic fBm: stretches the domain by `aniso` along `dir`. */
+/** Anisotropic fBm: stretches the domain by 'aniso' along 'dir'. */
 float bosStreak(vec2 p, vec2 period, float angle, float aniso, int octaves) {
   float c = cos(angle), s = sin(angle);
   mat2 r = mat2(c, -s, s, c);
@@ -176,7 +176,7 @@ float bosStreak(vec2 p, vec2 period, float angle, float aniso, int octaves) {
 
 /**
  * Tileable Worley. Returns (F1, F2, cellHash).
- * `jitter` in [0,1] controls how irregular the point set is.
+ * 'jitter' in [0,1] controls how irregular the point set is.
  */
 vec3 bosWorley(vec2 p, vec2 period, float jitter) {
   vec2 i = floor(p), f = fract(p);
@@ -239,7 +239,7 @@ float bosSmin(float a, float b, float k) {
   return mix(b, a, h) - k * h * (1.0 - h);
 }
 
-/** Antialiased-ish box mask: 1 inside, 0 outside, `soft` wide falloff. */
+/** Antialiased-ish box mask: 1 inside, 0 outside, 'soft' wide falloff. */
 float bosBox(vec2 p, vec2 halfSize, float soft) {
   vec2 d = halfSize - abs(p);
   float m = min(d.x, d.y);
@@ -267,7 +267,7 @@ float bosIGN(vec2 px) {
 }
 
 /**
- * The surface description every family shader fills in. `height` is in metres
+ * The surface description every family shader fills in. 'height' is in metres
  * of relief above the nominal plane; the Sobel pass converts it into a
  * physically-scaled normal map using the family's tileMeters.
  */

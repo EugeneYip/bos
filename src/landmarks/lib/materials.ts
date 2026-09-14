@@ -334,6 +334,17 @@ export class LandmarkMaterials {
   }
 
   /**
+   * Adopt an externally-authored material so it participates in the day/night
+   * drive and in disposal. Use for one-off emissives a landmark builds itself
+   * (the Citgo sign's artwork, Fenway's scoreboard) that still need to fade up
+   * after dusk. Honours `userData.nightPeak` like the built-in emissives.
+   */
+  registerNightLit(m: THREE.MeshStandardMaterial): THREE.MeshStandardMaterial {
+    if (!this.nightLit.includes(m)) this.nightLit.push(m);
+    return this.track(m);
+  }
+
+  /**
    * Drive night lighting from the sun elevation. Windows fade up as the sun
    * drops below ~6 degrees and are fully on after civil twilight.
    */

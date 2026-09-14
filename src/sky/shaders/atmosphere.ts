@@ -40,7 +40,7 @@ uniform float uGroundAlbedo;
 float safeacos( float x ) { return acos( clamp( x, -1.0, 1.0 ) ); }
 
 /**
- * Distance along `rd` to the sphere of radius `rad` centred on the origin,
+ * Distance along 'rd' to the sphere of radius 'rad' centred on the origin,
  * or -1 if it is missed. Handles the ray origin being inside the sphere.
  */
 float raySphere( vec3 ro, vec3 rd, float rad ) {
@@ -240,7 +240,7 @@ export const ATMOSPHERE_RAYMARCH = /* glsl */ `
 uniform float uMieG;
 
 /**
- * Single + multiple scattering along a ray. `tMax` in megametres.
+ * Single + multiple scattering along a ray. 'tMax' in megametres.
  * The sun's own shadow volume falls out for free: sunTransmittance() is zero
  * wherever the path to the sun is blocked by the planet, which is what paints
  * the Earth's shadow and the Belt of Venus at twilight.
@@ -278,7 +278,7 @@ vec3 atmosphereRaymarch( vec3 pos, vec3 rayDir, vec3 sunDir, float tMax, int ste
 
 /**
  * Sky-view LUT parameterisation, shared by the generator and every consumer.
- * `viewHeight` is the observer's distance from the planet centre, in Mm.
+ * 'viewHeight' is the observer's distance from the planet centre, in Mm.
  */
 export const SKYVIEW_PARAM = /* glsl */ `
 /** Ray direction -> sky-view LUT uv. Azimuth is measured from the sun. */
