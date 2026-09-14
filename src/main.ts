@@ -5,6 +5,7 @@ import type { QualityTier } from './core/config';
 import { Materials } from './materials/Materials';
 import { Sky } from './sky/Sky';
 import { Terrain } from './world/Terrain';
+import { FarTerrain } from './world/FarTerrain';
 import { Water } from './world/Water';
 import { Roads } from './world/Roads';
 import { Parks } from './world/Parks';
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     new Materials(),
     new Sky(),
     new Terrain(),
+    new FarTerrain(),
     new Water(),
     new Parks(),
     new Roads(),
