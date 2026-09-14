@@ -77,6 +77,9 @@ export class Post implements WorldModule {
   private passes: Record<string, Pass> = {};
   private taa: Pass<TaaUniforms> | null = null;
   private gbufferMat: THREE.ShaderMaterial | null = null;
+  /** Meshes enrolled into the SSR G-buffer, and when we last looked. */
+  private ssrEnrolled = 0;
+  private ssrScanAt = -1;
 
   private jitterTable = haltonJitterTable(16);
   private frame = 0;
@@ -300,6 +303,38 @@ export class Post implements WorldModule {
     if (patch.grade?.preset) Object.assign(this.settings.grade, preset(patch.grade.preset));
   }
 
+  /**
+   * Put every surface smooth and shiny enough to be worth tracing onto the
+   * SSR layer: glass curtain wall, the water, polished metal. Everything else
+   * stays off it, which keeps the G-buffer pass to the handful of draws that
+   * actually reflect rather than a second full submit of the city.
+   */
+  private enrolSsr(ctx: Ctx): void {
+    const s = this.settings.ssr;
+    let n = 0;
+    ctx.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || !m.material) return;
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      let shiny = false;
+      for (const mat of mats) {
+        const std = mat as THREE.MeshStandardMaterial;
+        // ShaderMaterials (the water) declare themselves through userData.
+        if ((mat.userData as { ssr?: boolean }).ssr) { shiny = true; break; }
+        if (std.roughness === undefined) continue;
+        if (std.roughness <= s.autoEnrolRoughness || std.metalness >= s.autoEnrolMetalness) {
+          shiny = true;
+          break;
+        }
+      }
+      if (shiny) { m.layers.enable(GBUFFER_LAYER); n++; } else { m.layers.disable(GBUFFER_LAYER); }
+    });
+    if (n !== this.ssrEnrolled) {
+      this.ssrEnrolled = n;
+      (this.ctx ?? ctx).stats['post.ssrMeshes'] = n;
+    }
+  }
+
   /* --------------------------------------------------------------- frame */
 
   update(_dt: number, ctx: Ctx): void {
@@ -387,7 +422,10 @@ export class Post implements WorldModule {
 
     /* ---- velocity ------------------------------------------------------- */
     let velocity: THREE.WebGLRenderTarget | null = null;
-    const wantVelocity = s.motionBlur.enabled && this.historyValid > 0;
+    // A still camera produces no blur, so the velocity buffer, the two tile
+    // reductions, the neighbour-max and the gather are all pure cost. Skip
+    // the whole branch below a threshold rather than blur by zero pixels.
+    const wantVelocity = s.motionBlur.enabled && this.historyValid > 0 && this.cameraMotion > 0.004;
     if (wantVelocity) {
       t?.begin('velocity');
       velocity = this.pool.acquire(rw, rh, { type: THREE.HalfFloatType });
@@ -403,8 +441,15 @@ export class Post implements WorldModule {
     }
 
     /* ---- G-buffer for SSR ---------------------------------------------- */
+    // The world streams in over several seconds, so rescan periodically until
+    // it settles. Rendering an empty G-buffer costs a full scene traversal
+    // and buys nothing, so SSR is skipped entirely when nothing is enrolled.
+    if (s.ssr.enabled && (this.frame < 4 || ctx.elapsed - this.ssrScanAt > 4)) {
+      this.ssrScanAt = ctx.elapsed;
+      this.enrolSsr(ctx);
+    }
     let gbuffer: THREE.Texture | null = null;
-    if (s.ssr.enabled && this.rt.gbuffer && this.gbufferMat) {
+    if (s.ssr.enabled && this.ssrEnrolled > 0 && this.rt.gbuffer && this.gbufferMat) {
       t?.begin('gbuffer');
       const prevMask = cam.layers.mask;
       const prevOverride = ctx.scene.overrideMaterial;
@@ -470,7 +515,7 @@ export class Post implements WorldModule {
 
     /* ---- screen-space reflections --------------------------------------- */
     let ssr: THREE.Texture | null = null;
-    if (s.ssr.enabled && gbuffer) {
+    if (gbuffer) {
       t?.begin('ssr');
       const half = this.pool.acquire(rw >> 1, rh >> 1, { type: THREE.HalfFloatType });
       const su = p.ssr.uniforms;

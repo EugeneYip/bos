@@ -244,9 +244,12 @@ export class Water implements WorldModule {
         uReflBlur: { value: 9 },
         uReflSmear: { value: 1 },
         uReflDistort: { value: new THREE.Vector2(0.030, 0.085) },
-        uHorizonFade: { value: new THREE.Vector2(4200, 17000) },
+        uHorizonFade: { value: new THREE.Vector2(2600, 9000) },
       },
     });
+    // Tell the post chain this surface is worth tracing screen-space
+    // reflections against; it cannot infer that from a ShaderMaterial.
+    m.userData.ssr = !skirt;
     return m;
   }
 

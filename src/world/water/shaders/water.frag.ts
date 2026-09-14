@@ -373,14 +373,26 @@ void main() {
   color += uCityGlow * fres * 0.55 * uNight;
 
   // Far water melts into the horizon haze instead of ending at a hard line.
+  // Far water has to become the horizon outright, not 85% of it: at grazing
+  // incidence the surface mirrors the sky almost totally, and letting even a
+  // sliver of that through left a hard white band across every distant view.
   float haze = smoothstep(uHorizonFade.x, uHorizonFade.y, vViewDist);
-  color = mix(color, uSkyHorizon * uEnvIntensity * 0.88, haze * 0.85);
+  // Far water has to become the horizon outright, not 85% of it: at grazing
+  // incidence the surface mirrors the sky almost totally, and letting even a
+  // sliver of that through left a hard white band across every distant view.
+  color = mix(color, uSkyHorizon * uEnvIntensity * 0.95, haze);
 
   // The sky module lifts exposure ~2x after dark so the dim sky still reads.
   // Water has no light of its own, so without matching that lift downward the
   // river ends up the brightest thing in a night frame. uEnvIntensity already
   // tracks day-to-night, so reuse it as the scale.
   color *= mix(0.055, 1.0, clamp(uEnvIntensity, 0.0, 1.0));
+
+  // Bound the HDR output. At a grazing angle the surface mirrors the sky
+  // almost totally, and a bright dusk horizon pushed that past anything the
+  // tonemapper could roll off — the harbour clipped to a hard white band and
+  // dragged the auto-exposure down with it. 12 still reads as dazzling.
+  color = min(color, vec3(12.0));
 
   gl_FragColor = vec4(color, 1.0);
 
