@@ -19,8 +19,11 @@
  * winding, rings that touch themselves, holes outside their outer ring. Every
  * function here is total — it returns `null` rather than throwing, and callers
  * skip the building instead of killing the whole load.
+ *
+ * Nothing here imports three.js, so the entire meshing pipeline can be hosted
+ * in a Web Worker without duplicating the renderer into the worker bundle.
  */
-import * as THREE from 'three';
+import { earcut } from './earcut';
 
 export type Ring = number[];
 
@@ -509,21 +512,11 @@ export interface Tri2 {
   outerCount: number;
 }
 
-const _v2pool: THREE.Vector2[] = [];
-function v2(i: number, x: number, y: number): THREE.Vector2 {
-  let v = _v2pool[i];
-  if (!v) {
-    v = new THREE.Vector2();
-    _v2pool[i] = v;
-  }
-  v.set(x, y);
-  return v;
-}
-
 /**
- * Triangulate an outer ring with optional holes. Uses three's Earcut, which is
- * tolerant of self-intersection — it returns *something* rather than throwing,
- * which is exactly what we want for OSM data.
+ * Triangulate an outer ring with optional holes.
+ *
+ * Ear clipping never throws and degrades to "something plausible" on
+ * self-intersecting input, which is exactly what OSM footprints need.
  *
  * Triangles are emitted so their (x,z) shoelace area is negative, i.e. they
  * face **up** (+Y). Pass `up = false` for downward-facing caps.
@@ -532,37 +525,30 @@ export function triangulateRing(outer: Ring, holes: Ring[] | undefined, up: bool
   const on = outer.length >> 1;
   if (on < 3) return null;
 
-  let k = 0;
-  const contour: THREE.Vector2[] = new Array(on);
-  for (let i = 0; i < on; i++) contour[i] = v2(k++, outer[i * 2], outer[i * 2 + 1]);
-
-  const holeContours: THREE.Vector2[][] = [];
   const verts: number[] = outer.slice();
+  const holeStarts: number[] = [];
   if (holes) {
     for (const h of holes) {
       const hn = h.length >> 1;
       if (hn < 3) continue;
-      const hc: THREE.Vector2[] = new Array(hn);
-      for (let i = 0; i < hn; i++) hc[i] = v2(k++, h[i * 2], h[i * 2 + 1]);
-      holeContours.push(hc);
+      holeStarts.push(verts.length >> 1);
       for (let i = 0; i < hn; i++) verts.push(h[i * 2], h[i * 2 + 1]);
     }
   }
 
-  let faces: number[][];
+  let faces: number[];
   try {
-    faces = THREE.ShapeUtils.triangulateShape(contour, holeContours);
+    faces = earcut(verts, holeStarts.length ? holeStarts : null);
   } catch {
     return null;
   }
-  if (!faces || faces.length === 0) return null;
+  if (faces.length < 3) return null;
 
   const indices: number[] = [];
-  for (let i = 0; i < faces.length; i++) {
-    const f = faces[i];
-    const a = f[0];
-    const b = f[1];
-    const c = f[2];
+  for (let i = 0; i + 2 < faces.length; i += 3) {
+    const a = faces[i];
+    const b = faces[i + 1];
+    const c = faces[i + 2];
     if (a === b || b === c || a === c) continue;
     const ax = verts[a * 2];
     const az = verts[a * 2 + 1];

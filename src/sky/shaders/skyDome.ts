@@ -34,10 +34,8 @@ void main() {
 }
 `;
 
-export const SKY_DOME_FRAG = /* glsl */ `
+const SKY_DOME_COMMON = /* glsl */ `
 precision highp float;
-
-varying vec3 vRay;
 
 ${ATMOSPHERE_COMMON}
 ${ATMOSPHERE_LUT_SAMPLERS}
@@ -131,9 +129,12 @@ vec3 moonContribution( vec3 rayDir ) {
   return result;
 }
 
-void main() {
-  vec3 rayDir = normalize( vRay );
-  vec2 screenUv = gl_FragCoord.xy / uResolution;
+/**
+ * The complete sky radiance in one direction: atmosphere, sun, moon, airglow
+ * and urban skyglow. Shared by the on-screen dome and by the equirectangular
+ * pass that feeds the IBL probe.
+ */
+vec3 skyRadiance( vec3 rayDir ) {
   vec3 up = vec3( 0.0, 1.0, 0.0 );
 
   // ---- atmosphere -------------------------------------------------------
@@ -190,6 +191,20 @@ void main() {
     col += uSkyglowColor * uSkyglowStrength * vertical * bias;
   }
 
+  return col;
+}
+`;
+
+/** Screen pass: the dome the camera actually sees, with clouds and dither. */
+export const SKY_DOME_FRAG = /* glsl */ `
+varying vec3 vRay;
+${SKY_DOME_COMMON}
+
+void main() {
+  vec3 rayDir = normalize( vRay );
+  vec2 screenUv = gl_FragCoord.xy / uResolution;
+  vec3 col = skyRadiance( rayDir );
+
   // ---- clouds -----------------------------------------------------------
   if ( uCloudsEnabled > 0.5 ) {
     vec4 cloud = texture2D( uCloudBuffer, screenUv );
@@ -210,3 +225,25 @@ void main() {
   #include <colorspace_fragment>
 }
 `;
+
+/**
+ * Equirectangular pass used to feed `PMREMGenerator`. Same radiance function,
+ * no clouds and no dither, and the caller widens the solar disc so a 128-pixel
+ * cube face does not alias it into a strobing pixel.
+ *
+ * The uv convention matches three's `equirectUv()`:
+ * `u = atan(z, x) / 2PI + 0.5`, `v = asin(y) / PI + 0.5`.
+ */
+export const SKY_EQUIRECT_FRAG = /* glsl */ `
+varying vec2 vUv;
+${SKY_DOME_COMMON}
+
+void main() {
+  float a = ( vUv.x - 0.5 ) * 2.0 * PI;
+  float t = ( vUv.y - 0.5 ) * PI;
+  float ct = cos( t );
+  vec3 rayDir = vec3( ct * cos( a ), sin( t ), ct * sin( a ) );
+  gl_FragColor = vec4( max( skyRadiance( rayDir ), vec3( 0.0 ) ), 1.0 );
+}
+`;
+

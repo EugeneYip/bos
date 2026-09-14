@@ -169,9 +169,14 @@ export class Starfield {
         uTwinkle: { value: 1 },
         uIntensity: { value: 1 },
       },
-      transparent: true,
+      // Not flagged `transparent`, deliberately: that would push the stars
+      // into the transparent pass, which is drawn after the city and would
+      // paint them over every rooftop. As an opaque-list object with a very
+      // negative render order they land straight after the sky dome, against
+      // a still-empty depth buffer, and the city then covers them normally.
+      transparent: false,
       blending: THREE.AdditiveBlending,
-      depthTest: false,
+      depthTest: true,
       depthWrite: false,
     });
 

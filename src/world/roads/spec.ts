@@ -79,6 +79,17 @@ export const TUNE = {
   deckThickness: 1.05,
   parapetHeight: 1.12,
   pierSpacing: 34,
+  /** Crosswalk depth along the direction of travel, metres. */
+  crosswalkDepth: 2.9,
+  /** Continental crosswalk bar width and gap, metres. */
+  zebraBar: 0.58,
+  zebraGap: 0.52,
+  /** Stop bar width along travel, metres. */
+  stopBarDepth: 0.55,
+  /** Kerb-return radius at a junction corner, metres. */
+  kerbReturn: 5.2,
+  /** Kerb ramp (dropped kerb) width across the walk, metres. */
+  rampWidth: 1.55,
 } as const;
 
 /** sRGB paint colours. Boston's yellow is a warm, slightly orange traffic yellow. */
@@ -176,4 +187,41 @@ export function lanesOf(r: RoadRecord): number {
   const spec = CLASS[r.class] ?? CLASS.residential;
   const l = Number.isFinite(r.lanes) && r.lanes >= 1 ? Math.round(r.lanes) : spec.defaultLanes;
   return Math.min(8, Math.max(1, l));
+}
+
+/**
+ * Carriageway cross-fall at an across-offset `a`, relative to the crown.
+ *
+ * Streets are crowned so water runs to the gutter; kerbed streets add a
+ * steeper gutter pan in the last `gutterWidth`. Both the ribbon and the
+ * junction fill call this, which is what keeps their shared edge watertight.
+ */
+export function crownDy(a: number, halfWidth: number, kerbed: boolean): number {
+  const d = Math.min(Math.abs(a), halfWidth);
+  const g = kerbed ? Math.min(TUNE.gutterWidth, halfWidth * 0.35) : 0;
+  const flat = halfWidth - g;
+  if (d <= flat) return -TUNE.crownSlope * d;
+  // Gutter pan: roughly three times the crown fall over its short run.
+  return -TUNE.crownSlope * flat - (d - flat) * TUNE.crownSlope * 3.2;
+}
+
+/** True when this class is built with kerbs, gutters and a sidewalk. */
+export function isKerbed(cls: RoadClass): boolean {
+  return CLASS[cls]?.kerb === true;
+}
+
+/**
+ * Boston's painted bus lanes. OSM does not carry them reliably, so the few
+ * corridors that really have red paint are named explicitly.
+ */
+const BUS_LANE_STREETS = [
+  'washington street', 'columbus avenue', 'brighton avenue',
+  'north washington street', 'american legion highway', 'blue hill avenue',
+];
+
+export function hasBusLane(name: string | undefined, cls: RoadClass): boolean {
+  if (!name) return false;
+  if (cls !== 'primary' && cls !== 'secondary' && cls !== 'trunk') return false;
+  const n = name.toLowerCase();
+  return BUS_LANE_STREETS.some((s) => n === s);
 }

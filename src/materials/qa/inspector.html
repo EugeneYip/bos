@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Boston — Material Inspector</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: #07090c; overflow: hidden; }
+      body { font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfe0f0; }
+      #wrap { position: relative; width: 1680px; height: 1020px; }
+      #gl { display: block; width: 1680px; height: 960px; }
+      .tag {
+        position: absolute; padding: 3px 7px; background: rgba(4, 8, 12, .72);
+        border: 1px solid rgba(120, 160, 200, .22); border-radius: 3px;
+        letter-spacing: .04em; color: #a8c4de; pointer-events: none; white-space: pre;
+      }
+      #title {
+        position: absolute; left: 0; top: 960px; width: 1680px; height: 60px;
+        display: flex; align-items: center; gap: 22px; padding: 0 14px;
+        background: #0b1118; border-top: 1px solid #1b2836;
+      }
+      #title b { font-size: 18px; letter-spacing: .12em; color: #eaf2fb; font-weight: 600; }
+      #title span { color: #7d99b4; }
+      #title em { color: #d8b36a; font-style: normal; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <canvas id="gl"></canvas>
+      <div id="title"><b>…</b></div>
+    </div>
+    <script type="module" src="./inspector.ts"></script>
+  </body>
+</html>

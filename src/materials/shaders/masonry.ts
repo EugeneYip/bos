@@ -34,11 +34,11 @@ vec3 bosBrickHue(float t) {
     vec3 b = bosSrgb8(147.0, 63.0, 45.0);   // classic Boston red
     vec3 d = bosSrgb8(180.0, 95.0, 60.0);   // orange / salmon
     vec3 e = bosSrgb8(94.0, 51.0, 60.0);    // purple-brown
-    vec3 f = bosSrgb8(62.0, 38.0, 39.0);    // clinker
+    vec3 f = bosSrgb8(78.0, 50.0, 47.0);    // clinker
     c = mix(a, b, smoothstep(0.00, 0.42, t));
     c = mix(c, d, smoothstep(0.38, 0.74, t));
     c = mix(c, e, smoothstep(0.79, 0.91, t));
-    c = mix(c, f, smoothstep(0.93, 1.00, t));
+    c = mix(c, f, smoothstep(0.955, 1.00, t));
   } else {
     vec3 a = bosSrgb8(128.0, 68.0, 52.0);
     vec3 b = bosSrgb8(154.0, 88.0, 64.0);
@@ -102,8 +102,10 @@ void bosShade(vec2 uv, inout BosSurface s) {
   if (uMode < 0.5) bosRunningBond(uv, local, jm, rnd, lengthwise);
   else             bosHerringbone(uv, local, jm, rnd, lengthwise);
 
-  float face = 1.0 - smoothstep(0.0, 0.30, jm);   // 1 on the brick face
-  float inJoint = smoothstep(0.10, 0.55, jm);
+  // The mortar must fill most of the joint, not just its centre line: a
+  // hairline joint reads as "brick-coloured tiles", not as brickwork.
+  float face = 1.0 - smoothstep(0.0, 0.22, jm);   // 1 on the brick face
+  float inJoint = smoothstep(0.04, 0.34, jm);
 
   // ---- clay body ----------------------------------------------------------
   vec3 clay = bosBrickHue(rnd.x);
@@ -149,10 +151,14 @@ void bosShade(vec2 uv, inout BosSurface s) {
 
   // ---- weathering ---------------------------------------------------------
   // Efflorescence: salt bloom that starts at a sill-like line and runs down.
+  // The start line is a sawtooth in V, so it is exactly tile-periodic — keep
+  // its amplitude low and fade both ends, or it survives into the far mips as
+  // a chevron lattice across the whole facade.
   float startY = 0.12 + 0.76 * bosFbm01(vec2(uv.x * 5.0, 3.1), vec2(5.0, 8.0), 2, 0.5);
-  float run = exp(-fract(startY - uv.y) * 4.5);
+  float below = fract(startY - uv.y);
+  float run = exp(-below * 4.5) * smoothstep(0.0, 0.06, below) * smoothstep(1.0, 0.80, below);
   float streak = bosFbm01(vec2(uv.x * 60.0, uv.y * 2.0), vec2(60.0, 2.0), 4, 0.6);
-  float efflor = smoothstep(0.50, 0.88, streak) * run * uEfflor;
+  float efflor = smoothstep(0.58, 0.92, streak) * run * uEfflor;
   albedo = mix(albedo, mix(albedo, vec3(0.62, 0.61, 0.58), 0.75), efflor);
 
   // Soot and rain-wash: grime collects in the joints and in sheltered blotches.
@@ -175,7 +181,7 @@ void bosShade(vec2 uv, inout BosSurface s) {
   rough += (grain - 0.5) * 0.05;
   s.rough = clamp(rough + (rnd.y - 0.5) * 0.05, 0.05, 1.0);
 
-  float ao = 1.0 - 0.62 * smoothstep(0.0, 0.85, jm);
+  float ao = 1.0 - 0.46 * smoothstep(0.0, 0.85, jm);
   ao *= 1.0 - 0.30 * chip;
   ao *= 0.90 + 0.10 * grain;
   s.ao = clamp(ao, 0.0, 1.0);

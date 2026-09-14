@@ -34,6 +34,8 @@ export interface Rung {
   m: V2;
   /** Mitre scale (1 / cos(half turn)), already clamped. */
   sc: number;
+  /** Longitudinal grade (dy/ds) at this rung, used to derive true normals. */
+  g: number;
   /** 0 = plain mitre, +1 = left side is the outer side, -1 = right side is. */
   outer: -1 | 0 | 1;
   /** True on the first/last rung of the ribbon. */
@@ -57,13 +59,24 @@ export function buildFrame(pts: V2[], ys: number[], maxOffset: number): Rung[] {
     segDir[i] = segLen[i] > 1e-7 ? { x: d.x / segLen[i], z: d.z / segLen[i] } : { x: 1, z: 0 };
   }
 
+  // Longitudinal grade per source vertex: central difference on the profile,
+  // clamped so a bad elevation spike cannot tip a normal past horizontal.
+  const grade: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const dPrev = i > 0 ? segLen[i - 1] : 0;
+    const dNext = i < n - 1 ? segLen[i] : 0;
+    const span = dPrev + dNext;
+    const dy = (ys[Math.min(i + 1, n - 1)] ?? 0) - (ys[Math.max(i - 1, 0)] ?? 0);
+    grade[i] = span > 1e-4 ? Math.max(-0.5, Math.min(0.5, dy / span)) : 0;
+  }
+
   const rungs: Rung[] = [];
   let s = 0;
 
   // Head cap.
   rungs.push({
     p: pts[0], y: ys[0] ?? 0, s: 0, t: segDir[0], n: perp(segDir[0]),
-    m: perp(segDir[0]), sc: 1, outer: 0, cap: true,
+    m: perp(segDir[0]), sc: 1, g: grade[0], outer: 0, cap: true,
   });
 
   for (let i = 1; i < n - 1; i++) {
@@ -78,7 +91,7 @@ export function buildFrame(pts: V2[], ys: number[], maxOffset: number): Rung[] {
 
     if (mLen < 1e-5) {
       // Perfect 180 degree reversal: cap and restart rather than explode.
-      rungs.push({ p: pts[i], y, s, t: a, n: na, m: na, sc: 1, outer: 0, cap: false });
+      rungs.push({ p: pts[i], y, s, t: a, n: na, m: na, sc: 1, g: grade[i], outer: 0, cap: false });
       continue;
     }
     const m = { x: mRaw.x / mLen, z: mRaw.z / mLen };
@@ -93,7 +106,7 @@ export function buildFrame(pts: V2[], ys: number[], maxOffset: number): Rung[] {
     const turn = Math.acos(Math.max(-1, Math.min(1, dot(a, b))));
     if (sc <= limit || turn < 0.18) {
       sc = Math.min(sc, Math.max(limit, 1));
-      rungs.push({ p: pts[i], y, s, t: norm(add(a, b)), n: m, m, sc, outer: 0, cap: false });
+      rungs.push({ p: pts[i], y, s, t: norm(add(a, b)), n: m, m, sc, g: grade[i], outer: 0, cap: false });
       continue;
     }
 
@@ -111,14 +124,15 @@ export function buildFrame(pts: V2[], ys: number[], maxOffset: number): Rung[] {
       const f = k / (steps - 1);
       const ang = a0 + delta * f;
       const nk = { x: Math.cos(ang), z: Math.sin(ang) };
-      rungs.push({ p: pts[i], y, s, t: unperp(nk), n: nk, m, sc, outer, cap: false });
+      rungs.push({ p: pts[i], y, s, t: unperp(nk), n: nk, m, sc, g: grade[i], outer, cap: false });
     }
   }
 
   s += segLen[n - 2];
   const tl = segDir[n - 2];
   rungs.push({
-    p: pts[n - 1], y: ys[n - 1] ?? 0, s, t: tl, n: perp(tl), m: perp(tl), sc: 1, outer: 0, cap: true,
+    p: pts[n - 1], y: ys[n - 1] ?? 0, s, t: tl, n: perp(tl), m: perp(tl), sc: 1,
+    g: grade[n - 1], outer: 0, cap: true,
   });
 
   return rungs;
@@ -145,14 +159,38 @@ export interface Row {
 
 export type UvMode = 'world' | 'local';
 
+/**
+ * How each vertex's normal is authored.
+ *  - `up`     flat +Y. Cheap and seam-free; right for paint decals.
+ *  - `grade`  tilted by the longitudinal grade, so hills shade correctly.
+ *  - `left` / `right`  horizontal, facing across the ribbon (kerb faces,
+ *            parapets, bridge fascia).
+ *  - `down`   flat -Y for undersides (bridge soffits).
+ *  - an explicit vector for anything else.
+ */
+export type NormalMode = 'up' | 'grade' | 'left' | 'right' | 'down';
+
 export interface StripOpts {
   uv: UvMode;
   /** Metres per UV tile. */
   tile: number;
   /** Extra lift applied to every vertex. */
   lift: number;
-  /** Explicit normal for every vertex (kerb faces, parapets). */
+  /** Normal authoring mode; defaults to `grade`. */
+  nrm?: NormalMode;
+  /** Explicit normal for every vertex, overriding `nrm`. */
   normal?: [number, number, number];
+  /** Scales the `u` coordinate in local mode (paint stretched across). */
+  uScale?: number;
+  /**
+   * Per-rung, per-row height offset added to `Row.dy`. This is how a kerb
+   * ramps down at a crossing without needing its own strip.
+   */
+  dyAt?: (r: Rung, row: number) => number;
+  /** Per-rung, per-row multiplier on the row's RGB — wear, patching, grime. */
+  tintAt?: (r: Rung, row: number) => number;
+  /** Replaces the row colour outright; used by paint, which wears per metre. */
+  colourAt?: (r: Rung, row: number) => [number, number, number, number];
   /** Offset added to the local-UV `v` so adjacent pieces do not repeat. */
   vBias?: number;
   /** Skip rungs whose arc-length falls outside [sFrom, sTo]. */
@@ -183,6 +221,9 @@ export function emitStrip(
   const vBias = opts.vBias ?? 0;
   const nrm = opts.normal;
 
+  const mode: NormalMode = opts.nrm ?? 'grade';
+  const uScale = opts.uScale ?? 1;
+
   const ring: number[] = [];
   let prevRing: number[] | null = null;
 
@@ -190,25 +231,51 @@ export function emitStrip(
     const r = rungs[i];
     if (opts.sFrom !== undefined && r.s < opts.sFrom - 1e-4) continue;
     if (opts.sTo !== undefined && r.s > opts.sTo + 1e-4) continue;
+
+    // One normal per rung: every row on a rung shares it, which keeps long
+    // flat surfaces perfectly smooth and vertical faces perfectly crisp.
+    let nx: number;
+    let ny: number;
+    let nz: number;
+    if (nrm) {
+      nx = nrm[0]; ny = nrm[1]; nz = nrm[2];
+    } else if (mode === 'up') {
+      nx = 0; ny = 1; nz = 0;
+    } else if (mode === 'down') {
+      nx = 0; ny = -1; nz = 0;
+    } else if (mode === 'left' || mode === 'right') {
+      const s0 = mode === 'left' ? 1 : -1;
+      const ax = r.n.x * s0;
+      const az = r.n.z * s0;
+      const il = 1 / Math.max(Math.hypot(ax, az), 1e-6);
+      nx = ax * il; ny = 0; nz = az * il;
+    } else {
+      const gx = -r.t.x * r.g;
+      const gz = -r.t.z * r.g;
+      const il = 1 / Math.max(Math.hypot(gx, 1, gz), 1e-6);
+      nx = gx * il; ny = il; nz = gz * il;
+    }
+
     ring.length = 0;
     for (let j = 0; j < rows.length; j++) {
       const row = rows[j];
       const p = offsetAt(r, row.a);
-      const y = r.y + row.dy + lift;
+      const y = r.y + row.dy + lift + (opts.dyAt ? opts.dyAt(r, j) : 0);
       let u: number;
       let v: number;
       if (opts.uv === 'world') {
         u = p.x * invTile;
         v = p.z * invTile;
       } else {
-        u = row.a * invTile;
+        u = row.a * invTile * uScale;
         v = (r.s + vBias) * invTile;
       }
-      ring.push(
-        nrm
-          ? out.vertN(p.x, y, p.z, nrm[0], nrm[1], nrm[2], u, v, row.c)
-          : out.vert(p.x, y, p.z, u, v, row.c),
-      );
+      let c = opts.colourAt ? opts.colourAt(r, j) : row.c;
+      if (opts.tintAt) {
+        const k = opts.tintAt(r, j);
+        c = [c[0] * k, c[1] * k, c[2] * k, c[3]];
+      }
+      ring.push(out.vertN(p.x, y, p.z, nx, ny, nz, u, v, c));
     }
     if (prevRing) {
       for (let j = 0; j < rows.length - 1; j++) {
@@ -269,4 +336,41 @@ export function frameLength(rungs: Rung[]): number {
 /** Straight-line distance covered by the frame, for degenerate-input guards. */
 export function frameSpan(rungs: Rung[]): number {
   return rungs.length > 1 ? dist(rungs[0].p, rungs[rungs.length - 1].p) : 0;
+}
+
+/**
+ * Builds a free-standing rung frame from an explicit list of centreline
+ * points plus outward normals — used for junction kerb returns, where the
+ * "centreline" is the kerb line curling round a corner rather than a road.
+ */
+export function frameFromEdge(pts: V2[], ys: number[], normals: V2[]): Rung[] {
+  const n = pts.length;
+  if (n < 2) return [];
+  const out: Rung[] = [];
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    if (i > 0) s += dist(pts[i - 1], pts[i]);
+    const t = i < n - 1 ? norm(sub(pts[i + 1], pts[i])) : norm(sub(pts[i], pts[i - 1]));
+    const nn = norm(normals[i] ?? perp(t));
+    const dy = i < n - 1 ? (ys[i + 1] ?? 0) - (ys[i] ?? 0) : (ys[i] ?? 0) - (ys[i - 1] ?? 0);
+    const dl = i < n - 1 ? dist(pts[i], pts[i + 1]) : dist(pts[i - 1], pts[i]);
+    out.push({
+      p: pts[i],
+      y: ys[i] ?? 0,
+      s,
+      t,
+      n: nn,
+      m: nn,
+      sc: 1,
+      g: dl > 1e-4 ? Math.max(-0.5, Math.min(0.5, dy / dl)) : 0,
+      outer: 0,
+      cap: i === 0 || i === n - 1,
+    });
+  }
+  return out;
+}
+
+/** Total number of quads a strip over these rungs and rows would emit. */
+export function stripQuads(rungs: number, rows: number): number {
+  return Math.max(0, rungs - 1) * Math.max(0, rows - 1);
 }

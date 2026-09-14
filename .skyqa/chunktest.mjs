@@ -1,0 +1,11 @@
+import * as THREE from 'three';
+const src = THREE.ShaderChunk.lights_fragment_begin;
+const marker = '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )';
+const at = src.indexOf(marker);
+const shadowLine = 'directLight.color *= ( directLight.visible && receiveShadow ) ? getShadow( directionalShadowMap[ i ],';
+console.log('marker at', at, 'shadowLine at', src.indexOf(shadowLine, at));
+let tail = src.slice(at);
+const loopAt = tail.indexOf('\t#pragma unroll_loop_start');
+console.log('loopAt', loopAt);
+console.log('--- head of dir block ---');
+console.log(tail.slice(0, loopAt));

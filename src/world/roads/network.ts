@@ -11,10 +11,10 @@
 import type { RoadClass, RoadRecord } from '../../core/types';
 import {
   type V2, add, cumulative, dedupe, dist, norm, perp, polylineLength,
-  rayIntersect, scale, sub, hashStr,
+  rayIntersect, scale, simplify, smoothProfile, sub, hashStr,
 } from './math2';
 import {
-  CLASS, type ClassSpec, type SurfaceKey, TUNE, lanesOf, surfaceOf, widthOf,
+  CLASS, type ClassSpec, type SurfaceKey, TUNE, crownDy, lanesOf, surfaceOf, widthOf,
 } from './spec';
 
 export interface PreparedRoad {
@@ -52,6 +52,23 @@ export interface Approach {
   y: number;
 }
 
+/**
+ * A rounded kerb return: the corner of the junction between approach `i` and
+ * approach `i+1`. `pts` runs from the right edge of `i` to the left edge of
+ * `i+1` and is the *same* curve the junction fill boundary uses, so the kerb
+ * and the asphalt it retains can never disagree.
+ */
+export interface Corner {
+  pts: V2[];
+  ys: number[];
+  /** Outward normals, away from the junction centre. */
+  normals: V2[];
+  /** Both flanking roads carry kerbs, so this corner gets one too. */
+  kerbed: boolean;
+  /** Sidewalk width to carry round the corner, metres. */
+  walk: number;
+}
+
 export interface Junction {
   p: V2;
   y: number;
@@ -61,6 +78,8 @@ export interface Junction {
   ring: V2[];
   ringDy: number[];
   ringY: number[];
+  /** Rounded kerb returns, one per consecutive approach pair. */
+  corners: Corner[];
   radius: number;
   surface: SurfaceKey;
   /** Widest approach — drives crosswalk length and stop-bar setback. */
@@ -99,6 +118,90 @@ function decode(rec: RoadRecord): { pts: V2[]; ys: number[] } | null {
   return { pts, ys };
 }
 
+/**
+ * OSM leaves a handful of Boston's harbour tunnels tagged only by name — the
+ * Callahan and Sumner approaches in particular. Drawing those on the surface
+ * puts a motorway through the North End, so trust the name as well as the tag.
+ */
+function isTunnelRecord(rec: RoadRecord): boolean {
+  if (rec.tunnel || (rec.layer ?? 0) < 0) return true;
+  const n = rec.name;
+  if (!n) return false;
+  if (rec.class !== 'motorway' && rec.class !== 'trunk' && rec.class !== 'rail') return false;
+  return /\btunnel\b/i.test(n);
+}
+
+/**
+ * Boston's OSM coverage maps most sidewalks as separate `footway` ways running
+ * a few metres off the kerb. We build our own kerb-attached sidewalks, so those
+ * duplicates have to go or every street gets two overlapping pavements. A
+ * footway counts as a duplicate when nearly all of its vertices sit inside the
+ * corridor of a carriageway. Park paths, plaza links and footbridges survive.
+ */
+function markSidewalkDuplicates(prepared: PreparedRoad[]): Set<PreparedRoad> {
+  const CELL = 48;
+  const grid = new Map<number, number[]>();
+  const segs: number[] = []; // x0,z0,x1,z1,corridor
+  const cellKey = (cx: number, cz: number): number => (cx + 4096) * 8192 + (cz + 4096);
+
+  for (const r of prepared) {
+    if (!r.spec.kerb && r.cls !== 'motorway' && r.cls !== 'trunk' && r.cls !== 'service') continue;
+    if (r.tunnel) continue;
+    const corridor = r.halfWidth + (r.spec.sidewalk > 0 ? r.spec.sidewalk + 2.6 : 3.2);
+    for (let i = 1; i < r.pts.length; i++) {
+      const a = r.pts[i - 1];
+      const b = r.pts[i];
+      const base = segs.length;
+      segs.push(a.x, a.z, b.x, b.z, corridor);
+      const cx0 = Math.floor(Math.min(a.x, b.x) / CELL);
+      const cx1 = Math.floor(Math.max(a.x, b.x) / CELL);
+      const cz0 = Math.floor(Math.min(a.z, b.z) / CELL);
+      const cz1 = Math.floor(Math.max(a.z, b.z) / CELL);
+      if ((cx1 - cx0) * (cz1 - cz0) > 400) continue;
+      for (let cx = cx0; cx <= cx1; cx++) {
+        for (let cz = cz0; cz <= cz1; cz++) {
+          const k = cellKey(cx, cz);
+          const l = grid.get(k);
+          if (l) l.push(base);
+          else grid.set(k, [base]);
+        }
+      }
+    }
+  }
+
+  const inside = (x: number, z: number): boolean => {
+    const cx = Math.floor(x / CELL);
+    const cz = Math.floor(z / CELL);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const l = grid.get(cellKey(cx + dx, cz + dz));
+        if (!l) continue;
+        for (const b of l) {
+          const x0 = segs[b]; const z0 = segs[b + 1];
+          const vx = segs[b + 2] - x0; const vz = segs[b + 3] - z0;
+          const l2 = vx * vx + vz * vz;
+          let t = l2 > 1e-9 ? ((x - x0) * vx + (z - z0) * vz) / l2 : 0;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const dxp = x - (x0 + vx * t);
+          const dzp = z - (z0 + vz * t);
+          if (dxp * dxp + dzp * dzp < segs[b + 4] * segs[b + 4]) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const dupes = new Set<PreparedRoad>();
+  for (const r of prepared) {
+    if (r.cls !== 'footway') continue;
+    if (r.bridge || r.tunnel || r.layer !== 0) continue;
+    let hits = 0;
+    for (const p of r.pts) if (inside(p.x, p.z)) hits++;
+    if (hits / r.pts.length > 0.72) dupes.add(r);
+  }
+  return dupes;
+}
+
 /** Builds the topology. `sample` fills in elevations the data does not carry. */
 export function buildNetwork(
   records: RoadRecord[],
@@ -122,24 +225,31 @@ export function buildNetwork(
       }
     }
 
-    const mid = dd.pts[dd.pts.length >> 1];
+    // Simplify and grade the profile *before* topology so the junction fill and
+    // the ribbon that meets it are computed from identical numbers.
+    const sm = simplify(dd.pts, dd.ys, TUNE.simplifyEps);
+    if (sm.pts.length < 2) continue;
+    const ys = sm.ys.length > 3 ? smoothProfile(sm.ys, 2, 0.45) : sm.ys;
+
+    const mid = sm.pts[sm.pts.length >> 1];
     const width = widthOf(rec);
+    const tunnel = isTunnelRecord(rec);
     prepared.push({
       id: rec.id,
       rec,
       cls,
       spec: CLASS[cls],
-      pts: dd.pts,
-      ys: dd.ys,
+      pts: sm.pts,
+      ys,
       width,
       halfWidth: width * 0.5,
       lanes: lanesOf(rec),
       oneway: !!rec.oneway,
-      bridge: !!rec.bridge || (rec.layer ?? 0) > 0,
-      tunnel: !!rec.tunnel || (rec.layer ?? 0) < 0,
+      bridge: !tunnel && (!!rec.bridge || (rec.layer ?? 0) > 0),
+      tunnel,
       layer: Number.isFinite(rec.layer) ? rec.layer : 0,
       surface: surfaceOf(rec, mid.x, mid.z),
-      length: polylineLength(dd.pts),
+      length: polylineLength(sm.pts),
       trimStart: 0,
       trimEnd: 0,
       seed: hashStr(rec.id),
@@ -185,6 +295,10 @@ export function buildNetwork(
 
   // ---- 4. weld degree-2 chains so mid-block joints stay mitred ----------
   prepared = weldChains(prepared);
+
+  // ---- 4b. drop OSM sidewalk footways we are about to rebuild ourselves --
+  const dupes = markSidewalkDuplicates(prepared);
+  if (dupes.size) prepared = prepared.filter((r) => !dupes.has(r));
 
   // ---- 5. index the endpoints ------------------------------------------
   const nodes = new Map<string, Approach[]>();
@@ -251,6 +365,8 @@ export function buildNetwork(
   }
   for (const r of prepared) {
     if (!r.tunnel) continue;
+    // A footway "tunnel" is usually a building passage; only real portals.
+    if (r.width < 4 || r.cls === 'footway' || r.cls === 'cycleway' || r.cls === 'service') continue;
     for (const end of [0, 1] as const) {
       const i = end === 0 ? 0 : r.pts.length - 1;
       const p = r.pts[i];
@@ -403,24 +519,71 @@ function buildJunction(apps: Approach[]): Junction | null {
   const ring: V2[] = [];
   const ringDy: number[] = [];
   const ringY: number[] = [];
+  const arcs: Corner[] = [];
+
+  // Edge points of every approach, at its trimmed end. The fill is pushed
+  // 60 mm past the trim so it always laps the ribbon rather than leaving a
+  // hairline of bare terrain between the two.
+  const edgeL: V2[] = new Array(n);
+  const edgeR: V2[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const a = apps[i];
     const na = perp(a.dir);
-    const base = add(P, scale(a.dir, a.trim));
-    const crown = -TUNE.crownSlope * a.halfWidth;
-    ring.push(add(base, scale(na, a.halfWidth)));
+    const base = add(P, scale(a.dir, a.trim + 0.06));
+    edgeL[i] = add(base, scale(na, a.halfWidth));
+    edgeR[i] = add(base, scale(na, -a.halfWidth));
+  }
+
+  for (let i = 0; i < n; i++) {
+    const a = apps[i];
+    const b = apps[(i + 1) % n];
+    const kerbedA = a.road.spec.kerb;
+    const crown = crownDy(a.halfWidth, a.halfWidth, kerbedA);
+    ring.push(edgeL[i]);
     ringDy.push(crown);
     ringY.push(a.y);
-    ring.push(add(base, scale(na, -a.halfWidth)));
+    ring.push(edgeR[i]);
     ringDy.push(crown);
     ringY.push(a.y);
-    const c = corners[i];
-    if (c) {
-      const b = apps[(i + 1) % n];
-      ring.push(c);
-      ringDy.push(-TUNE.crownSlope * Math.min(a.halfWidth, b.halfWidth));
-      ringY.push((a.y + b.y) * 0.5);
+
+    const start = edgeR[i];
+    const end = edgeL[(i + 1) % n];
+    const ctrl = corners[i] ?? lerpMid(start, end, P);
+    const hw = Math.min(a.halfWidth, b.halfWidth);
+    const cornerDy = crownDy(hw, hw, kerbedA && b.road.spec.kerb);
+
+    // Quadratic Bezier through the kerb-line intersection: a real kerb
+    // return. It stays inside the triangle start-ctrl-end, so it can never
+    // bulge across the carriageway of either approach.
+    const chord = dist(start, end);
+    const steps = chord < 1.2 ? 1 : Math.max(2, Math.min(7, Math.round(chord / 2.1) + 1));
+    const pts: V2[] = [];
+    const ys: number[] = [];
+    const normals: V2[] = [];
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps;
+      const mt = 1 - t;
+      const px = mt * mt * start.x + 2 * mt * t * ctrl.x + t * t * end.x;
+      const pz = mt * mt * start.z + 2 * mt * t * ctrl.z + t * t * end.z;
+      const p2 = { x: px, z: pz };
+      pts.push(p2);
+      ys.push(a.y + (b.y - a.y) * t + cornerDy);
+      const ov = sub(p2, P);
+      const ol = Math.hypot(ov.x, ov.z);
+      normals.push(ol > 1e-4 ? { x: ov.x / ol, z: ov.z / ol } : { x: 1, z: 0 });
+      if (k > 0 && k < steps) {
+        ring.push(p2);
+        ringDy.push(cornerDy);
+        ringY.push(a.y + (b.y - a.y) * t);
+      }
     }
+    arcs.push({
+      pts,
+      ys,
+      normals,
+      kerbed: kerbedA && b.road.spec.kerb && n >= 2,
+      walk: Math.min(a.road.spec.sidewalk, b.road.spec.sidewalk),
+    });
   }
   if (ring.length < 3) return null;
 
@@ -440,12 +603,24 @@ function buildJunction(apps: Approach[]): Junction | null {
     ring,
     ringDy,
     ringY,
+    corners: arcs,
     radius,
     surface: best.road.surface,
     maxWidth,
     seed: hashStr(`${Math.round(P.x)}:${Math.round(P.z)}`),
     painted: apps.some((a) => a.road.spec.markings),
   };
+}
+
+/** Fallback corner control point when the two kerb lines do not intersect. */
+function lerpMid(a: V2, b: V2, away: V2): V2 {
+  const mx = (a.x + b.x) * 0.5;
+  const mz = (a.z + b.z) * 0.5;
+  const dx = mx - away.x;
+  const dz = mz - away.z;
+  const l = Math.hypot(dx, dz);
+  if (l < 1e-4) return { x: mx, z: mz };
+  return { x: mx + (dx / l) * 0.6, z: mz + (dz / l) * 0.6 };
 }
 
 /** Centreline elevation `d` metres in from the given end of a road. */
