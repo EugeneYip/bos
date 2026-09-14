@@ -12,19 +12,40 @@ import crypto from 'node:crypto';
 const ROOT = path.resolve(import.meta.dirname, '../..');
 export const CACHE_DIR = path.join(ROOT, '.cache/osm');
 
+/**
+ * Ordered by preference. The primary is used whenever it is healthy so that the
+ * whole extract shares one OSM base timestamp; mirrors are only borrowed while
+ * the primary is rate-limiting. `overpass.osm.ch` currently serves an unloaded
+ * database (see `validate`), so it self-disables after a few strikes.
+ */
 const ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.osm.ch/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
-];
+  'https://overpass.osm.ch/api/interpreter',
+].map((url) => ({ url, strikes: 0, busyUntil: 0 }));
 
-const POLITE_DELAY_MS = 1200;
-const MAX_ATTEMPTS = 10;
+const MAX_STRIKES = 4;
+const POLITE_DELAY_MS = 700;
+const MAX_ATTEMPTS = 12;
 
 let lastRequestAt = 0;
-let endpointCursor = 0;
 export const stats = { cacheHits: 0, fetches: 0, retries: 0, bytes: 0 };
+
+let rr = 0;
+/**
+ * Round-robin across every endpoint that is neither disabled nor cooling off.
+ * Spreading first attempts matters: hammering one host's two slots produces a
+ * storm of 429s that costs far more wall-clock than the extra hop.
+ */
+function pickEndpoint() {
+  const now = Date.now();
+  const live = ENDPOINTS.filter((e) => e.strikes < MAX_STRIKES);
+  if (!live.length) { for (const e of ENDPOINTS) e.strikes = 0; return ENDPOINTS[0]; }
+  const ready = live.filter((e) => e.busyUntil <= now);
+  if (ready.length) return ready[rr++ % ready.length];
+  return live.reduce((a, b) => (a.busyUntil <= b.busyUntil ? a : b));
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,8 +63,12 @@ function cachePath(key, query) {
 function validate(json) {
   const ts = json && json.osm3s && json.osm3s.timestamp_osm_base;
   if (!ts) throw new Error('response has no osm3s.timestamp_osm_base');
+  // Must be a full ISO instant. Beware: Date.parse('34') happily yields 2034.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(String(ts))) {
+    throw new Error(`bogus timestamp_osm_base ${JSON.stringify(ts)} (mirror has no data loaded)`);
+  }
   const t = Date.parse(ts);
-  if (!Number.isFinite(t) || t < Date.parse('2020-01-01')) {
+  if (!Number.isFinite(t) || t < Date.parse('2020-01-01') || t > Date.now() + 864e5) {
     throw new Error(`bogus timestamp_osm_base ${JSON.stringify(ts)} (mirror has no data loaded)`);
   }
   if (!Array.isArray(json.elements)) throw new Error('response has no elements array');
@@ -72,10 +97,11 @@ export async function overpass(key, query) {
     }
   }
 
-  let backoff = 4000;
+  let backoff = 2500;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const url = ENDPOINTS[endpointCursor % ENDPOINTS.length];
-    const wait = POLITE_DELAY_MS - (Date.now() - lastRequestAt);
+    const ep = pickEndpoint();
+    const url = ep.url;
+    const wait = Math.max(POLITE_DELAY_MS - (Date.now() - lastRequestAt), ep.busyUntil - Date.now());
     if (wait > 0) await sleep(wait);
     lastRequestAt = Date.now();
     const t0 = Date.now();
@@ -111,13 +137,19 @@ export async function overpass(key, query) {
         `    ${key}: ${json.elements.length} elements, ${(txt.length / 1e6).toFixed(2)} MB, ${secs}s ` +
         `[${new URL(url).hostname}]\n`,
       );
-      // Round-robin endpoints on success too, to spread the load.
-      endpointCursor++;
+      ep.strikes = 0;
       return json;
     } catch (err) {
       stats.retries++;
-      endpointCursor++;
       const msg = String(err && err.message ? err.message : err).slice(0, 140);
+      // An unloaded mirror is permanently useless; a busy one just needs a rest.
+      if (msg.includes('timestamp_osm_base') || msg.includes('no elements array')) {
+        ep.strikes = MAX_STRIKES;
+        console.log(`    disabling ${new URL(url).hostname}: ${msg}`);
+      } else {
+        ep.strikes++;
+        ep.busyUntil = Date.now() + Math.min(9_000 * ep.strikes, 60_000);
+      }
       if (attempt === MAX_ATTEMPTS) throw new Error(`${key}: gave up after ${attempt}: ${msg}`);
       process.stdout.write(`    ${key}: attempt ${attempt} failed (${msg}); retry in ${(backoff / 1000) | 0}s\n`);
       await sleep(backoff + Math.random() * 1000);

@@ -12,11 +12,12 @@ const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const want = (n) => only.length === 0 || only.includes(n);
 
 const out = {};
-if (want('coast')) { console.log('[coastline]'); out.coast = await Q.fetchCoastline(); }
-if (want('areas')) { console.log('[areas]'); out.areas = await Q.fetchAreas(); }
-if (want('props')) { console.log('[props]'); out.props = await Q.fetchProps(); }
-if (want('roads')) { console.log('[roads]'); out.roads = await Q.fetchRoads(); }
+// Buildings first: 77 tiles, by far the longest pole.
 if (want('buildings')) { console.log('[buildings]'); out.buildings = await Q.fetchBuildings(); }
+if (want('areas')) { console.log('[areas]'); out.areas = await Q.fetchAreas(); }
+if (want('coast')) { console.log('[coastline]'); out.coast = await Q.fetchCoastline(); }
+if (want('roads')) { console.log('[roads]'); out.roads = await Q.fetchRoads(); }
+if (want('props')) { console.log('[props]'); out.props = await Q.fetchProps(); }
 
 for (const [k, v] of Object.entries(out)) console.log(`${k.padEnd(10)} ${v.length} elements`);
 console.log(

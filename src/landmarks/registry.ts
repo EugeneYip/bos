@@ -1,0 +1,318 @@
+/**
+ * The landmark registry — the contract between this module and `Buildings`.
+ *
+ * `Buildings` suppresses its generic OSM extrusion for any footprint whose
+ * `BuildingRecord.landmark` slug appears here, and lets `Landmarks` place the
+ * hand-authored mesh instead. Keep `LANDMARKS` and `Landmark` stable.
+ *
+ * Anchors are real WGS84 lon/lat; project them with `lonLatToWorld` from
+ * `core/geo.ts`. `rotation` is a rotation about +Y in radians, authored so that
+ * each model's local +X axis lands on the building's real-world bearing (see
+ * `lib/util.ts#bearingX`).
+ */
+import * as THREE from 'three';
+import type { Ctx } from '../core/Context';
+import { bearingX } from './lib/util';
+
+import { buildHancock } from './buildings/hancock';
+import { buildPrudential } from './buildings/prudential';
+import { buildOneDalton } from './buildings/oneDalton';
+import { buildMillennium } from './buildings/millennium';
+import { buildStateHouse } from './buildings/stateHouse';
+import { buildZakim } from './buildings/zakim';
+import { buildCustomHouse } from './buildings/customHouse';
+import { buildBunkerHill } from './buildings/bunkerHill';
+import { buildFenway } from './buildings/fenway';
+import { buildFaneuil } from './buildings/faneuil';
+import { buildTrinity } from './buildings/trinity';
+import { buildBPL } from './buildings/bpl';
+import { buildOldNorth } from './buildings/oldNorth';
+import { buildOldStateHouse } from './buildings/oldStateHouse';
+import { buildCityHall } from './buildings/cityHall';
+import { buildMitDome } from './buildings/mitDome';
+import { buildLongfellow } from './buildings/longfellow';
+import { buildCitgo } from './buildings/citgo';
+
+export interface Landmark {
+  /** Matches `BuildingRecord.landmark`. */
+  slug: string;
+  name: string;
+  /** Real-world anchor; use `lonLatToWorld` to place. */
+  lon: number;
+  lat: number;
+  /** Rotation about Y so the building faces the way it really does, radians. */
+  rotation: number;
+  /** Builds the mesh. Called lazily. Returns a Group centred at origin, base at y=0. */
+  build(ctx: Ctx): THREE.Object3D;
+
+  /* ---- advisory metadata (additive; safe to ignore) ---------------------- */
+
+  /** Top of the built form above its own base, metres. For culling/labels. */
+  height?: number;
+  /** Radius in metres that the mesh occupies around the anchor. */
+  radius?: number;
+  /**
+   * Extra OSM landmark slugs this model also replaces, for complexes that span
+   * several footprints (Faneuil Hall + Quincy Market, Fenway's grandstand).
+   */
+  absorbs?: string[];
+  /** 1 = skyline signature, 2 = strong local identity. */
+  tier?: 1 | 2;
+}
+
+export const LANDMARKS: Landmark[] = [
+  /* ------------------------------------------------------------- tier one */
+  {
+    slug: 'hancock-tower',
+    name: '200 Clarendon Street (John Hancock Tower)',
+    lon: -71.07500,
+    lat: 42.34866,
+    // Long axis parallel to Clarendon St / the Back Bay grid.
+    rotation: bearingX(21.5),
+    height: 240.8,
+    radius: 55,
+    tier: 1,
+    absorbs: ['john-hancock-tower', '200-clarendon'],
+    build: buildHancock,
+  },
+  {
+    slug: 'prudential-tower',
+    name: 'Prudential Tower',
+    lon: -71.08206,
+    lat: 42.34728,
+    rotation: bearingX(111.5),
+    height: 275.8, // 229 m roof + 47 m mast
+    radius: 70,
+    tier: 1,
+    build: buildPrudential,
+  },
+  {
+    slug: 'one-dalton',
+    name: 'One Dalton Street (Four Seasons)',
+    lon: -71.08610,
+    lat: 42.34710,
+    rotation: bearingX(111.5),
+    height: 222,
+    radius: 34,
+    tier: 1,
+    build: buildOneDalton,
+  },
+  {
+    slug: 'millennium-tower',
+    name: 'Millennium Tower',
+    lon: -71.06028,
+    lat: 42.35528,
+    rotation: bearingX(62),
+    height: 208.5,
+    radius: 34,
+    tier: 1,
+    build: buildMillennium,
+  },
+  {
+    slug: 'state-house',
+    name: 'Massachusetts State House',
+    lon: -71.06361,
+    lat: 42.35833,
+    // Bulfinch front faces SSE over Boston Common; the facade runs ENE-WSW.
+    rotation: bearingX(75),
+    height: 47,
+    radius: 70,
+    tier: 1,
+    absorbs: ['massachusetts-state-house'],
+    build: buildStateHouse,
+  },
+  {
+    slug: 'zakim-bridge',
+    name: 'Leonard P. Zakim Bunker Hill Memorial Bridge',
+    lon: -71.06170,
+    lat: 42.37000,
+    rotation: bearingX(5),
+    height: 110,
+    radius: 330,
+    tier: 1,
+    build: buildZakim,
+  },
+  {
+    slug: 'custom-house-tower',
+    name: 'Custom House Tower',
+    lon: -71.05306,
+    lat: 42.35917,
+    rotation: bearingX(78),
+    height: 151,
+    radius: 40,
+    tier: 1,
+    build: buildCustomHouse,
+  },
+
+  /* ------------------------------------------------------------- tier two */
+  {
+    slug: 'bunker-hill-monument',
+    name: 'Bunker Hill Monument',
+    lon: -71.06083,
+    lat: 42.37639,
+    rotation: bearingX(22),
+    height: 67,
+    radius: 12,
+    tier: 2,
+    build: buildBunkerHill,
+  },
+  {
+    slug: 'fenway-park',
+    name: 'Fenway Park',
+    lon: -71.09759,
+    lat: 42.34672,
+    // Home plate -> centre field bears 38 deg; that axis is the model's +X.
+    rotation: bearingX(38),
+    height: 40,
+    radius: 170,
+    tier: 2,
+    absorbs: ['green-monster'],
+    build: buildFenway,
+  },
+  {
+    slug: 'faneuil-hall',
+    name: 'Faneuil Hall & Quincy Market',
+    lon: -71.05500,
+    lat: 42.36000,
+    rotation: bearingX(80),
+    height: 38,
+    radius: 130,
+    tier: 2,
+    absorbs: ['quincy-market'],
+    build: buildFaneuil,
+  },
+  {
+    slug: 'trinity-church',
+    name: 'Trinity Church, Copley Square',
+    lon: -71.07472,
+    lat: 42.34972,
+    // Nave runs W->E; the twin west towers face Copley Square.
+    rotation: bearingX(111.5),
+    height: 65,
+    radius: 50,
+    tier: 2,
+    build: buildTrinity,
+  },
+  {
+    slug: 'boston-public-library',
+    name: 'Boston Public Library, McKim Building',
+    lon: -71.07806,
+    lat: 42.34917,
+    rotation: bearingX(21.5),
+    height: 27,
+    radius: 60,
+    tier: 2,
+    build: buildBPL,
+  },
+  {
+    slug: 'old-north-church',
+    name: 'Old North Church',
+    lon: -71.05444,
+    lat: 42.36639,
+    rotation: bearingX(350),
+    height: 53,
+    radius: 22,
+    tier: 2,
+    build: buildOldNorth,
+  },
+  {
+    slug: 'old-state-house',
+    name: 'Old State House',
+    lon: -71.05750,
+    lat: 42.35861,
+    rotation: bearingX(78),
+    height: 27,
+    radius: 20,
+    tier: 2,
+    build: buildOldStateHouse,
+  },
+  {
+    slug: 'boston-city-hall',
+    name: 'Boston City Hall',
+    lon: -71.05778,
+    lat: 42.36028,
+    rotation: bearingX(60),
+    height: 43,
+    radius: 90,
+    tier: 2,
+    build: buildCityHall,
+  },
+  {
+    slug: 'mit-great-dome',
+    name: 'MIT Great Dome (Building 10)',
+    lon: -71.09206,
+    lat: 42.35983,
+    rotation: bearingX(75),
+    height: 45,
+    radius: 100,
+    tier: 2,
+    build: buildMitDome,
+  },
+  {
+    slug: 'longfellow-bridge',
+    name: 'Longfellow Bridge',
+    lon: -71.07445,
+    lat: 42.36225,
+    rotation: bearingX(295),
+    height: 30,
+    radius: 300,
+    tier: 2,
+    build: buildLongfellow,
+  },
+  {
+    slug: 'citgo-sign',
+    name: 'Citgo Sign, Kenmore Square',
+    lon: -71.09556,
+    lat: 42.34889,
+    // The sign face looks SW toward Kenmore Square and Fenway Park.
+    rotation: bearingX(125),
+    height: 33,
+    radius: 22,
+    tier: 2,
+    build: buildCitgo,
+  },
+];
+
+const BY_SLUG = new Map<string, Landmark>();
+for (const l of LANDMARKS) {
+  BY_SLUG.set(l.slug, l);
+  for (const a of l.absorbs ?? []) BY_SLUG.set(a, l);
+}
+
+/** Lookup including the `absorbs` aliases. */
+export function findLandmark(slug: string): Landmark | undefined {
+  return BY_SLUG.get(slug);
+}
+
+/** Every slug that should suppress a generic OSM extrusion. */
+export function landmarkSlugs(): string[] {
+  return [...BY_SLUG.keys()];
+}
+
+const cache = new WeakMap<Ctx, Map<string, THREE.Object3D>>();
+
+/**
+ * Build (and memoise per `Ctx`) the mesh for a slug. Returns null for unknown
+ * slugs and never throws: a landmark that fails to build must not take the city
+ * down with it.
+ */
+export function buildLandmark(slug: string, ctx: Ctx): THREE.Object3D | null {
+  const lm = findLandmark(slug);
+  if (!lm) return null;
+  let m = cache.get(ctx);
+  if (!m) {
+    m = new Map();
+    cache.set(ctx, m);
+  }
+  const hit = m.get(lm.slug);
+  if (hit) return hit;
+  try {
+    const obj = lm.build(ctx);
+    obj.userData.landmark = lm.slug;
+    m.set(lm.slug, obj);
+    return obj;
+  } catch (err) {
+    console.error(`[Landmarks] failed to build "${lm.slug}"`, err);
+    return null;
+  }
+}

@@ -73,7 +73,7 @@ way["natural"="coastline"](${b});
 out geom;`;
 
 export async function fetchBuildings() {
-  return fetchTiled('bld', BOUNDS, 0.012, BUILDING_QL, { concurrency: 2 });
+  return fetchTiled("bld", BOUNDS, 0.012, BUILDING_QL, { concurrency: 3 });
 }
 export async function fetchRoads() {
   return fetchTiled('road', BOUNDS, 0.026, ROAD_QL, { concurrency: 2 });

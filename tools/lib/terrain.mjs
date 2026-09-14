@@ -164,8 +164,10 @@ export async function buildHeightfield({ zoom = 14, targetSpacing = 9 } = {}) {
     }
   }
   const elevations = smooth(raw, width, height, 1);
-  // Terrarium reports 0 over open water; guard against sub-sea artefacts on land.
-  for (let i = 0; i < elevations.length; i++) if (elevations[i] < -3) elevations[i] = 0;
+  // No land in the modelled extent is below mean sea level, so anything negative
+  // is either a void or smoothing overshoot at the shoreline. The water bodies
+  // themselves get carved back out by `carveWater` once they are known.
+  for (let i = 0; i < elevations.length; i++) if (elevations[i] < 0) elevations[i] = 0;
 
   return {
     width, height,
@@ -173,7 +175,6 @@ export async function buildHeightfield({ zoom = 14, targetSpacing = 9 } = {}) {
     originX: minX, originZ: minZ,
     spacingX, spacingZ,
     elevations,
-    rawMax: Math.max(...raw.slice(0, 0)) || undefined,
   };
 }
 
@@ -191,4 +192,72 @@ export function makeSampler(t) {
     const c = elevations[(j + 1) * width + i], d = elevations[(j + 1) * width + i + 1];
     return (a * (1 - dx) + b * dx) * (1 - dz) + (c * (1 - dx) + d * dx) * dz;
   };
+}
+
+/**
+ * Push the heightfield down under water polygons so the sea floor sits below the
+ * water plane instead of z-fighting with it, with a feathered edge that reads as
+ * a shoreline. Even-odd scanline fill, so holes (islands) are excluded for free.
+ *
+ * @param {{width:number,height:number,originX:number,originZ:number,spacingX:number,spacingZ:number,elevations:Float32Array}} t
+ * @param {{outline:number[],holes?:number[][],kind:string}[]} areas
+ * @param {number} depth  metres to drop fully-submerged posts
+ */
+export function carveWater(t, areas, depth = 1.6) {
+  const { width, height, originX, originZ, spacingX, spacingZ } = t;
+  const mask = new Float32Array(width * height);
+  const xs = [];
+  let filled = 0;
+  for (const a of areas) {
+    if (a.kind !== 'water' && a.kind !== 'river') continue;
+    const rings = [a.outline, ...(a.holes || [])];
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 1; i < a.outline.length; i += 2) {
+      if (a.outline[i] < minZ) minZ = a.outline[i];
+      if (a.outline[i] > maxZ) maxZ = a.outline[i];
+    }
+    const j0 = Math.max(0, Math.floor((minZ - originZ) / spacingZ));
+    const j1 = Math.min(height - 1, Math.ceil((maxZ - originZ) / spacingZ));
+    for (let j = j0; j <= j1; j++) {
+      const z = originZ + j * spacingZ;
+      xs.length = 0;
+      for (const ring of rings) {
+        const n = ring.length / 2;
+        for (let i = 0, k = n - 1; i < n; k = i++) {
+          const zi = ring[i * 2 + 1], zk = ring[k * 2 + 1];
+          if ((zi > z) !== (zk > z)) {
+            xs.push(ring[k * 2] + ((z - zk) / (zi - zk)) * (ring[i * 2] - ring[k * 2]));
+          }
+        }
+      }
+      if (xs.length < 2) continue;
+      xs.sort((p, q) => p - q);
+      for (let s = 0; s + 1 < xs.length; s += 2) {
+        const i0 = Math.max(0, Math.ceil((xs[s] - originX) / spacingX));
+        const i1 = Math.min(width - 1, Math.floor((xs[s + 1] - originX) / spacingX));
+        for (let i = i0; i <= i1; i++) { if (!mask[j * width + i]) filled++; mask[j * width + i] = 1; }
+      }
+    }
+  }
+  // Feather: two box passes so the bank slopes over ~4 posts (~36 m).
+  let m = mask;
+  for (let pass = 0; pass < 2; pass++) {
+    const o = new Float32Array(width * height);
+    for (let j = 0; j < height; j++) {
+      for (let i = 0; i < width; i++) {
+        let s = 0, n = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const jj = j + dj; if (jj < 0 || jj >= height) continue;
+          for (let di = -1; di <= 1; di++) {
+            const ii = i + di; if (ii < 0 || ii >= width) continue;
+            s += m[jj * width + ii]; n++;
+          }
+        }
+        o[j * width + i] = s / n;
+      }
+    }
+    m = o;
+  }
+  for (let i = 0; i < t.elevations.length; i++) t.elevations[i] -= depth * m[i];
+  return filled;
 }
