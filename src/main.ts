@@ -37,6 +37,11 @@ async function main(): Promise<void> {
 
   const app = new App(canvas, tier);
 
+  // Post takes over presentation, so it needs the App itself. Ctx deliberately
+  // does not expose it, so the hand-over is explicit rather than a global.
+  const post = new Post();
+  post.attach(app);
+
   // Registration order is initialisation order: materials and terrain publish
   // capabilities that later modules read, and Post must wrap a finished scene.
   app.add(
@@ -54,7 +59,7 @@ async function main(): Promise<void> {
     new Traffic(),
     new Physics(),
     new CameraRig(),
-    new Post(),
+    post,
     new Hud(),
   );
 

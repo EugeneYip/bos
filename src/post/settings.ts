@@ -244,9 +244,9 @@ export function defaultSettings(): PostSettings {
 
     bloom: {
       enabled: true,
-      threshold: 1.15,
-      knee: 0.6,
-      intensity: 0.045,
+      threshold: 1.55,
+      knee: 0.55,
+      intensity: 0.038,
       levels: 6,
       spread: 0.55,
       streak: 0.0,
@@ -279,7 +279,10 @@ export function defaultSettings(): PostSettings {
       maxLuminance: 14.0,
       speedUp: 2.6,
       speedDown: 1.1,
-      strength: 0.85,
+      // The sky module already computes a physically-motivated exposure for
+      // the time of day. Metering should trim that, not replace it: at 0.85 a
+      // dark cityscape drove the aperture open until the Charles blew out.
+      strength: 0.45,
       centerWeight: 0.45,
     },
 
@@ -292,8 +295,10 @@ export function defaultSettings(): PostSettings {
       vignetteStrength: 0.3,
       vignetteRoundness: 1.1,
       grain: true,
-      grainStrength: 0.028,
-      grainShadowBias: 1.6,
+      // Grain is applied after the tonemap, so it is not averaged away by TAA
+      // and reads at full strength in a still frame.
+      grainStrength: 0.013,
+      grainShadowBias: 1.15,
       flare: true,
       flareStrength: 0.35,
       halation: true,
