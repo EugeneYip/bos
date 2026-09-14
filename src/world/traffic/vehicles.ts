@@ -191,3 +191,50 @@ export const CAR_COLORS: number[] = [
   0x8c9095, 0x8c9095, 0xa8adb2, 0x5a6066, 0x6d7276,
   0x8d2f31, 0x27406b, 0x1f4f38, 0x7a5a2c, 0x35566e,
 ];
+
+/* --------------------------------------------------------------- people */
+
+/**
+ * A pedestrian, as three merged boxes plus legs that the shader swings.
+ *
+ * At the distance people are actually visible — a few tens of metres — the
+ * silhouette and the walk cycle are the whole read. Modelling faces would be
+ * triangles spent where no pixel lands. The legs carry a `stride` attribute
+ * the shader uses to swing them; everything above the hips stays rigid.
+ */
+export function pedestrianGeometry(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  const tag = (g: THREE.BufferGeometry, stride: number, hue: number): THREE.BufferGeometry => {
+    const n = g.getAttribute('position').count;
+    const a = new Float32Array(n);
+    a.fill(stride);
+    g.setAttribute('stride', new THREE.Float32BufferAttribute(a, 1));
+    const c = new THREE.Color(hue).convertSRGBToLinear();
+    const col = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    return g;
+  };
+
+  // Torso and head are white so the per-instance tint becomes the clothing.
+  parts.push(tag(box(0.34, 0.52, 0.22, 0, 1.18), 0, 0xffffff));
+  parts.push(tag(box(0.19, 0.20, 0.19, 0, 1.54), 0, 0xd8a986));   // head
+  // Arms swing opposite the legs, so they get a negative stride.
+  for (const z of [-0.22, 0.22]) {
+    const arm = box(0.11, 0.44, 0.11, 0, 1.18, z);
+    parts.push(tag(arm, z > 0 ? -0.7 : 0.7, 0xffffff));
+  }
+  // Legs, hinged at the hip: stride +1 / -1 so they alternate.
+  for (const z of [-0.09, 0.09]) {
+    const leg = box(0.13, 0.62, 0.14, 0, 0.56, z);
+    parts.push(tag(leg, z > 0 ? 1 : -1, 0x2d3138));
+  }
+  return merge(parts)!;
+}
+
+/** Clothing colours: Boston dresses in dark neutrals most of the year. */
+export const CLOTHES: number[] = [
+  0x2b2f36, 0x2b2f36, 0x1d2026, 0x3b4048, 0x55585e,
+  0x6d4b3a, 0x8a8f96, 0xb9bcc0, 0x2f4a5e, 0x5d2b2f,
+  0x35543f, 0xc9c4b8, 0x7a6f8a,
+];

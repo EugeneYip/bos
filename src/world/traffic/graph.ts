@@ -18,6 +18,11 @@ const SPEED: Record<string, number> = {
   tertiary: 11, residential: 8, service: 6,
 };
 
+/** Walking speed by class, m/s. A brisk pavement pace is about 1.4. */
+const WALK_SPEED: Record<string, number> = {
+  footway: 1.4, pedestrian: 1.3, cycleway: 1.5, service: 1.3, residential: 1.35,
+};
+
 /** Typical US lane width, metres. */
 export const LANE_W = 3.35;
 
@@ -52,8 +57,13 @@ const key = (x: number, z: number): number =>
  * Splits every way into its constituent edges and indexes them by node.
  * Two-way streets produce an edge in each direction; a vehicle only ever
  * traverses an edge forwards, which keeps the simulation trivial.
+ *
+ * `mode` picks the class table: 'drive' gives the carriageway network,
+ * 'walk' gives footways and shared surfaces, always two-way because nobody
+ * obeys a oneway tag on foot.
  */
-export function buildLaneGraph(roads: RoadRecord[]): LaneGraph {
+export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'drive'): LaneGraph {
+  const table = mode === 'walk' ? WALK_SPEED : SPEED;
   const nodeIds = new Map<number, number>();
   const nodeXYZ: number[] = [];
   const edges: Edge[] = [];
@@ -85,16 +95,16 @@ export function buildLaneGraph(roads: RoadRecord[]): LaneGraph {
       len += Math.sqrt(dx * dx + dy * dy + dz * dz);
       cum[i] = len;
     }
-    if (len < 4) return; // too short to be worth driving
+    if (len < 3) return; // too short to be worth traversing
     outLists[from].push(edges.length);
-    edges.push({ pts, cum, length: len, lanes, cls, speed: SPEED[cls] ?? 8, to, layer });
+    edges.push({ pts, cum, length: len, lanes, cls, speed: table[cls] ?? 8, to, layer });
   };
 
   let totalKm = 0;
 
   for (const r of roads) {
     if (r.tunnel) continue; // nothing to see underground
-    if (!SPEED[r.class]) continue;
+    if (!table[r.class]) continue;
     const n = r.path.length / 2;
     if (n < 2) continue;
 
@@ -115,7 +125,7 @@ export function buildLaneGraph(roads: RoadRecord[]): LaneGraph {
     addEdge(fwd, a, b, lanes, r.class, r.layer);
     totalKm += 0;
 
-    if (!r.oneway) {
+    if (!r.oneway || mode === 'walk') {
       const rev = new Float32Array(n * 3);
       for (let i = 0; i < n; i++) {
         rev[i * 3] = fwd[(n - 1 - i) * 3];

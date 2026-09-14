@@ -3,7 +3,7 @@ import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord, PropSet, RoadRecord } from '../core/types';
 import { loadAreas, loadProps, loadRoads } from '../core/data';
 import { buildLaneGraph, sampleEdge, LANE_W, type LaneGraph } from './traffic/graph';
-import { vehicleTypes, CAR_COLORS, type Part, type VehicleDef } from './traffic/vehicles';
+import { vehicleTypes, pedestrianGeometry, CAR_COLORS, CLOTHES, type Part, type VehicleDef } from './traffic/vehicles';
 import { vesselTypes, flagGeometry, flagTexture, type VesselDef, type VesselPart } from './traffic/vessels';
 
 /**
@@ -22,6 +22,10 @@ const SIM_RADIUS = 420;
 const RECYCLE_RADIUS = 520;
 
 const POOL: Record<string, number> = { low: 120, medium: 300, high: 650, ultra: 1000 };
+const WALKERS: Record<string, number> = { low: 60, medium: 180, high: 400, ultra: 650 };
+/** People are only legible close in, so they live in a tighter bubble. */
+const WALK_RADIUS = 170;
+const WALK_RECYCLE = 220;
 const BOATS: Record<string, number> = { low: 8, medium: 18, high: 34, ultra: 52 };
 
 interface Car {
@@ -34,6 +38,18 @@ interface Car {
   /** Target speed, so braking and acceleration are not instant. */
   cruise: number;
   colour: number;
+  active: boolean;
+}
+
+interface Walker {
+  edge: number;
+  s: number;
+  /** Which side of the path, so two people do not occupy the same line. */
+  side: number;
+  speed: number;
+  colour: number;
+  /** Accumulated stride phase, so the walk cycle matches the ground speed. */
+  phase: number;
   active: boolean;
 }
 
@@ -72,6 +88,12 @@ export class Traffic implements WorldModule {
   /** Coarse bucket index over `waterCells`, so "am I still afloat?" is O(1). */
   private cellGrid = new Map<number, number[]>();
 
+  private walkGraph: LaneGraph | null = null;
+  private walkers: Walker[] = [];
+  private walkMesh: THREE.InstancedMesh | null = null;
+  private walkPhase: THREE.InstancedBufferAttribute | null = null;
+  private walkSpawn = 0;
+
   private flagMesh: THREE.InstancedMesh | null = null;
   private flagUniforms = { uTime: { value: 0 }, uWind: { value: new THREE.Vector2(0.72, -0.69) } };
 
@@ -101,6 +123,7 @@ export class Traffic implements WorldModule {
     }
 
     this.buildVehicles(ctx);
+    this.buildWalkers(ctx, roads);
     this.buildWaterCells(areas);
     this.buildVessels(ctx);
     this.buildFlags(ctx, props);
@@ -108,9 +131,11 @@ export class Traffic implements WorldModule {
     ctx.stats.trafficEdges = this.graph.edges.length;
     ctx.stats.vehicles = this.cars.length;
     ctx.stats.boats = this.boats.length;
+    ctx.stats.pedestrians = this.walkers.length;
     console.info(
       `[Traffic] ${this.graph.edges.length} lane edges over ${this.graph.totalKm.toFixed(0)} km, ` +
-      `${this.cars.length} vehicles, ${this.boats.length} vessels, ${this.flagMesh?.count ?? 0} flags`,
+      `${this.cars.length} vehicles, ${this.walkers.length} pedestrians, ` +
+      `${this.boats.length} vessels, ${this.flagMesh?.count ?? 0} flags`,
     );
 
     ctx.on('quality-changed', () => this.resizePool(ctx));
@@ -288,6 +313,133 @@ export class Traffic implements WorldModule {
       }
     }
     ctx.stats.vehiclesDrawn = cursor.reduce((a, b) => a + b, 0);
+  }
+
+  /* ------------------------------------------------------------- walkers */
+
+  /**
+   * People on the footway network. One instanced mesh for the lot: the walk
+   * cycle is a per-instance phase the vertex shader swings the limbs by, so
+   * nothing about the animation touches the CPU.
+   */
+  private buildWalkers(ctx: Ctx, roads: RoadRecord[]): void {
+    this.walkGraph = buildLaneGraph(roads, 'walk');
+    if (!this.walkGraph.edges.length) return;
+
+    const n = WALKERS[ctx.tier] ?? 400;
+    const geo = pedestrianGeometry();
+    const phase = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+    geo.setAttribute('aPhase', phase);
+    this.walkPhase = phase;
+
+    const mat = new THREE.MeshStandardMaterial({
+      name: 'pedestrian', roughness: 0.82, metalness: 0, vertexColors: true,
+    });
+    mat.onBeforeCompile = (sh) => {
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float stride;\nattribute float aPhase;')
+        .replace('#include <begin_vertex>', /* glsl */ `
+          #include <begin_vertex>
+          // Swing limbs about the hip/shoulder. 'stride' is 0 on the torso,
+          // +/-1 on the legs and +/-0.7 on the arms, so they counter-swing.
+          if (abs(stride) > 0.01) {
+            float a = sin(aPhase) * 0.62 * stride;
+            float pivot = stride > 0.9 || stride < -0.9 ? 0.87 : 1.40;
+            float dy = transformed.y - pivot;
+            float c = cos(a), sn = sin(a);
+            transformed.x += dy * sn;
+            transformed.y = pivot + dy * c;
+          }
+        `);
+    };
+    mat.customProgramCacheKey = () => 'pedestrian';
+    this.materials.push(mat);
+
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.name = 'pedestrians';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+    this.root.add(mesh);
+    this.walkMesh = mesh;
+
+    for (let i = 0; i < n; i++) {
+      this.walkers.push({ edge: -1, s: 0, side: 0, speed: 1.4, colour: 0, phase: 0, active: false });
+    }
+  }
+
+  private spawnWalker(w: Walker, ctx: Ctx): void {
+    const g = this.walkGraph!;
+    const cam = ctx.camera.position;
+    for (let a = 0; a < 14; a++) {
+      const ei = (this.walkSpawn = (this.walkSpawn + 5171) % g.edges.length);
+      const e = g.edges[ei];
+      const mid = Math.floor(e.cum.length / 2) * 3;
+      if (Math.hypot(e.pts[mid] - cam.x, e.pts[mid + 2] - cam.z) > WALK_RADIUS) continue;
+      w.edge = ei;
+      w.s = Math.random() * e.length;
+      w.side = (Math.random() - 0.5) * 1.3;
+      w.speed = 1.05 + Math.random() * 0.62;
+      w.colour = CLOTHES[(Math.random() * CLOTHES.length) | 0];
+      w.phase = Math.random() * 6.283;
+      w.active = true;
+      return;
+    }
+    w.active = false;
+  }
+
+  private stepWalkers(dt: number, ctx: Ctx): void {
+    const mesh = this.walkMesh;
+    const g = this.walkGraph;
+    if (!mesh || !g) return;
+
+    const cam = ctx.camera.position;
+    const p = { x: 0, y: 0, z: 0, hx: 1, hz: 0 };
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    const pos = new THREE.Vector3();
+    const one = new THREE.Vector3(1, 1, 1);
+    const col = new THREE.Color();
+    const phaseArr = this.walkPhase!.array as Float32Array;
+    let slot = 0;
+    const cap = mesh.instanceMatrix.count;
+
+    for (const w of this.walkers) {
+      if (!w.active) { this.spawnWalker(w, ctx); if (!w.active) continue; }
+      const e = g.edges[w.edge];
+      w.s += w.speed * dt;
+      // A 1.7 m stride at this speed; two steps per cycle.
+      w.phase += (w.speed / 0.85) * dt * Math.PI;
+
+      if (w.s >= e.length) {
+        const outs = g.out[e.to];
+        if (!outs || !outs.length) { w.active = false; continue; }
+        w.s -= e.length;
+        w.edge = outs[(Math.random() * outs.length) | 0];
+        continue;
+      }
+      sampleEdge(e, w.s, p);
+      if (Math.hypot(p.x - cam.x, p.z - cam.z) > WALK_RECYCLE) { w.active = false; continue; }
+      if (slot >= cap) continue;
+
+      pos.set(p.x + p.hz * w.side, p.y, p.z - p.hx * w.side);
+      q.setFromAxisAngle(up, Math.atan2(p.hx, p.hz));
+      m.compose(pos, q, one);
+      mesh.setMatrixAt(slot, m);
+      col.setHex(w.colour).convertSRGBToLinear();
+      mesh.instanceColor!.setXYZ(slot, col.r, col.g, col.b);
+      phaseArr[slot] = w.phase;
+      slot++;
+    }
+
+    mesh.count = slot;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor!.needsUpdate = true;
+    this.walkPhase!.needsUpdate = true;
+    ctx.stats.pedestriansDrawn = slot;
   }
 
   /* ---------------------------------------------------------------- water */
@@ -545,6 +697,7 @@ export class Traffic implements WorldModule {
     this.flagUniforms.uTime.value = this.time;
 
     this.stepCars(dt, ctx);
+    this.stepWalkers(dt, ctx);
     this.stepBoats(dt, ctx);
 
     // Headlights and tail lights on the same civil-twilight curve as the rest
