@@ -31,28 +31,31 @@ bodies, 1.1 M terrain posts, 89,279 trees and 3,754 parks — all from
 OpenStreetMap and USGS, all rendering together, and all of it alive: vehicles
 on a lane graph recovered from the street network, pedestrians on the
 footways, rowing shells and ferries on the water, flags on the flagpoles.
+Beyond the modelled box a coarse USGS heightfield carries the Blue Hills, the
+Middlesex Fells and the harbour islands out to 23 km.
 
-Beyond the modelled box, the land keeps going: a coarse USGS heightfield
-drapes the Blue Hills, the Middlesex Fells, the Arlington drumlins and the
-harbour islands out to 23 km, dissolving into aerial haze.
+The frame goes through a full post chain: temporal antialiasing, ground-truth
+ambient occlusion, screen-space reflections, bloom, depth of field, motion
+blur, metered auto-exposure and a filmic grade. Everything upstream of the
+grade stays in linear HDR; the grade is the single place the image is
+tonemapped and written to sRGB.
 
 Verified against reality — 200 Clarendon 241 m, the Prudential 229 m, One
 Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
 43 m; the Charles carved to −3.6 m and the harbour to −12 m.
 
-At 1080p on `high`, ten of the thirteen reference viewpoints run at 60 fps.
-
 Still rough, and worth knowing before you look:
 
-- **Post-processing is not implemented.** No TAA, ambient occlusion,
-  screen-space reflection or bloom, so edges alias and contact shadows are
-  missing. The pass library exists under `src/post/`; only the module that
-  chains it is absent. This is the largest remaining quality gap.
-- **The high aerial runs at ~20 fps** with the whole city in frame. Street
-  level and mid-range views are fine.
-- **The Charles reads lighter than it should** from the air.
-- **Night facades are bright.** Exposure and emissive scaling are coupled
-  now, but lit windows still read hotter than they should.
+- **Performance.** At 1080p on `high` the reference viewpoints run 20–60 fps;
+  the high aerial, with the whole city in frame, is the worst at 20. The post
+  chain costs roughly half the frame, so `?post=off` or `?q=medium` are both
+  worth trying on a laptop. Screen-space reflections and motion blur are
+  reserved for `ultra`.
+- **A white band sits on the horizon** in distant views — the ocean mirroring
+  a bright sky at grazing incidence, not yet fully resolved into haze.
+- **Under a dense tree canopy the ground goes very dark.** The metering is
+  centre-weighted to compensate but does not fully recover it.
+- **The Charles reads lighter than it should** from high altitude.
 
 ## Controls
 
@@ -64,8 +67,13 @@ Still rough, and worth knowing before you look:
 | `H` | Hide the interface |
 | `` ` `` | Performance overlay |
 
-Append `?q=low` / `medium` / `high` / `ultra` to the URL to force a quality tier,
-or `?ui=off` for a clean capture.
+Append `?q=low` / `medium` / `high` / `ultra` to the URL to force a quality
+tier, or `?ui=off` for a clean capture.
+
+`?post=off` bypasses post-processing entirely; `?post=taa,ao,bloom` runs only
+the stages you name (`taa`, `ao`, `ssr`, `bloom`, `mb`, `dof`, `exposure`,
+`grain`, `vignette`, `ca`, `half`), which is the fastest way to find which
+stage is responsible for something on screen.
 
 ## Running it locally
 
