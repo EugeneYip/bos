@@ -423,6 +423,15 @@ function signature(m: THREE.Material): string {
 }
 
 function cloneRepeat(t: THREE.Texture, rep: number): THREE.Texture {
+  // The shared library bakes its maps on the GPU, so they are render-target
+  // textures: the pixels live in a framebuffer attachment, not in a CPU image.
+  // Such a texture CANNOT be cloned — three.js keys the GL texture off the
+  // texture object, so a clone resolves to no binding at all and samples
+  // black. Share the original instead and let the geometry's world-metre UVs
+  // carry the tiling, which is what the library's `tileMeters` already
+  // assumes.
+  if (t.isRenderTargetTexture) return t;
+
   const c = t.clone();
   c.wrapS = c.wrapT = THREE.RepeatWrapping;
   c.repeat.set(rep, rep);

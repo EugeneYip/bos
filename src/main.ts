@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { App } from './core/App';
 import { installDebugApi } from './core/debugApi';
 import type { QualityTier } from './core/config';
@@ -60,6 +61,7 @@ async function main(): Promise<void> {
 
   // Expose for debugging and for the automated visual-QA harness.
   (window as unknown as Record<string, unknown>).__boston = app;
+  (window as unknown as Record<string, unknown>).__THREE = THREE;
   (window as unknown as Record<string, unknown>).__ready = true;
 }
 
