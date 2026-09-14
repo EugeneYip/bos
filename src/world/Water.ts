@@ -256,9 +256,19 @@ export class Water implements WorldModule {
       .setRGB(0.020, 0.030, 0.055)
       .lerp(new THREE.Color(0.30, 0.40, 0.55), day);
 
-    m.uniforms.uEnvIntensity.value = 0.18 + 0.82 * day;
+    m.uniforms.uEnvIntensity.value = 0.05 + 0.95 * day * day;
+
+    // The sky is physically dim at night, so the sky module winds exposure up
+    // ~4x. Anything authored display-referred — the city's own glow here, lit
+    // windows elsewhere — has to come down by the same factor or it clips the
+    // frame to white the moment the sun sets.
+    const expo = ctx.renderer.toneMappingExposure || 2.5;
+    const comp = 2.5 / Math.max(expo, 0.1);
+
     // At night the brightest thing the Charles can reflect is the city.
-    m.uniforms.uCityGlow.value.setRGB(0.95, 0.62, 0.30).multiplyScalar(1 - day * 0.9);
+    m.uniforms.uCityGlow.value
+      .setRGB(0.95, 0.62, 0.30)
+      .multiplyScalar((1 - day * 0.9) * comp);
 
     if (ctx.envMap && !this.envBound) {
       this.envBound = true;

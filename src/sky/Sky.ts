@@ -79,22 +79,29 @@ const MOON_SIZE_BOOST = 1.6;
 const AEROSOL_TAU = 0.092;
 
 /**
- * Exposure against apparent solar elevation in degrees. Interpolated with
+ * Exposure against apparent solar elevation in degrees, interpolated with
  * smoothstep so there is no kink anywhere in the day.
+ *
+ * A physically-scaled night would need roughly 20x this at the bottom of the
+ * curve, but every emissive surface in the city — lit windows, street lamps,
+ * the Citgo sign, Fenway's light banks — is authored display-referred, so
+ * that much gain clips the whole frame to white. The night end is therefore
+ * tuned to what actually reads: dark, blue, and legible, with the lights
+ * carrying the image rather than the sky.
  */
 const EXPOSURE_CURVE: ReadonlyArray<readonly [number, number]> = [
   [60, 2.40],
   [30, 2.50],
   [15, 2.75],
   [6, 3.45],
-  [1.5, 5.0],
-  [0, 6.4],
-  [-3, 11.5],
-  [-6, 20.0],
-  [-9, 31.0],
-  [-12, 39.0],
-  [-18, 46.0],
-  [-90, 48.0],
+  [1.5, 3.9],
+  [0, 4.2],
+  [-3, 4.6],
+  [-6, 4.9],
+  [-9, 5.1],
+  [-12, 5.2],
+  [-18, 5.3],
+  [-90, 5.4],
 ];
 
 function exposureFor(elevationDeg: number): number {

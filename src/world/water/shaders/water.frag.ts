@@ -145,7 +145,10 @@ void main() {
   // so it tints rather than replaces the analytic sky.
   float rough = clamp(0.02 + 0.30 * smoothstep(60.0, 4000.0, vViewDist), 0.0, 1.0);
   vec3 probe = textureCubeUV(envMap, R, rough).rgb;
-  sky = mix(sky, probe, 0.30);
+  // Kept deliberately light: the probe refreshes only every few degrees of
+  // solar motion, so leaning on it hard makes the water reflect a sky that
+  // is minutes out of date — most visibly as a daylit river after sunset.
+  sky = mix(sky, probe, 0.15);
 #endif
   sky *= uEnvIntensity;
 
@@ -223,7 +226,12 @@ void main() {
               * texture2D(uNoise, p * 0.023 - wind * uTime * 0.015).g;
   float foam = clamp((shoreFoam * 0.85 + crestFoam * 0.30) * churn * 2.2 * uFoamGain, 0.0, 1.0);
   foam *= 1.0 - smoothstep(900.0, 3000.0, vViewDist);
-  color = mix(color, uFoamColor * (down * 0.55 + 0.45), foam);
+  // Foam is white *material*, not a light source: it has to be lit by the
+  // same sun and sky as everything else, or it glows in the dark — and with
+  // the night exposure lift a constant floor here clips the whole channel to
+  // white.
+  vec3 foamLit = uFoamColor * (down * 0.85 + uSkyAmbient * 0.6);
+  color = mix(color, foamLit, foam);
 
   // At night the city is the brightest thing the water can reflect.
   color += uCityGlow * fres * 0.55 * (1.0 - smoothstep(0.0, 0.12, uSunDir.y));
@@ -231,6 +239,12 @@ void main() {
   // Far water melts into the horizon haze instead of ending at a hard line.
   float haze = smoothstep(uHorizonFade.x, uHorizonFade.y, vViewDist);
   color = mix(color, uSkyHorizon * uEnvIntensity, haze * 0.85);
+
+  // The sky module lifts exposure ~2x after dark so the dim sky still reads.
+  // Water has no light of its own, so without matching that lift downward the
+  // river ends up the brightest thing in a night frame. uEnvIntensity already
+  // tracks day-to-night, so reuse it as the scale.
+  color *= mix(0.055, 1.0, clamp(uEnvIntensity, 0.0, 1.0));
 
   gl_FragColor = vec4(color, 1.0);
 
