@@ -176,10 +176,34 @@ export function surfaceOf(r: RoadRecord, midX: number, midZ: number): SurfaceKey
   return 'asphalt';
 }
 
-/** Normalised, sanity-checked geometry inputs for one record. */
+/** Standard urban lane, metres (MassDOT / MUTCD). */
+export const LANE_WIDTH = 3.35;
+
+/**
+ * Carriageway width for one record, in metres.
+ *
+ * OSM's `width` is not consistently the carriageway: for most Boston streets
+ * it is the whole right-of-way, kerb to kerb to building line. Taken at face
+ * value and then given sidewalks *outside* it, a residential street came out
+ * ~16 m of continuous pavement against a real ~11-12 m, which is why the
+ * ground read as a sea of asphalt. So: if the quoted width is wide enough to
+ * contain the footways as well as the lanes, take the footways back out, then
+ * hold the result to something the lane count can actually justify.
+ */
 export function widthOf(r: RoadRecord): number {
   const spec = CLASS[r.class] ?? CLASS.residential;
-  const w = Number.isFinite(r.width) && r.width > 1.2 ? r.width : spec.defaultWidth;
+  const lanes = lanesOf(r);
+  // What the traffic lanes plus their gutters genuinely need.
+  const laneNeed = lanes * LANE_WIDTH + (spec.kerb ? 0.6 : 0.9);
+
+  const quoted = Number.isFinite(r.width) && r.width > 1.2 ? r.width : spec.defaultWidth;
+  let w = quoted;
+  if (spec.sidewalk > 0 && quoted > laneNeed + spec.sidewalk * 1.2) {
+    // Most of the surplus is footway; leave a little for on-street parking,
+    // which Boston has almost everywhere.
+    w = quoted - spec.sidewalk * 1.5;
+  }
+  w = Math.max(laneNeed, Math.min(w, spec.defaultWidth * 1.45));
   return Math.min(46, Math.max(1.4, w));
 }
 
