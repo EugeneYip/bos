@@ -66,6 +66,18 @@ export class Terrain implements WorldModule {
     const cover = rasteriseLandCover(areas, grid);
     const tCover = performance.now();
 
+    // Coverage is easy to get silently wrong — a bad grid or an empty area
+    // list yields an all-zero map, which renders as a city paved end to end
+    // in concrete rather than one with parks in it.
+    let painted = 0;
+    let greenCells = 0;
+    for (let i = 0; i < cover.cover.length; i += 4) {
+      if (cover.cover[i] || cover.cover[i + 1] || cover.cover[i + 2] || cover.cover[i + 3]) painted++;
+      if (cover.cover[i] > 8) greenCells++;
+    }
+    const coverPct = (100 * painted) / (cover.cover.length / 4);
+    const greenPct = (100 * greenCells) / (cover.cover.length / 4);
+
     const shore = carveShoreline(hf, cover);
     const tShore = performance.now();
 
@@ -146,6 +158,7 @@ export class Terrain implements WorldModule {
       + `(${(hf.width * hf.height / 1e6).toFixed(2)}M), ${tree.nodeCount} quadtree nodes, `
       + `elevation ${hf.minElevation.toFixed(2)}..${hf.maxElevation.toFixed(2)} m, `
       + `${shore.carved} cells carved to ${shore.deepest.toFixed(1)} m, `
+      + `cover ${coverPct.toFixed(1)}% painted / ${greenPct.toFixed(1)}% green from ${areas.length} areas, `
       + `surfaces ${surfaces.adopted.length ? `adopted[${surfaces.adopted.join(',')}]` : 'procedural'}\n`
       + `[Terrain] init ${(t1 - t0).toFixed(0)}ms = fetch ${(tLoad - t0).toFixed(0)} `
       + `+ refine ${(tGrid - tLoad).toFixed(0)} + landcover ${(tCover - tGrid).toFixed(0)} `
