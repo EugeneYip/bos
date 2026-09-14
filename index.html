@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0b1015" />
+    <title>Boston — Real-Time 3D City</title>
+    <meta name="description" content="A photoreal, physically-based real-time 3D model of Boston, Massachusetts, built from OpenStreetMap and USGS elevation data." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🏙️</text></svg>" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #06090d; }
+      body { font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      #app { position: fixed; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
+
+      #boot {
+        position: fixed; inset: 0; z-index: 100;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 1.4rem;
+        background:
+          radial-gradient(120% 90% at 50% 8%, #16283c 0%, #0a121c 45%, #05080c 100%);
+        color: #e8eef6;
+        transition: opacity .9s ease, visibility .9s;
+      }
+      #boot.done { opacity: 0; visibility: hidden; pointer-events: none; }
+      #boot h1 {
+        margin: 0; font-size: clamp(2rem, 7vw, 4.2rem); font-weight: 200;
+        letter-spacing: .42em; text-indent: .42em; text-transform: uppercase;
+        background: linear-gradient(180deg, #ffffff 10%, #8fb4d8 90%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      #boot .sub { margin: -.6rem 0 0; font-size: .74rem; letter-spacing: .3em; text-transform: uppercase; color: #6f8aa6; }
+      #bar { width: min(340px, 62vw); height: 2px; background: #1d2c3d; border-radius: 2px; overflow: hidden; }
+      #bar i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #3d7fc1, #7fc4ff); transition: width .35s ease; }
+      #boot .status { font-size: .7rem; letter-spacing: .16em; color: #5e7c99; min-height: 1em; }
+      #boot .legal { position: absolute; bottom: 1.2rem; font-size: .62rem; color: #44586c; letter-spacing: .06em; text-align: center; padding: 0 1rem; }
+      #boot .legal a { color: #6b8aa8; }
+      noscript { color: #cbd8e6; font-size: .9rem; }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+
+    <div id="boot">
+      <h1>Boston</h1>
+      <p class="sub">Real-time photoreal city</p>
+      <div id="bar"><i></i></div>
+      <div class="status" id="status">initialising…</div>
+      <div class="legal">
+        Geometry &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors (ODbL) &middot;
+        Elevation: USGS 3DEP / SRTM via AWS Terrain Tiles
+      </div>
+    </div>
+
+    <noscript><div id="boot"><h1>Boston</h1><p>This experience requires JavaScript and WebGL 2.</p></div></noscript>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
