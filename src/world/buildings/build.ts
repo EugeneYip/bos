@@ -95,6 +95,28 @@ export function floorPlan(H: number, levels: number, family: number): FloorPlan 
 // material / layer selection
 // ---------------------------------------------------------------------------
 
+/**
+ * Flat-roof membrane colour.
+ *
+ * Boston's flat roofs used to be uniformly black — built-up tar, or tar with
+ * grey gravel ballast over it. Energy codes changed that: a large and growing
+ * share is now white or light-grey TPO/PVC single-ply, and from the air that
+ * is one of the most obvious things about the city. Drawing every flat roof
+ * dark made the whole place read as a slab of asphalt from above.
+ *
+ * Returns a tint to multiply the roof atlas by, or null to leave it alone.
+ */
+function membraneTint(area: number, r: number): [number, number, number] | null {
+  // Big-footprint commercial and institutional buildings re-roof soonest, so
+  // they carry most of the white membrane; a triple-decker almost never does.
+  const chance = area > 2600 ? 0.42 : area > 700 ? 0.24 : 0.07;
+  if (r > chance) return null;
+  const t = (r / chance);
+  if (t < 0.55) return [214, 214, 209];            // white TPO, a little dirty
+  if (t < 0.82) return [176, 176, 172];            // weathered light grey
+  return [150, 152, 150];                          // older, greyer single-ply
+}
+
 function roofLayerFor(shape: string, family: number, r: number): number {
   switch (shape) {
     case 'flat':
@@ -221,7 +243,12 @@ function buildOne(rec: BuildingRecord, s: Scratch): boolean {
     rnd,
     area,
   };
-  sink.begin(roofCol[0], roofCol[1], roofCol[2], weather, seed & 0xffff);
+  // Flat roofs may be light single-ply rather than tar or gravel; the atlas
+  // layer supplies the surface texture either way and the tint carries the
+  // colour, so no extra layer is needed.
+  const membrane = shape === 'flat' ? membraneTint(area, rnd()) : null;
+  const rc = membrane ?? roofCol;
+  sink.begin(rc[0], rc[1], rc[2], membrane ? weather * 0.55 : weather, seed & 0xffff);
   const res = buildRoof(shape, job);
 
   // ---- trim -------------------------------------------------------------
