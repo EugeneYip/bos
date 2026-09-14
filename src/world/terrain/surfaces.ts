@@ -347,13 +347,22 @@ export function bakeSurfaces(
 
   for (let layer = 0; layer < LAYER_COUNT; layer++) {
     const name = LAYER_NAMES[layer];
+    // `textures()` hands back the family's TextureSet, but its maps are not
+    // guaranteed to have been baked yet — sampling them here yields black,
+    // which is why the whole city rendered as bare concrete. Asking for the
+    // *material* forces the bake and gives maps that definitely have pixels;
+    // the set is still the source of truth for the physical tile size.
     let set: ReturnType<MaterialLibrary['textures']>;
+    let mat: THREE.MeshStandardMaterial | undefined;
     try {
+      mat = materials?.get(name) as THREE.MeshStandardMaterial | undefined;
       set = materials?.textures(name);
     } catch {
       set = undefined;
+      mat = undefined;
     }
-    const usable = !!set?.map && Number.isFinite(set?.tileMeters) && (set!.tileMeters ?? 0) > 0.05;
+    const map = mat?.map ?? set?.map ?? null;
+    const usable = !!map && Number.isFinite(set?.tileMeters) && (set!.tileMeters ?? 0) > 0.05;
 
     uniforms.uLayer.value = layer;
     if (usable) {
@@ -362,13 +371,13 @@ export function bakeSurfaces(
       tiles[layer] = s.tileMeters;
       uniforms.uAdopt.value = 1;
       uniforms.uUvScale.value = 1;
-      uniforms.uSrcMap.value = s.map;
-      uniforms.uSrcNormal.value = s.normalMap ?? null;
-      uniforms.uSrcRough.value = s.roughnessMap ?? null;
-      uniforms.uSrcAo.value = s.aoMap ?? null;
-      uniforms.uHasNormal.value = s.normalMap ? 1 : 0;
-      uniforms.uHasRough.value = s.roughnessMap ? 1 : 0;
-      uniforms.uHasAo.value = s.aoMap ? 1 : 0;
+      uniforms.uSrcMap.value = map;
+      uniforms.uSrcNormal.value = mat?.normalMap ?? s.normalMap ?? null;
+      uniforms.uSrcRough.value = mat?.roughnessMap ?? s.roughnessMap ?? null;
+      uniforms.uSrcAo.value = mat?.aoMap ?? s.aoMap ?? null;
+      uniforms.uHasNormal.value = (mat?.normalMap ?? s.normalMap) ? 1 : 0;
+      uniforms.uHasRough.value = (mat?.roughnessMap ?? s.roughnessMap) ? 1 : 0;
+      uniforms.uHasAo.value = (mat?.aoMap ?? s.aoMap) ? 1 : 0;
     } else {
       uniforms.uAdopt.value = 0;
       uniforms.uSrcMap.value = null;

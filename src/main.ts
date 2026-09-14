@@ -7,6 +7,7 @@ import { Sky } from './sky/Sky';
 import { Terrain } from './world/Terrain';
 import { Water } from './world/Water';
 import { Roads } from './world/Roads';
+import { Parks } from './world/Parks';
 import { Buildings } from './world/Buildings';
 import { Landmarks } from './landmarks/Landmarks';
 import { Vegetation } from './world/Vegetation';
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     new Sky(),
     new Terrain(),
     new Water(),
+    new Parks(),
     new Roads(),
     new Buildings(),
     new Landmarks(),
