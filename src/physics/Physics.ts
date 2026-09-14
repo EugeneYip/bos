@@ -96,7 +96,12 @@ export class Physics implements WorldModule {
     // Publish both the direct handle and the event contract, so callers can
     // use whichever they already hold.
     (ctx as unknown as Record<string, unknown>).physics = {
-      moveCharacter: (pos, delta, radius, height) => this.moveCharacter(pos, delta, radius, height),
+      moveCharacter: (
+        pos: { x: number; y: number; z: number },
+        delta: { x: number; y: number; z: number },
+        radius: number,
+        height: number,
+      ) => this.moveCharacter(pos, delta, radius, height),
     };
 
     ctx.on('physics:move-character', (payload) => {

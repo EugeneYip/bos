@@ -100,6 +100,10 @@ async function main() {
   page.on('pageerror', (e) => errors.push(String(e)));
 
   log('loading app…');
+  // Pre-dismiss the first-run onboarding card so it never covers a capture.
+  await page.evaluateOnNewDocument(() => {
+    try { localStorage.setItem('bh-onboarded', '1'); } catch { /* private mode */ }
+  });
   await page.goto(`http://localhost:${PORT}/?q=ultra`, { waitUntil: 'networkidle2', timeout: 180000 });
   await page.waitForFunction('window.__ready === true', { timeout: 300000 });
   await page.waitForFunction('window.__debug !== undefined', { timeout: 30000 });
