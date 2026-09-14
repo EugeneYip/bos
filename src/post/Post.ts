@@ -151,18 +151,28 @@ export class Post implements WorldModule {
   private applyTier(ctx: Ctx): void {
     const q = ctx.quality;
     const s = this.settings;
+    const ultra = ctx.tier === 'ultra';
+
     s.taa.enabled = q.taa;
-    s.ao.enabled = q.ssao;
-    s.ao.slices = Math.max(2, Math.round(q.ssaoSamples / 6));
-    s.ao.halfRes = ctx.tier !== 'ultra';
-    s.ssr.enabled = q.ssr;
-    s.ssr.steps = ctx.tier === 'ultra' ? 40 : 24;
     s.bloom.enabled = q.bloom;
     s.bloom.levels = ctx.tier === 'low' ? 4 : ctx.tier === 'medium' ? 5 : 6;
-    s.motionBlur.enabled = q.motionBlur;
+    s.exposure.enabled = true;
+
+    // The expensive half of the chain is reserved for `ultra`. Screen-space
+    // reflections need a second scene submit for the G-buffer, and motion
+    // blur needs a velocity buffer plus four more full-screen passes; both
+    // together cost more than everything else combined, and on `high` the
+    // frame budget is better spent holding 60 fps.
+    s.ao.enabled = q.ssao;
+    s.ao.slices = ultra ? Math.max(3, Math.round(q.ssaoSamples / 5)) : 2;
+    s.ao.halfRes = !ultra;
+    s.ssr.enabled = q.ssr && ultra;
+    s.ssr.steps = ultra ? 40 : 24;
+    s.motionBlur.enabled = q.motionBlur && ultra;
+
     s.renderScale = ctx.tier === 'low' ? 0.72 : ctx.tier === 'medium' ? 0.85 : 1;
     s.finalAA = q.taa ? 'none' : 'fxaa';
-    s.profile = ctx.tier === 'ultra' || ctx.tier === 'high';
+    s.profile = ultra || ctx.tier === 'high';
   }
 
   /**
@@ -373,10 +383,16 @@ export class Post implements WorldModule {
     const r = ctx.renderer;
 
     if (this.failed || !this.settings.enabled) {
+      // The grade owns the tonemap while the chain is up; bypassing it means
+      // handing that job back, or the frame presents untonemapped and black.
+      if (r.toneMapping !== THREE.ACESFilmicToneMapping) {
+        r.toneMapping = THREE.ACESFilmicToneMapping;
+      }
       r.setRenderTarget(null);
       r.render(ctx.scene, ctx.camera);
       return;
     }
+    if (r.toneMapping !== THREE.NoToneMapping) r.toneMapping = THREE.NoToneMapping;
 
     try {
       this.renderChain(dt, ctx);

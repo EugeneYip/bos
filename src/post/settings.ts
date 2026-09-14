@@ -282,8 +282,15 @@ export function defaultSettings(): PostSettings {
       // The sky module already computes a physically-motivated exposure for
       // the time of day. Metering should trim that, not replace it: at 0.85 a
       // dark cityscape drove the aperture open until the Charles blew out.
-      strength: 0.45,
-      centerWeight: 0.45,
+      // Trim, do not replace: the sky module's exposure already tracks the
+      // time of day physically, and letting metering move it far destroys
+      // both ends — a dark cityscape opened the aperture until the Charles
+      // blew out, and bright sky through a tree canopy stopped it down until
+      // Boston Common went black.
+      strength: 0.52,
+      // Meter the subject rather than the sky: at 0.45 the bright patches
+      // between the leaves dominated a frame that is almost entirely ground.
+      centerWeight: 0.72,
     },
 
     grade: preset('neutral'),
@@ -319,7 +326,11 @@ export function preset(name: GradePresetName): GradeSettings {
   const base: GradeSettings = {
     preset: name,
     tonemap: 'aces',
-    whitePoint: 8.0,
+    // The grade divides by whitePoint * 0.125 before the tonemap, so 4.8
+    // reproduces the /0.6 that three.js's own ACES applies to exposure.
+    // At the nominal 8.0 the divisor is 1.0 and every frame came out 1.67x
+    // darker than the renderer's tonemapper had been producing.
+    whitePoint: 4.8,
     contrast: 1.04,
     contrastPivot: 0.42,
     saturation: 1.02,
