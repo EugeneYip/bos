@@ -5,3 +5,5 @@ dist/
 *.log
 .vite/
 qa/shots/
+dist-*/
+qa/shots/

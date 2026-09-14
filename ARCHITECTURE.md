@@ -111,3 +111,29 @@ Boston. It is not done until the critic is genuinely impressed. Specifically:
   correct reflections, asphalt is not a flat grey plane.
 - Scenes must have **depth cues**: aerial perspective, contact shadows/AO,
   varied roofline detail, and no infinite hard-edged ground plane.
+
+---
+
+## Visual QA harness
+
+```bash
+node qa/shoot.mjs                     # capture every viewpoint in qa/viewpoints.json
+node qa/shoot.mjs skyline-charles     # capture one
+node qa/shoot.mjs --tag before        # suffix filenames for A/B comparison
+node qa/shoot.mjs --no-build          # reuse the last build
+```
+
+Shots land in `qa/shots/*.png` with a `report.json` carrying fps / draw calls /
+triangle counts and any console errors. **Exit code 2 means the page threw** —
+that is a broken build, not a styling problem. Fix it before judging looks.
+
+Because agents run concurrently, **always set your own port and output dir**:
+
+```bash
+QA_PORT=4331 QA_OUTDIR=dist-sky node qa/shoot.mjs skyline-charles
+```
+
+The harness drives the scene through `window.__debug` (`src/core/debugApi.ts`):
+`setView(pos, target)`, `setTime(hour, dayOfYear?)`, `settle(frames)`,
+`stats()`, `setQuality(tier)`. Keep that API working — the whole review loop
+depends on it.

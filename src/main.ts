@@ -1,4 +1,5 @@
 import { App } from './core/App';
+import { installDebugApi } from './core/debugApi';
 import type { QualityTier } from './core/config';
 import { Materials } from './materials/Materials';
 import { Sky } from './sky/Sky';
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
   );
 
   await app.init(setProgress);
+  installDebugApi(app);
   app.start();
 
   boot.classList.add('done');

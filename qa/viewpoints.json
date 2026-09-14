@@ -1,0 +1,74 @@
+[
+  {
+    "id": "skyline-charles",
+    "title": "Back Bay skyline across the Charles River (the classic Boston postcard)",
+    "pos": [-1850, 300, -1750],
+    "target": [-500, 90, 250],
+    "hour": 17.6,
+    "note": "Hancock Tower and the Prudential must dominate; the Charles fills the foreground."
+  },
+  {
+    "id": "downtown-harbor",
+    "title": "Financial District & waterfront from Boston Harbor",
+    "pos": [2300, 340, 900],
+    "target": [200, 70, 100],
+    "hour": 9.2,
+    "note": "Custom House Tower, One International Place, harbour wharves."
+  },
+  {
+    "id": "common-street",
+    "title": "Street level on Boston Common looking toward Beacon Hill",
+    "pos": [-260, 12, 120],
+    "target": [-120, 45, -180],
+    "hour": 15.0,
+    "note": "Street-level realism test: trees, paths, the State House dome, human scale."
+  },
+  {
+    "id": "backbay-grid",
+    "title": "Low oblique over the Back Bay grid",
+    "pos": [-1200, 170, -300],
+    "target": [-450, 60, 200],
+    "hour": 8.0,
+    "note": "Rowhouse rhythm, brick and brownstone variation, Commonwealth Ave mall."
+  },
+  {
+    "id": "zakim",
+    "title": "Zakim Bunker Hill Bridge from the north",
+    "pos": [200, 110, -2100],
+    "target": [120, 40, -1350],
+    "hour": 18.6,
+    "note": "The inverted-Y towers and cable fan must be unmistakable."
+  },
+  {
+    "id": "seaport-night",
+    "title": "Seaport / Fort Point at night",
+    "pos": [1400, 200, 900],
+    "target": [500, 50, 400],
+    "hour": 21.5,
+    "note": "Window lights, street lamps, reflections on the channel, bloom discipline."
+  },
+  {
+    "id": "aerial-city",
+    "title": "High aerial over the whole peninsula",
+    "pos": [-900, 2400, 2600],
+    "target": [-200, 0, -400],
+    "hour": 11.0,
+    "note": "Overall city read: land/water shape, density gradient, colour variety."
+  },
+  {
+    "id": "fenway",
+    "title": "Fenway Park and the Emerald Necklace",
+    "pos": [-2250, 190, 200],
+    "target": [-1750, 30, -100],
+    "hour": 16.2,
+    "note": "The ballpark bowl, light towers, and surrounding park greenery."
+  },
+  {
+    "id": "golden-hour-dome",
+    "title": "State House golden dome over Beacon Hill",
+    "pos": [-420, 95, 260],
+    "target": [-120, 55, -30],
+    "hour": 18.2,
+    "note": "Gilded dome specular response, brick rowhouse texture, warm low sun."
+  }
+]
