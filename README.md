@@ -28,27 +28,29 @@ Bunker Hill, and the Dorchester drumlins are the heights they actually are.
 
 The city is real and complete: 63,180 buildings, 4,253 km of road, 105 water
 bodies, 1.1 M terrain posts, 89,279 trees and 3,754 parks — all from
-OpenStreetMap and USGS, all rendering together, and all of it alive: ~990
-vehicles on a lane graph recovered from the street network, ~640 pedestrians
-on the footways, 52 vessels on the Charles and in the harbour, and flags on
-the mapped flagpoles.
+OpenStreetMap and USGS, all rendering together, and all of it alive: vehicles
+on a lane graph recovered from the street network, pedestrians on the
+footways, rowing shells and ferries on the water, flags on the flagpoles.
+
+Beyond the modelled box, the land keeps going: a coarse USGS heightfield
+drapes the Blue Hills, the Middlesex Fells, the Arlington drumlins and the
+harbour islands out to 23 km, dissolving into aerial haze.
 
 Verified against reality — 200 Clarendon 241 m, the Prudential 229 m, One
 Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
 43 m; the Charles carved to −3.6 m and the harbour to −12 m.
 
+At 1080p on `high`, ten of the thirteen reference viewpoints run at 60 fps.
+
 Still rough, and worth knowing before you look:
 
 - **Post-processing is not implemented.** No TAA, ambient occlusion,
-  screen-space reflection or bloom yet, so edges alias and contact shadows
-  are missing. The pass library exists under `src/post/`; only the module
-  that chains it is absent. This is the largest remaining quality gap.
-- **Performance.** At 1080p on `high`: 60 fps at street level, ~30 fps in the
-  dense downtown, but ~12 fps from high altitude with the whole city in
-  frame. Use `?q=high`, or `?q=medium` on a laptop.
-- **The Charles reads lighter than it should** from the air. The water is no
-  longer a mirror — it has wave structure, gust cells, depth colour and
-  shoreline wash — but the basin's body colour is still too pale.
+  screen-space reflection or bloom, so edges alias and contact shadows are
+  missing. The pass library exists under `src/post/`; only the module that
+  chains it is absent. This is the largest remaining quality gap.
+- **The high aerial runs at ~20 fps** with the whole city in frame. Street
+  level and mid-range views are fine.
+- **The Charles reads lighter than it should** from the air.
 - **Night facades are bright.** Exposure and emissive scaling are coupled
   now, but lit windows still read hotter than they should.
 
