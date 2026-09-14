@@ -34,6 +34,23 @@ function cachePath(key, query) {
 }
 
 /**
+ * Some public mirrors answer with a syntactically valid but *empty* document
+ * (`timestamp_osm_base: "34"`, zero elements) when their database is not loaded.
+ * Silently caching those would punch holes in the city, so every response — fresh
+ * or cached — must carry a plausible OSM base timestamp.
+ */
+function validate(json) {
+  const ts = json && json.osm3s && json.osm3s.timestamp_osm_base;
+  if (!ts) throw new Error('response has no osm3s.timestamp_osm_base');
+  const t = Date.parse(ts);
+  if (!Number.isFinite(t) || t < Date.parse('2020-01-01')) {
+    throw new Error(`bogus timestamp_osm_base ${JSON.stringify(ts)} (mirror has no data loaded)`);
+  }
+  if (!Array.isArray(json.elements)) throw new Error('response has no elements array');
+  return t;
+}
+
+/**
  * Run one Overpass query. Returns the parsed `{ elements: [...] }` object.
  * @param {string} key   human-readable cache key, e.g. `bld_z0_x03_y02`
  * @param {string} query full Overpass QL
@@ -45,11 +62,13 @@ export async function overpass(key, query) {
     try {
       const txt = fs.readFileSync(file, 'utf8');
       const json = JSON.parse(txt);
+      validate(json);
       stats.cacheHits++;
       stats.bytes += txt.length;
       return json;
-    } catch {
-      fs.rmSync(file, { force: true }); // corrupt cache entry -> refetch
+    } catch (e) {
+      console.log(`    ${key}: discarding bad cache entry (${e.message})`);
+      fs.rmSync(file, { force: true }); // corrupt/empty cache entry -> refetch
     }
   }
 
@@ -81,12 +100,16 @@ export async function overpass(key, query) {
       }
       const json = JSON.parse(txt);
       if (json.remark) throw new Error(`remark: ${json.remark}`);
+      const baseTs = validate(json);
       fs.writeFileSync(file, txt);
       stats.fetches++;
       stats.bytes += txt.length;
+      stats.oldest = Math.min(stats.oldest ?? baseTs, baseTs);
+      stats.newest = Math.max(stats.newest ?? baseTs, baseTs);
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       process.stdout.write(
-        `    ${key}: ${json.elements.length} elements, ${(txt.length / 1e6).toFixed(2)} MB, ${secs}s\n`,
+        `    ${key}: ${json.elements.length} elements, ${(txt.length / 1e6).toFixed(2)} MB, ${secs}s ` +
+        `[${new URL(url).hostname}]\n`,
       );
       // Round-robin endpoints on success too, to spread the load.
       endpointCursor++;
