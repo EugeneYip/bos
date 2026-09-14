@@ -24,6 +24,30 @@ Bunker Hill, and the Dorchester drumlins are the heights they actually are.
 | **Post** | TAA, GTAO, screen-space reflections, bloom, bokeh depth of field, auto-exposure and filmic grading |
 | **Physics** | Rapier rigid-body simulation for collision, walking, and driving |
 
+## Where it stands
+
+The city is real and complete: 63,180 buildings, 4,253 km of road, 105 water
+bodies, 1.1 M terrain posts and 99,079 trees and street fittings, all from
+OpenStreetMap and USGS, all rendering together.
+
+Verified against reality — 200 Clarendon 241 m, the Prudential 229 m, One
+Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
+43 m; the Charles carved to −3.6 m and the harbour to −12 m.
+
+Still rough, and worth knowing before you look:
+
+- **Post-processing is not implemented.** There is no TAA, ambient occlusion,
+  screen-space reflection or bloom yet, so edges alias and contact shadows are
+  missing. The pass library exists under `src/post/`; only the module that
+  chains it is absent.
+- **Performance.** 60 fps at street level, but 20–30 fps from high altitude at
+  1600×900 on the `ultra` tier, where draw calls run to ~2,900. Use `?q=high`.
+- **Boston Common renders as paving rather than grass.** The land-cover splat
+  works — 10.5 % of the city is green — but pedestrian-area polygons inside the
+  Common are classified as plaza and overpaint the park beneath them.
+- **Night facades are bright.** Exposure and emissive scaling are now coupled,
+  but lit windows still read hotter than they should.
+
 ## Controls
 
 | | |
