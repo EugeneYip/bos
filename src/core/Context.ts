@@ -47,8 +47,8 @@ export interface Ctx {
   /** Environment map used for IBL; installed by the sky module. */
   envMap: THREE.Texture | null;
 
-  /** Shared PBR texture library; installed by the materials module. */
-  textures: Map<string, THREE.Texture>;
+  /** Shared PBR texture/material library; installed by the Materials module. */
+  materials: MaterialLibrary;
 
   /** Per-frame stats surfaced to the HUD. */
   stats: Record<string, number | string>;
@@ -56,6 +56,38 @@ export interface Ctx {
   /** Simple event bus for cross-module signals (e.g. 'quality-changed'). */
   on(evt: string, fn: (payload?: unknown) => void): void;
   emit(evt: string, payload?: unknown): void;
+}
+
+/**
+ * Texture set for one surface family. Maps are tileable and share UV scale.
+ * `NoColorSpace` on every map except `map`.
+ */
+export interface TextureSet {
+  map: THREE.Texture;
+  normalMap?: THREE.Texture;
+  roughnessMap?: THREE.Texture;
+  aoMap?: THREE.Texture;
+  metalnessMap?: THREE.Texture;
+  /** World-space metres covered by one UV tile, used to derive UVs. */
+  tileMeters: number;
+}
+
+/**
+ * Published by the Materials module as `ctx.materials`. Every other module
+ * pulls surfaces from here rather than constructing its own, so the whole city
+ * shares one coherent, colour-managed look.
+ */
+export interface MaterialLibrary {
+  /** Named PBR texture sets: 'brick', 'brownstone', 'concrete', 'asphalt', ... */
+  textures(name: string): TextureSet | undefined;
+  /**
+   * A cached, ready-to-use material. `tint` is an sRGB hex multiplied into the
+   * albedo so thousands of buildings can share one material+texture but differ
+   * in colour (via instance colour where the caller supports it).
+   */
+  get(name: string, tint?: number): THREE.Material;
+  /** Register an externally-authored set so it participates in disposal. */
+  register(name: string, set: TextureSet): void;
 }
 
 export interface WorldModule {

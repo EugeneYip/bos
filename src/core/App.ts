@@ -66,7 +66,13 @@ export class App {
       },
       sampleHeight: () => 0,
       envMap: null,
-      textures: new Map(),
+      // Replaced by the Materials module during init; this stub keeps the app
+      // bootable if Materials ever fails so the rest of the scene still shows.
+      materials: {
+        textures: () => undefined,
+        get: () => new THREE.MeshStandardMaterial({ color: 0x9a9a92, roughness: 0.9 }),
+        register: () => {},
+      },
       stats: {},
       on: (evt, fn) => {
         const arr = this.listeners.get(evt) ?? [];
