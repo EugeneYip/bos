@@ -91,7 +91,7 @@ export function buildFieldTextures(
   height.needsUpdate = true;
 
   const normal = dataRgba(nBytes, w, h, anisotropy);
-  const cover = dataRgba(lc.cover, w, h, anisotropy);
+  const cover = dataRgba(lc.cover, w, h, anisotropy, false);
 
   return {
     height,
@@ -108,15 +108,26 @@ export function buildFieldTextures(
   };
 }
 
-function dataRgba(bytes: Uint8Array<ArrayBuffer>, w: number, h: number, aniso: number): THREE.DataTexture {
+/**
+ * `mip` must be false for anything whose channels are classes or weights
+ * rather than a continuous signal. Mipmapping the land-cover map averages a
+ * park's grass weight against the asphalt of the streets around it, and
+ * averages the hard-surface *class* byte — 107 gravel against 242 asphalt
+ * lands on 174, which is neither. From altitude that turned Boston Common
+ * into a grey plaza. The shader's domain warp already hides the raster steps,
+ * so unmipped bilinear is both cheaper and correct here.
+ */
+function dataRgba(
+  bytes: Uint8Array<ArrayBuffer>, w: number, h: number, aniso: number, mip = true,
+): THREE.DataTexture {
   const t = new THREE.DataTexture(bytes, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
   t.magFilter = THREE.LinearFilter;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.minFilter = mip ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   t.wrapS = THREE.ClampToEdgeWrapping;
   t.wrapT = THREE.ClampToEdgeWrapping;
-  t.generateMipmaps = true;
+  t.generateMipmaps = mip;
   t.unpackAlignment = 1;
-  t.anisotropy = Math.min(4, aniso);
+  t.anisotropy = mip ? Math.min(4, aniso) : 1;
   t.colorSpace = THREE.NoColorSpace;
   t.needsUpdate = true;
   return t;

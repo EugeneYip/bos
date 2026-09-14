@@ -366,6 +366,12 @@ const FRAGMENT_BODY = /* glsl */`
       gDebugColor = vec3(w[0] + w[6] * 0.6, (w[4] + w[5] + w[2]) * invTotal, (w[3] + w[1] * 0.4) * invTotal);
     } else if (dm == 3) {
       gDebugColor = vec3(clamp(shore / 24.0, 0.0, 1.0), clamp(-shore / 24.0, 0.0, 1.0), wet);
+    } else if (dm == 4) {
+      // Raw land-cover map: red = grass weight, green = litter, blue = sand,
+      // and the alpha channel (hard-surface class) as brightness.
+      gDebugColor = vec3(cov.r, cov.g, cov.b);
+    } else if (dm == 5) {
+      gDebugColor = vec3(cov.a, cov.a, cov.a);
     } else {
       gDebugColor = vec3(vTerrainMorph, 1.0 - vTerrainMorph, 0.0);
     }
