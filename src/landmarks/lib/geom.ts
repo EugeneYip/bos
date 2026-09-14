@@ -29,6 +29,31 @@ interface Bucket {
  * material. Call sites stay readable ("add a cornice here") while the output
  * stays cheap.
  */
+/**
+ * `mergeGeometries` refuses to mix indexed and non-indexed inputs, and refuses
+ * to mix differing attribute sets. Three.js primitives are indexed but
+ * `ExtrudeGeometry` and `LatheGeometry`-derived shapes may not be, and some
+ * carry extra attributes, so every geometry entering a bucket is normalised to
+ * the same shape: indexed, with exactly position/normal/uv.
+ */
+function normaliseForMerge(g: THREE.BufferGeometry): void {
+  if (!g.getAttribute('normal')) g.computeVertexNormals();
+  if (!g.getAttribute('uv')) {
+    const n = g.getAttribute('position').count;
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(n * 2), 2));
+  }
+  for (const name of Object.keys(g.attributes)) {
+    if (name !== 'position' && name !== 'normal' && name !== 'uv') g.deleteAttribute(name);
+  }
+  if (!g.index) {
+    const n = g.getAttribute('position').count;
+    const idx = n > 65535 ? new Uint32Array(n) : new Uint16Array(n);
+    for (let i = 0; i < n; i++) idx[i] = i;
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+  }
+  g.morphAttributes = {};
+}
+
 export class Builder {
   private buckets = new Map<THREE.Material, Bucket>();
   private _tris = 0;
@@ -36,6 +61,7 @@ export class Builder {
   add(geo: THREE.BufferGeometry, material: THREE.Material, transform?: THREE.Matrix4): this {
     const g = transform ? geo.clone().applyMatrix4(transform) : geo;
     if (transform) geo.dispose();
+    normaliseForMerge(g);
     let b = this.buckets.get(material);
     if (!b) {
       b = { material, geos: [] };
