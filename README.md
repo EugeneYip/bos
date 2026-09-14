@@ -27,8 +27,11 @@ Bunker Hill, and the Dorchester drumlins are the heights they actually are.
 ## Where it stands
 
 The city is real and complete: 63,180 buildings, 4,253 km of road, 105 water
-bodies, 1.1 M terrain posts and 99,079 trees and street fittings, all from
-OpenStreetMap and USGS, all rendering together.
+bodies, 1.1 M terrain posts, 89,279 trees and 3,754 parks — all from
+OpenStreetMap and USGS, all rendering together, and all of it alive: ~990
+vehicles on a lane graph recovered from the street network, ~640 pedestrians
+on the footways, 52 vessels on the Charles and in the harbour, and flags on
+the mapped flagpoles.
 
 Verified against reality — 200 Clarendon 241 m, the Prudential 229 m, One
 Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
@@ -36,17 +39,18 @@ Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
 
 Still rough, and worth knowing before you look:
 
-- **Post-processing is not implemented.** There is no TAA, ambient occlusion,
-  screen-space reflection or bloom yet, so edges alias and contact shadows are
-  missing. The pass library exists under `src/post/`; only the module that
-  chains it is absent.
-- **Performance.** 60 fps at street level, but 20–30 fps from high altitude at
-  1600×900 on the `ultra` tier, where draw calls run to ~2,900. Use `?q=high`.
-- **Boston Common renders as paving rather than grass.** The land-cover splat
-  works — 10.5 % of the city is green — but pedestrian-area polygons inside the
-  Common are classified as plaza and overpaint the park beneath them.
-- **Night facades are bright.** Exposure and emissive scaling are now coupled,
-  but lit windows still read hotter than they should.
+- **Post-processing is not implemented.** No TAA, ambient occlusion,
+  screen-space reflection or bloom yet, so edges alias and contact shadows
+  are missing. The pass library exists under `src/post/`; only the module
+  that chains it is absent. This is the largest remaining quality gap.
+- **Performance.** At 1080p on `high`: 60 fps at street level, ~30 fps in the
+  dense downtown, but ~12 fps from high altitude with the whole city in
+  frame. Use `?q=high`, or `?q=medium` on a laptop.
+- **The Charles reads lighter than it should** from the air. The water is no
+  longer a mirror — it has wave structure, gust cells, depth colour and
+  shoreline wash — but the basin's body colour is still too pale.
+- **Night facades are bright.** Exposure and emissive scaling are coupled
+  now, but lit windows still read hotter than they should.
 
 ## Controls
 
