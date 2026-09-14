@@ -33,19 +33,19 @@
   },
   {
     "id": "common-street",
-    "title": "Street level on Boston Common looking toward Beacon Hill",
+    "title": "Eye level on Boston Common, looking to the State House",
     "pos": [
-      -260,
-      12,
-      120
+      -120,
+      2.0,
+      60
     ],
     "target": [
-      -120,
-      45,
-      -180
+      156,
+      26,
+      -326
     ],
     "hour": 15.0,
-    "note": "Street-level realism test: trees, paths, the State House dome, human scale."
+    "note": "Street realism: path surface, benches, people, tree canopy overhead, the gold dome beyond."
   },
   {
     "id": "backbay-grid",
@@ -174,5 +174,37 @@
     ],
     "hour": 8.6,
     "note": "Open-water swell, turbid green-brown colour, wharves and the shoreline transition."
+  },
+  {
+    "id": "comm-ave",
+    "title": "Commonwealth Avenue Mall at eye level",
+    "pos": [
+      -1500,
+      2.0,
+      640
+    ],
+    "target": [
+      -980,
+      7,
+      558
+    ],
+    "hour": 16.4,
+    "note": "Street trees in rows, the mall, brownstone frontage, moving traffic and people."
+  },
+  {
+    "id": "downtown-traffic",
+    "title": "Downtown intersection, pedestrian level",
+    "pos": [
+      300,
+      2.0,
+      150
+    ],
+    "target": [
+      -120,
+      12,
+      -60
+    ],
+    "hour": 13.2,
+    "note": "Vehicles, crossings, lane markings, kerbs and footfall in the Financial District."
   }
 ]
