@@ -48,7 +48,11 @@ export class Buildings implements WorldModule {
   private uniforms: ShellUniforms | null = null;
   private shell: THREE.MeshStandardMaterial | null = null;
   private clutterMesh: THREE.InstancedMesh[] = [];
+  /** Per clutter mesh: prebuilt matrices and instance centres, for culling. */
+  private clutterData: Array<{ matrices: Float32Array; px: Float32Array; pz: Float32Array }> = [];
+  private lastClutterCull = new THREE.Vector3(1e9, 1e9, 1e9);
   private frustum = new THREE.Frustum();
+  private sphere = new THREE.Sphere();
   private projScreen = new THREE.Matrix4();
   private lastLod = new THREE.Vector3(1e9, 1e9, 1e9);
   private built = 0;
@@ -202,7 +206,12 @@ export class Buildings implements WorldModule {
       mesh.name = `buildings:${key}`;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      mesh.frustumCulled = false; // culled per tile below, against the sphere
+      // Let three.js cull: it tests the bounding sphere against the camera
+      // frustum AND against each shadow cascade's frustum. Culling by hand
+      // here only covers the camera, so every tile would still be submitted to
+      // all four cascades — 1,400 shadow draws for a city that needs a few
+      // hundred.
+      mesh.frustumCulled = true;
       mesh.matrixAutoUpdate = false;
       this.root.add(mesh);
 
@@ -241,6 +250,9 @@ export class Buildings implements WorldModule {
 
       const tint = new Float32Array(count * 4);
       const layer = new Float32Array(count);
+      const matrices = new Float32Array(count * 16);
+      const px = new Float32Array(count);
+      const pz = new Float32Array(count);
       const m = new THREE.Matrix4();
       const q = new THREE.Quaternion();
       const up = new THREE.Vector3(0, 1, 0);
@@ -256,6 +268,9 @@ export class Buildings implements WorldModule {
           scl.set(data[o + 3], data[o + 4], data[o + 5]);
           q.setFromAxisAngle(up, data[o + 6]);
           m.compose(pos, q, scl);
+          m.toArray(matrices, i * 16);
+          px[i] = pos.x;
+          pz[i] = pos.z;
           mesh.setMatrixAt(i, m);
           tint[i * 4] = data[o + 7];
           tint[i * 4 + 1] = data[o + 8];
@@ -270,6 +285,7 @@ export class Buildings implements WorldModule {
       mesh.geometry.setAttribute('aLayer', new THREE.InstancedBufferAttribute(layer, 1));
       this.root.add(mesh);
       this.clutterMesh.push(mesh);
+      this.clutterData.push({ matrices, px, pz });
     }
     ctx.stats.roofClutter = this.clutterMesh.reduce((n, m) => n + m.count, 0);
   }
@@ -292,28 +308,74 @@ export class Buildings implements WorldModule {
       this.shell.needsUpdate = true;
     }
 
-    // Frustum cull every tile, and drop decorative trim beyond the detail
-    // distance. Both are cheap enough to do every frame for ~500 tiles.
+    // Frustum cull every tile, and decide detail by screen-space error rather
+    // than raw distance: from 2 km up, a whole neighbourhood is a few hundred
+    // pixels tall and its window reveals and cornices are invisible, so a flat
+    // distance threshold draws tens of millions of triangles nobody can see.
     this.projScreen.multiplyMatrices(ctx.camera.projectionMatrix, ctx.camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projScreen);
-    const detail = ctx.quality.detailDistance;
     const cam = ctx.camera.position;
 
+    // Pixels per metre at one metre of depth, for this camera and viewport.
+    const vh = ctx.renderer.domElement.height;
+    const focal = vh / (2 * Math.tan((ctx.camera.fov * Math.PI) / 360));
+    // Trim is worth drawing while a typical 12 m storey-stack still covers
+    // more than ~22 px. `detailDistance` scales the threshold per quality tier.
+    const trimPixels = 22 * (1400 / Math.max(ctx.quality.detailDistance, 1));
+    const trimRange = (12 * focal) / Math.max(trimPixels, 1);
+
     let visible = 0;
+    let detailed = 0;
     for (const tile of this.tiles) {
-      const inView = this.frustum.intersectsSphere(
-        new THREE.Sphere(tile.center, tile.radius),
-      );
-      tile.mesh.visible = inView;
-      if (!inView) continue;
-      visible++;
-      const near = tile.center.distanceTo(cam) - tile.radius < detail;
+      this.sphere.set(tile.center, tile.radius);
+      if (this.frustum.intersectsSphere(this.sphere)) visible++;
+      // Detail is decided for every tile, not just visible ones: a tile behind
+      // the camera may still cast into a shadow cascade, and switching its
+      // range while it is off-screen avoids a hitch when it swings into view.
+      const near = tile.center.distanceTo(cam) - tile.radius < trimRange;
+      if (near) detailed++;
       if (near !== tile.detailed) {
         tile.detailed = near;
         tile.mesh.geometry.setDrawRange(0, near ? tile.totalCount : tile.coreCount);
       }
     }
     ctx.stats.buildingTilesVisible = visible;
+    ctx.stats.buildingTilesDetailed = detailed;
+
+    this.cullClutter(ctx, trimRange);
+  }
+
+  /**
+   * Rooftop plant only reads from close range, and there are 162,000 pieces of
+   * it. The shader already collapses distant instances, but that still pays
+   * their vertex cost, so compact the instance buffer to what is actually near
+   * — recomputed only when the camera has moved far enough to matter.
+   */
+  private cullClutter(ctx: Ctx, range: number): void {
+    if (!this.clutterMesh.length) return;
+    const cam = ctx.camera.position;
+    if (cam.distanceTo(this.lastClutterCull) < 45) return;
+    this.lastClutterCull.copy(cam);
+
+    const r2 = (range * 1.35) ** 2;
+    let total = 0;
+    for (let k = 0; k < this.clutterMesh.length; k++) {
+      const mesh = this.clutterMesh[k];
+      const d = this.clutterData[k];
+      const arr = mesh.instanceMatrix.array as Float32Array;
+      let n = 0;
+      for (let i = 0; i < d.px.length; i++) {
+        const dx = d.px[i] - cam.x;
+        const dz = d.pz[i] - cam.z;
+        if (dx * dx + dz * dz > r2) continue;
+        arr.set(d.matrices.subarray(i * 16, i * 16 + 16), n * 16);
+        n++;
+      }
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+      total += n;
+    }
+    ctx.stats.roofClutterDrawn = total;
   }
 
   dispose(ctx: Ctx): void {

@@ -323,7 +323,10 @@ export class Roads implements WorldModule {
     }
 
     const stats = bk.stats();
-    const meshes = bk.flush(mats, `road-t${tier}`, tier === 0);
+    // Ground-level road surface, kerbs and walks lie on the terrain: there is
+    // nothing beneath them to shade, and self-shadowing a flat decal only buys
+    // acne. Only the structural passes (bridges, portals, below) cast.
+    const meshes = bk.flush(mats, `road-t${tier}`, false);
     if (!meshes.length) {
       tile.group = new THREE.Group();
       return;

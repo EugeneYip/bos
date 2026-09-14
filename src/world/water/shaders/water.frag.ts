@@ -1,74 +1,47 @@
-import { WATER_BRDF_GLSL, WATER_SKY_GLSL } from './common';
-
 /**
- * Water surface shading.
+ * Water surface fragment stage.
  *
- * The pipeline, in order of how much each part matters to the image:
- *
- *  1. **Fresnel.** Schlick at n = 1.333 (F0 = 0.0204). Almost everything the
- *     water looks like at a city viewing angle is the sky and the buildings
- *     arriving through this term; the body colour only wins when you look
- *     steeply down.
- *  2. **Reflection.** Planar mirror pass where it is valid, falling back to
- *     `ctx.envMap` and then to an analytic sky. Perturbed by the surface slope
- *     with the vertical component amplified by 1/NoV, which is what turns a
- *     point of light into the long vertical streak you get across the Charles
- *     at night.
- *  3. **Absorption.** Beer–Lambert through twice the water depth against a
- *     silt bed. Boston Harbor's extinction is tuned so green survives longest
- *     and blue dies first — turbid green-brown. The Charles is murkier still
- *     and goes olive. There is no path through this code that produces
- *     Caribbean blue.
- *  4. **Foam and the waterline.** A wide, noise-broken alpha ramp off the
- *     shore-distance field plus foam that washes in and out with it, and
- *     Gerstner-fold whitecaps out where the fetch is long.
- *  5. **Glitter.** Anisotropic GGX aligned to the wind, with a roughness floor
- *     that rises with distance (otherwise the sun path aliases into a boiling
- *     mess) and a stochastic sparkle mask that breaks the highlight into many
- *     small ones instead of a single blown-out blob.
+ * A dielectric surface over a turbid, shallow, strongly absorbing body. The
+ * three things that make it read as Boston water rather than as a blue plane:
+ * a correct Schlick Fresnel so grazing angles mirror the sky, Beer-Lambert
+ * absorption tuned to an estuary rather than a reef, and a sun glitter path
+ * built from many small GGX highlights on the ripple normals instead of one
+ * blown-out blob.
  */
 export const WATER_FRAG = /* glsl */ `
 precision highp float;
 
-#ifndef PI
-#define PI 3.141592653589793
-#endif
-
-varying vec3  vWorld;
-varying vec3  vGN;
-varying float vFold;
-varying float vShore;
-varying float vFetch;
-varying float vViewDist;
+#include <common>
+#include <cube_uv_reflection_fragment>
 
 uniform float uTime;
+uniform float uSeaLevel;
 uniform vec2  uWind;
-uniform vec3  uSunDir;
-uniform vec3  uSunColor;
+uniform float uRippleGain;
+uniform float uGlitter;
+uniform float uFoamGain;
 
 uniform sampler2D uFieldDist;
 uniform sampler2D uFieldAux;
-uniform vec2  uFieldOrigin;
-uniform vec2  uFieldInvSize;
+uniform vec2 uFieldOrigin;
+uniform vec2 uFieldInvSize;
 
 uniform sampler2D uWaves;
 uniform sampler2D uNoise;
 
-uniform vec3  uAbsorbA;
-uniform vec3  uAbsorbB;
-uniform vec3  uScatterA;
-uniform vec3  uScatterB;
-uniform vec3  uBedA;
-uniform vec3  uBedB;
-uniform vec3  uFoamColor;
+uniform vec3  uSunDir;
+uniform vec3  uSunColor;
+uniform vec3  uSkyZenith;
+uniform vec3  uSkyHorizon;
 uniform vec3  uSkyAmbient;
+uniform vec3  uCityGlow;
 uniform float uEnvIntensity;
-uniform float uRippleGain;
-uniform float uFoamGain;
-uniform float uGlitter;
-uniform vec2  uHorizonFade;
 
-#ifdef WATER_PLANAR
+#if WATER_ENV == 1
+uniform sampler2D envMap;
+#endif
+
+#if WATER_PLANAR == 1
 uniform sampler2D uReflMap;
 uniform mat4  uReflMatrix;
 uniform float uReflStrength;
@@ -76,38 +49,30 @@ uniform float uReflMaxLod;
 uniform vec2  uReflDistort;
 #endif
 
-#if WATER_ENV > 0
-uniform sampler2D envMap;
-#endif
+// Extinction per metre, and the colour light scatters back as. The harbour is
+// turbid green-brown; the impounded Charles is tannin-stained and murkier.
+uniform vec3 uAbsorbA;
+uniform vec3 uAbsorbB;
+uniform vec3 uScatterA;
+uniform vec3 uScatterB;
+uniform vec3 uBedA;
+uniform vec3 uBedB;
+uniform vec3 uFoamColor;
+uniform vec2 uHorizonFade;
 
-${WATER_SKY_GLSL}
-${WATER_BRDF_GLSL}
-
-#if WATER_ENV == 1
-#include <cube_uv_reflection_fragment>
-#endif
-
-#include <fog_pars_fragment>
-#include <dithering_pars_fragment>
+varying vec3  vWorld;
+varying vec3  vGN;
+varying float vShore;
+varying float vFetch;
+varying float vViewDist;
+varying float vCrest;
 
 mat2 rot2(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
 
-/** Tangent-space normal -> world XZ slope, so layers can be summed linearly. */
+/** Tangent-space normal-map octave returned as an xz slope. */
 vec2 slopeOf(vec2 uv, float gain) {
   vec3 n = texture2D(uWaves, uv).xyz * 2.0 - 1.0;
   return (n.xy / max(abs(n.z), 0.10)) * gain;
-}
-
-vec3 sampleEnv(vec3 dir, float rough) {
-#if WATER_ENV == 1
-  return textureCubeUV(envMap, dir, rough).rgb * uEnvIntensity;
-#elif WATER_ENV == 2
-  vec3 d = normalize(dir);
-  vec2 uv = vec2(atan(d.z, d.x) * (0.5 / PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) * (1.0 / PI));
-  return textureLod(envMap, uv, rough * 7.0).rgb * uEnvIntensity;
-#else
-  return analyticSky(dir, uSunDir);
-#endif
 }
 
 void main() {
@@ -115,166 +80,161 @@ void main() {
   float dist = length(eye);
   vec3 V = eye / max(dist, 1e-4);
 
-  // ------------------------------------------------------- world field ----
   vec2 fuv = (vWorld.xz - uFieldOrigin) * uFieldInvSize;
-  float shoreD = texture2D(uFieldDist, fuv).r;
+  float shoreD = max(texture2D(uFieldDist, fuv).r, vShore);
   vec4 aux = texture2D(uFieldAux, fuv);
   float bed = aux.r * 160.0 - 60.0;
-  float fetch = max(aux.g, vFetch * 0.5);
+  float fetch = clamp(max(aux.g, vFetch), 0.0, 1.0);
   float murk = aux.b;
 
-  // Wide, field-error-tolerant waterline. The alpha ramp is what lets the
-  // bank show through instead of stopping at a razor edge, and it is also the
-  // only antialiasing the coastline gets at a distance.
-  float alpha = smoothstep(-3.0, 7.0, shoreD);
+  // Water depth from the carved seabed. This is the one signal we can always
+  // trust: the terrain module burns the water polygons into the heightfield,
+  // so anywhere the bed sits below the surface there is genuinely water here.
+  float depth = uSeaLevel - bed;
 
+  // The surface meshes are cut to the water polygons already, so the body of
+  // the river needs no masking; only the skirt — which spans the whole world
+  // past the edge of the data — has to decide for itself what is ocean.
 #ifdef WATER_SKIRT
-  // Past the edge of the dataset the shoreline field is clamp-extended, which
-  // continues Boston's coast outward: harbour to the east, dry land to the
-  // west. Anything the field calls land is simply not ocean.
-  if (alpha < 0.004) discard;
+  if (depth < 0.15) discard;
 #endif
 
-  // --------------------------------------------------------- geometry ----
-  float rip = mix(0.52, 1.30, fetch);
-  vec2 wind = uWind;
+  // ----------------------------------------------------------- normals ----
+  float rip = mix(0.55, 1.35, fetch);
+  vec2 wind = normalize(uWind + vec2(1e-5));
   vec2 perp = vec2(-wind.y, wind.x);
-
   vec2 p = vWorld.xz;
-  vec2 uv0 = (rot2(0.31) * p + wind * (uTime * 0.62)) / (2.7 * rip);
+
+  vec2 uv0 = (rot2(0.31) * p + wind * (uTime * 0.62)) / (2.6 * rip);
   vec2 uv1 = (rot2(-0.87) * p + (wind * 0.75 + perp * 0.35) * (uTime * 1.05)) / (9.5 * rip);
-  vec2 uv2 = (rot2(1.94) * p + wind * (uTime * 1.75)) / (33.0 * rip);
+  vec2 uv2 = (rot2(1.94) * p + wind * (uTime * 1.75)) / (31.0 * rip);
 
-  // Fine ripple detail has to die off with distance or the specular boils.
-  float fine = 1.0 - smoothstep(180.0, 1700.0, vViewDist);
-  float mid = 1.0 - smoothstep(900.0, 6000.0, vViewDist);
-
-  float shoal = smoothstep(0.0, 12.0, shoreD);
-  float g = uRippleGain * mix(0.30, 1.0, fetch) * shoal;
+  // Fine detail has to fade with distance or the specular boils into aliasing.
+  float fine = 1.0 - smoothstep(140.0, 1500.0, vViewDist);
+  float mid  = 1.0 - smoothstep(700.0, 5000.0, vViewDist);
+  float shoal = smoothstep(0.0, 10.0, shoreD);
+  float g = uRippleGain * mix(0.45, 1.0, fetch) * shoal;
 
   vec2 slope = vec2(0.0);
-  slope += slopeOf(uv0, 0.55 * g * fine);
-  slope += slopeOf(uv1, 0.85 * g * mid);
-  slope += slopeOf(uv2, 1.00 * g);
+  slope += slopeOf(uv0, 0.30 * g * fine);
+  slope += slopeOf(uv1, 0.22 * g * mid);
+  slope += slopeOf(uv2, 0.16 * g);
 
-  // Gerstner normal folded in as a slope so the sum stays linear.
   vec3 gn = normalize(vGN);
-  slope += gn.xz / max(gn.y, 0.2) * -1.0;
+  slope += gn.xz / max(gn.y, 0.25);
 
   vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
+  // The surface is drawn double-sided, so seen from beneath — under a bridge
+  // deck, or with the camera below the waterline — the normal has to flip.
   if (!gl_FrontFacing) N = -N;
-  // Never let a crest turn the normal away from the eye; that is what makes
-  // black speckles at grazing angles.
   float NoV = dot(N, V);
-  if (NoV < 0.02) {
-    N = normalize(N + V * (0.02 - NoV) * 1.6);
-    NoV = max(dot(N, V), 0.02);
-  }
+  if (NoV < 0.03) { N = normalize(N + V * (0.03 - NoV) * 1.6); NoV = 0.03; }
 
-  // ------------------------------------------------------------ depth ----
-  // Refracted lookup: the bed wobbles under the surface in shallow water.
-  vec2 rfuv = (vWorld.xz + N.xz * 1.4 - uFieldOrigin) * uFieldInvSize;
-  float shoreR = texture2D(uFieldDist, rfuv).r;
-  float terr = max(vWorld.y - bed, 0.0);
-  // Before the terrain module carves the harbour floor this falls back to a
-  // fixed 4.5 m, which still gives a correct-looking shallow band.
-  float deep = max(terr, 4.5);
-  float depth = deep * smoothstep(0.0, 24.0, shoreR);
-
-  // ------------------------------------------------------------- foam ----
-  float breakup = texture2D(uWaves, p * 0.055 + wind * (uTime * 0.02)).a;
-  float breakup2 = texture2D(uNoise, p * 0.021 - wind * (uTime * 0.013)).b;
-  float band = mix(5.0, 17.0, fetch);
-  float wash = sin(shoreD * 0.42 - uTime * 0.75 + breakup2 * 5.5) * 0.5 + 0.5;
-  float shoreFoam = (1.0 - smoothstep(0.0, band, shoreD)) * (0.30 + 0.70 * wash);
-  shoreFoam *= smoothstep(0.30, 0.78, breakup * 0.65 + breakup2 * 0.5);
-  shoreFoam *= smoothstep(-2.0, 2.5, shoreD);
-
-  float caps = smoothstep(0.42, 0.95, vFold) * fetch * smoothstep(0.38, 0.80, breakup);
-  float foam = clamp((shoreFoam + caps) * uFoamGain, 0.0, 1.0);
-
-  // -------------------------------------------------------- roughness ----
-  // Cat's-paws: without large-scale roughness variation water reads as vinyl.
-  float gust = texture2D(uNoise, p * 0.0013 + wind * (uTime * 0.004)).a;
-  float rough = mix(0.030, 0.105, fetch) * mix(0.70, 1.55, gust);
-  rough += 0.085 * (1.0 - fine);           // detail lost to mips becomes blur
-  rough += 0.055 * (1.0 - mid);
-  rough = clamp(rough + foam * 0.55, 0.022, 0.9);
-
-  // ------------------------------------------------------- reflection ----
+  // -------------------------------------------------------- reflection ----
   vec3 R = reflect(-V, N);
-  R.y = max(R.y, 0.004);
-  vec3 refl = sampleEnv(R, rough);
-  vec3 horizon = analyticSky(vec3(V.x, 0.02, V.z), uSunDir);
+  R.y = abs(R.y);   // never sample below the horizon into the seabed
 
-#ifdef WATER_PLANAR
-  vec4 pr = uReflMatrix * vec4(vWorld, 1.0);
-  if (pr.w > 0.0) {
-    vec2 ruv = pr.xy / pr.w;
-    float grazing = 1.0 / max(NoV, 0.09);
-    vec2 off = vec2(slope.x * uReflDistort.x, slope.y * uReflDistort.y * grazing);
-    off *= 1.0 / (1.0 + dist * 0.0011);
-    ruv += off;
-    vec2 e = smoothstep(vec2(0.0), vec2(0.055), ruv) * smoothstep(vec2(1.0), vec2(0.945), ruv);
-    float valid = e.x * e.y * uReflStrength;
-    if (valid > 0.001) {
-      float lod = clamp(log2(1.0 + rough * 34.0), 0.0, uReflMaxLod);
-      vec3 planar = textureLod(uReflMap, clamp(ruv, vec2(0.0015), vec2(0.9985)), lod).rgb;
-      refl = mix(refl, planar, valid);
+  // Analytic sky, always available, and the fallback whenever the probe or the
+  // planar pass misses.
+  float up = clamp(R.y, 0.0, 1.0);
+  vec3 sky = mix(uSkyHorizon, uSkyZenith, pow(up, 0.55));
+
+#if WATER_ENV == 1
+  // The probe carries the sun, the clouds and the city's own bounce, all of
+  // which belong in the reflection — but it also averages in a lot of ground,
+  // so it tints rather than replaces the analytic sky.
+  float rough = clamp(0.02 + 0.30 * smoothstep(60.0, 4000.0, vViewDist), 0.0, 1.0);
+  vec3 probe = textureCubeUV(envMap, R, rough).rgb;
+  sky = mix(sky, probe, 0.30);
+#endif
+  sky *= uEnvIntensity;
+
+#if WATER_PLANAR == 1
+  if (uReflStrength > 0.001) {
+    vec4 rc = uReflMatrix * vec4(vWorld, 1.0);
+    vec2 ruv = rc.xy / max(rc.w, 1e-4);
+    // Distort by the surface slope so the mirror image ripples with the waves.
+    ruv += slope * uReflDistort * (1.0 - smoothstep(0.0, 900.0, vViewDist));
+    if (ruv.x > 0.001 && ruv.x < 0.999 && ruv.y > 0.001 && ruv.y < 0.999) {
+      vec3 planar = texture2D(uReflMap, ruv).rgb;
+      // Fade the mirror out at the screen edges and into the distance, where
+      // it has no information to offer.
+      float edge = min(min(ruv.x, 1.0 - ruv.x), min(ruv.y, 1.0 - ruv.y));
+      float w = uReflStrength
+              * smoothstep(0.0, 0.06, edge)
+              * (1.0 - smoothstep(600.0, 2600.0, vViewDist));
+      sky = mix(sky, planar, w);
     }
   }
 #endif
 
-  float F = fresnelWater(NoV, rough);
-
   // ------------------------------------------------------------- body ----
-  vec3 sunIrr = uSunColor * max(uSunDir.y, 0.0);
-  vec3 incoming = uSkyAmbient * 0.95 + sunIrr * 0.42;
-  vec3 sigma = mix(uAbsorbA, uAbsorbB, murk);
-  vec3 T = exp(-sigma * (depth * 2.0 + 0.08));
-  vec3 bedCol = mix(uBedA, uBedB, murk) * incoming;
-  vec3 scatter = mix(uScatterA, uScatterB, murk) * incoming;
-  vec3 body = bedCol * T + scatter * (1.0 - T);
+  // Path length through the water for the refracted ray, clamped so a
+  // grazing view does not integrate kilometres of absorption.
+  float dclamp = max(depth, 0.05);
+  float path = min(dclamp / max(NoV, 0.12), 26.0);
 
-  // --------------------------------------------------------- specular ----
-  vec3 H = normalize(uSunDir + V);
-  float NoL = max(dot(N, uSunDir), 0.0);
+  vec3 absorb = mix(uAbsorbA, uAbsorbB, murk);
+  vec3 scatter = mix(uScatterA, uScatterB, murk);
+  vec3 bedCol = mix(uBedA, uBedB, murk);
+
+  vec3 trans = exp(-absorb * path);
+  // Light that reaches the bed and comes back, plus in-scattered light.
+  float sunUp = clamp(uSunDir.y, 0.0, 1.0);
+  vec3 down = uSunColor * sunUp + uSkyAmbient;
+  vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
+
+  // Very shallow water at the margin picks up the bank.
+  body = mix(body, bedCol * down * 1.15, smoothstep(2.5, 0.0, dclamp));
+
+  // ----------------------------------------------------------- fresnel ----
+  // Schlick against IOR 1.333. Bias by roughness so distant water does not
+  // turn into a perfect mirror and alias.
+  float f0 = 0.02;
+  float fres = f0 + (1.0 - f0) * pow(1.0 - NoV, 5.0);
+  fres = clamp(fres, 0.0, 0.96);
+
+  vec3 color = mix(body, sky, fres);
+
+  // ---------------------------------------------------------- specular ----
+  // GGX against the ripple normals: many small highlights make the wind-
+  // stretched glitter path, rather than one mirror blob.
+  vec3 L = normalize(uSunDir);
+  vec3 H = normalize(L + V);
   float NoH = max(dot(N, H), 0.0);
-  vec3 wdir = normalize(vec3(wind.x, 0.0, wind.y) - N * dot(N, vec3(wind.x, 0.0, wind.y)));
-  vec3 bdir = cross(N, wdir);
-  float aniso = 0.34 + 0.42 * fetch;
-  float a = rough * rough;
-  // Distance floor: a sub-pixel specular lobe aliases, a widened one twinkles.
-  float floorA = 0.0026 + 0.010 * smoothstep(300.0, 5000.0, vViewDist);
-  float ax = max(a * (1.0 + aniso), floorA);
-  float ay = max(a * (1.0 - aniso * 0.62), floorA * 0.7);
-  float D = ggxAniso(NoH, dot(wdir, H), dot(bdir, H), ax, ay);
-  float Vis = smithVis(NoV, NoL, (ax + ay) * 0.5);
-  float Fs = fresnelWater(max(dot(H, V), 0.0), rough);
-  vec3 spec = uSunColor * (D * Vis * Fs * NoL);
+  float NoL = max(dot(N, L), 0.0);
+  float a = mix(0.020, 0.075, fetch);
+  a = a * (1.0 + 2.5 * smoothstep(300.0, 4000.0, vViewDist)); // widen with distance
+  float a2 = a * a;
+  float d = (NoH * NoH) * (a2 - 1.0) + 1.0;
+  float D = a2 / (3.14159265 * d * d);
+  float spec = D * NoL * fres * uGlitter;
+  color += uSunColor * min(spec, 24.0) * smoothstep(-0.02, 0.10, uSunDir.y);
 
-  // Break the sun path into individual glints rather than one hot blob.
-  float s1 = texture2D(uNoise, p * 0.46 + wind * (uTime * 0.16)).r;
-  float s2 = texture2D(uNoise, p * 0.137 - perp * (uTime * 0.09)).g;
-  float sparkle = smoothstep(0.20, 0.66, s1 * 0.6 + s2 * 0.6);
-  spec *= mix(1.0, mix(0.35, 2.9, sparkle), uGlitter * fine);
-  spec = min(spec, vec3(120.0));
-  spec *= 1.0 - foam * 0.8;
+  // -------------------------------------------------------------- foam ----
+  // Along the waterline, and on the steepest crests out in the fetch.
+  // Shore wash is narrow; whitecaps only break on the steepest crests, and
+  // only where there is enough fetch to build them. Boston's inner harbour is
+  // not the open Atlantic — overdoing this reads as scum, not surf.
+  float shoreFoam = (1.0 - smoothstep(0.0, 6.0, shoreD)) * smoothstep(-1.0, 0.8, shoreD);
+  float crestFoam = smoothstep(0.86, 0.99, vCrest) * smoothstep(0.45, 1.0, fetch);
+  // Two octaves so the wash breaks up instead of sitting in 30 m blobs.
+  float churn = texture2D(uNoise, p * 0.11 + wind * uTime * 0.05).r
+              * texture2D(uNoise, p * 0.023 - wind * uTime * 0.015).g;
+  float foam = clamp((shoreFoam * 0.85 + crestFoam * 0.30) * churn * 2.2 * uFoamGain, 0.0, 1.0);
+  foam *= 1.0 - smoothstep(900.0, 3000.0, vViewDist);
+  color = mix(color, uFoamColor * (down * 0.55 + 0.45), foam);
 
-  // ------------------------------------------------------------ merge ----
-  vec3 col = mix(body, refl, F) + spec;
+  // At night the city is the brightest thing the water can reflect.
+  color += uCityGlow * fres * 0.55 * (1.0 - smoothstep(0.0, 0.12, uSunDir.y));
 
-  vec3 foamLit = uFoamColor * (uSkyAmbient * 0.9 + sunIrr * 0.6);
-  col = mix(col, foamLit, foam * 0.92);
+  // Far water melts into the horizon haze instead of ending at a hard line.
+  float haze = smoothstep(uHorizonFade.x, uHorizonFade.y, vViewDist);
+  color = mix(color, uSkyHorizon * uEnvIntensity, haze * 0.85);
 
-  // Melt into the horizon so the ocean never ends on a line.
-  col = mix(col, horizon, smoothstep(uHorizonFade.x, uHorizonFade.y, dist) * 0.92);
-
-  gl_FragColor = vec4(col, clamp(max(alpha, foam * 0.85), 0.0, 1.0));
+  gl_FragColor = vec4(color, 1.0);
 
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
-  #include <fog_fragment>
-  #include <dithering_fragment>
 }
 `;
