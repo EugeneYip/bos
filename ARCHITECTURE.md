@@ -137,3 +137,19 @@ The harness drives the scene through `window.__debug` (`src/core/debugApi.ts`):
 `setView(pos, target)`, `setTime(hour, dayOfYear?)`, `settle(frames)`,
 `stats()`, `setQuality(tier)`. Keep that API working — the whole review loop
 depends on it.
+
+---
+
+## Landmarks vs Buildings: who draws what
+
+**Landmarks owns placement. Buildings owns suppression.**
+
+`src/landmarks/registry.ts` exports `LANDMARKS`, `findLandmark(slug)` (which
+resolves `absorbs` aliases too) and `landmarkSlugs()`. The `Landmarks` module
+instantiates and positions every one of them and publishes the suppression set
+as `ctx.landmarkSlugs` (a `Set<string>`) plus a `'landmark-slugs'` event.
+
+`Buildings` must **skip its generic extrusion** for any `BuildingRecord` whose
+`landmark` slug is in that set — and must **not** instantiate the registry mesh
+itself. If both modules place it, the model is drawn twice and z-fights against
+itself.
