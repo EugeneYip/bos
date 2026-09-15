@@ -54,10 +54,10 @@ Still rough, and worth knowing before you look:
 - **Four duplicate footprints survive** the extraction pass, down from 111.
   They are pairs mapped twice with genuinely different shapes, where picking a
   winner needs a judgement the pipeline does not have.
-- **About two thousand footprints still overlap a neighbour** by a little.
-  Almost all are terraces whose shared party wall was traced twice, centimetres
-  apart; they z-fight along that wall at a grazing angle. Deleting either one
-  would leave a gap, so they stay.
+- **About sixteen thousand pairs of footprints share a party wall**, and 269 km
+  of wall between them. That is not a defect — a terrace is buildings sharing
+  party walls — and it costs two coincident quads apiece that nothing will ever
+  see.
 - **The far-field heightfield is flat.** 407 m posts shaded by elevation and
   slope is enough for a silhouette; at 15 km, where half the hill's own colour
   still reaches the eye, it reads as a smear rather than as land.
@@ -102,6 +102,20 @@ turned out to be a different thing than it looked like:
   every material with one fetch. It comes from the street network rather than
   from `highway=street_lamp`, which has about five per cent of Boston's lamps
   and none at all within 168 m of the Financial District's central junction.
+- *Party walls z-fighting*, which was listed here and was wrong about the
+  mechanism. A party wall cannot fight: its two faces point away from each
+  other, so whichever one is front-facing from a given eye is the one buried
+  inside the neighbour, and the other is back-face culled. What fights is the
+  *roof*. Where two traces overlap by a few centimetres and both buildings are
+  tagged with the same storey count, the two roof planes are coplanar, both face
+  up and neither is occluded — the one arrangement with no geometry to save it.
+  Neither footprint is wrong, so neither can be deleted; separating them by
+  5 cm is enough, and that is below what the source heights are accurate to. The
+  camera's near plane is 0.35 m and the depth buffer 24-bit, which puts depth
+  resolution at about 7 mm at 200 m and 17 cm at a kilometre, so 5 cm resolves
+  cleanly well past the distance at which these slivers are more than a pixel.
+  444 roofs moved; pairs that are coplanar to within 2 cm *and* genuinely
+  overlap fall to three, totalling five square metres.
 - *Buildings inside other buildings, everywhere.* The Prudential's was the one
   that got noticed, and fixing it properly took three passes. Containment has to
   be tested on the footprint rather than the area, or 111 Huntington's three

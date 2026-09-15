@@ -270,5 +270,21 @@
     ],
     "hour": 9.8,
     "note": "Two hand-authored landmark meshes side by side. If either one's OSM footprint is not suppressed, it shows here as a second building in the same place."
+  },
+  {
+    "id": "terrace",
+    "title": "Back Bay rowhouse roofs, close",
+    "pos": [
+      -1400,
+      72,
+      760
+    ],
+    "target": [
+      -1400,
+      16,
+      660
+    ],
+    "hour": 11.0,
+    "note": "Party walls and roof planes at close range. Adjacent rowhouses are traced separately in OpenStreetMap, so their shared wall is two coincident quads and their roofs meet in overlapping slivers; this is where that shows."
   }
 ]

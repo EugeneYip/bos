@@ -45,6 +45,39 @@ const TINY = new Set([
  *   height  ->  building:levels * 3.2 (+ roof)  ->  building:height  ->  inferred.
  * @returns {{height:number, levels:number, source:string}}
  */
+/**
+ * Do two footprints share at least `minArea` square metres of plan?
+ *
+ * It has to be an area test, not a touch test. Asking merely whether a vertex
+ * of one lands inside the other answers yes for every terrace in the city — a
+ * shared party wall puts vertices exactly on the boundary, where point-in-ring
+ * is undefined — and a terrace does not overlap, it abuts. Getting that wrong
+ * turned an eleven-pair correction into twelve thousand buildings quietly
+ * losing height.
+ */
+function ringsOverlap(a, b, minArea = 0.5) {
+  const x0 = Math.max(a._bb[0], b._bb[0]);
+  const x1 = Math.min(a._bb[2], b._bb[2]);
+  const z0 = Math.max(a._bb[1], b._bb[1]);
+  const z1 = Math.min(a._bb[3], b._bb[3]);
+  if (x1 <= x0 || z1 <= z0) return false;
+  // Sample the intersection box and scale by its area rather than by the step
+  // squared. The overlap between two terraced traces is a ribbon centimetres
+  // wide and tens of metres long; charging each hit a full step-by-step cell
+  // reports several square metres where there is a fraction of one.
+  const step = Math.max(0.08, Math.min(x1 - x0, z1 - z0) / 24);
+  const box = (x1 - x0) * (z1 - z0);
+  let hit = 0;
+  let total = 0;
+  for (let z = z0 + step / 2; z < z1; z += step) {
+    for (let x = x0 + step / 2; x < x1; x += step) {
+      total++;
+      if (pointInPolygon(a, x, z) && pointInPolygon(b, x, z)) hit++;
+    }
+  }
+  return total > 0 && (hit / total) * box >= minArea;
+}
+
 /** Distance from a point to a closed ring's boundary, metres. */
 function distToRing(ring, x, z) {
   let best = Infinity;
@@ -80,11 +113,20 @@ function distToRing(ring, x, z) {
  * do that, and being wrong here costs a building rather than a crash.
  */
 function ringInside(ring, poly, eps = 0.5) {
+  const n = ring.length / 2;
+  let outside = 0;
   for (let i = 0; i < ring.length; i += 2) {
     const x = ring[i], z = ring[i + 1];
     if (distToRing(poly.outline, x, z) <= eps) continue;
     if (poly.holes && poly.holes.some((h) => distToRing(h, x, z) <= eps)) continue;
-    if (!pointInPolygon(poly, x, z)) return false;
+    if (pointInPolygon(poly, x, z)) continue;
+    // A vertex well clear of the container means these really are two different
+    // outlines. A vertex just past it is a trace that wandered, and refusing to
+    // allow any of those leaves pairs like MIT's E28 — the same 64 x 54 m plan
+    // drawn twice, to the same 85.4 m, one of them with three extra corners —
+    // both in the data with their roofs exactly coplanar.
+    if (distToRing(poly.outline, x, z) > 2.0) return false;
+    if (++outside > Math.max(1, Math.floor(n * 0.2))) return false;
   }
   return true;
 }
@@ -198,7 +240,7 @@ function resolveMaterial(tags, levels, nb, id) {
  */
 export function buildBuildings(elements, sampleGround, log = console.log) {
   const stats = {
-    ways: 0, relations: 0, ringsDropped: 0, tooSmall: 0, partsDropped: 0, buriedDropped: 0, duplicatesDropped: 0,
+    ways: 0, relations: 0, ringsDropped: 0, tooSmall: 0, partsDropped: 0, buriedDropped: 0, duplicatesDropped: 0, roofsSeparated: 0,
     partsKept: 0, landmarks: new Map(), heightSource: {}, materialTagged: 0, colourTagged: 0,
   };
 
@@ -381,6 +423,51 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
     }
   }
 
+  // --- coplanar roofs ------------------------------------------------------
+  // What survives the passes above is a handful of pairs that genuinely overlap
+  // and genuinely share a roof height: a building and its annexe, both rounded
+  // to the same tagged storey count. Two coplanar, both-upward-facing, both
+  // unoccluded surfaces is the one arrangement that really does fight in the
+  // depth buffer, and unlike a party wall — whose two faces point away from
+  // each other, so one is always back-face culled and the other always hidden
+  // inside its neighbour — there is no geometry to save it.
+  //
+  // Neither footprint is wrong, so neither can be deleted. Separating them is
+  // enough: the camera's near plane is 0.35 m and the depth buffer 24-bit, so
+  // world-space depth resolution is about 7 mm at 200 m and 17 cm at a
+  // kilometre. Five centimetres therefore resolves cleanly out to roughly half
+  // a kilometre, which is far past the distance at which a hundred square metres
+  // of sliver is more than a pixel or two — and five centimetres of step on a
+  // roof is below what the source heights are accurate to anyway.
+  const ROOF_EPS = 0.05;
+  for (const p of kept) {
+    if (dropped.has(p)) continue;
+    const pTop = topOf(p);
+    for (let j = Math.floor(p._bb[1] / CELL); j <= Math.floor(p._bb[3] / CELL); j++) {
+      for (let i = Math.floor(p._bb[0] / CELL); i <= Math.floor(p._bb[2] / CELL); i++) {
+        for (const q of grid.get(`${i},${j}`) ?? []) {
+          if (q === p || dropped.has(q)) continue;
+          if (p._bb[2] < q._bb[0] || q._bb[2] < p._bb[0]) continue;
+          if (p._bb[3] < q._bb[1] || q._bb[3] < p._bb[1]) continue;
+          const qTop = topOf(q);
+          const gap = Math.abs((pTop - (p._roofDrop ?? 0)) - (qTop - (q._roofDrop ?? 0)));
+          if (gap >= ROOF_EPS) continue;
+          if (!ringsOverlap(p, q)) continue;
+          // Deterministic: the worse-described roof is the one that moves, and
+          // ties break on id so a rebuild gives the same answer every time. One
+          // nudge per building, or a courtyard block would walk its own roof
+          // down a step for every neighbour it touches.
+          const loser = rank(p) !== rank(q)
+            ? (rank(p) < rank(q) ? p : q)
+            : (p.id < q.id ? q : p);
+          if (loser._roofDrop) continue;
+          loser._roofDrop = ROOF_EPS;
+          stats.roofsSeparated++;
+        }
+      }
+    }
+  }
+
   // --- record assembly -----------------------------------------------------
   const out = [];
   for (const p of kept) {
@@ -390,7 +477,9 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
     const [cx, cz] = p._c ?? centroid(p.outline);
     const nb = neighbourhoodAt(cx, cz);
 
-    const { height, levels, source } = resolveHeight(tags, p.a, nb, p.id);
+    const resolved = resolveHeight(tags, p.a, nb, p.id);
+    const { levels, source } = resolved;
+    const height = Math.max(2, resolved.height - (p._roofDrop ?? 0));
     stats.heightSource[source] = (stats.heightSource[source] || 0) + 1;
     const { shape, roofHeight } = resolveRoof(tags, p.a, levels, nb, p.id);
     const material = resolveMaterial(tags, levels, nb, p.id);
@@ -439,6 +528,7 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
     + `${stats.partsDropped} buried building:parts (${stats.partsKept} kept), `
     + `${stats.buriedDropped} other buried footprints, `
     + `${stats.duplicatesDropped} identical footprints`);
+  log(`    ${stats.roofsSeparated} coplanar roofs nudged ${(0.05).toFixed(2)} m apart`);
   log(`    height source: ${Object.entries(stats.heightSource).map(([k, v]) => `${k}=${v}`).join(' ')}`);
   log(`    tagged material ${stats.materialTagged}, tagged colour ${stats.colourTagged}`);
   return { buildings: out, stats };
