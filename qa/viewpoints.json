@@ -398,5 +398,21 @@
     ],
     "hour": 13.6,
     "note": "American flags on facades and roofs, hanging and flying, at a size you can read."
+  },
+  {
+    "id": "high-street",
+    "title": "125 High Street from the south-west",
+    "pos": [
+      1420,
+      140,
+      400
+    ],
+    "target": [
+      986,
+      60,
+      19
+    ],
+    "hour": 10.8,
+    "note": "The worst remaining footprint interpenetration: a 100 m building:part crossing the walls of the 90 m relation it belongs to."
   }
 ]
