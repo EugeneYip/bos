@@ -96,9 +96,31 @@ export interface SegmentedHandle<T extends string> {
   setDisabled(id: T, disabled: boolean, title?: string): void;
 }
 
+/**
+ * A radio group.
+ *
+ * Clicking a segment moves the selection *itself* before calling `onChange`.
+ * That sounds too obvious to write down, but it was not the case here: the
+ * handle exposed a `set()` that nobody called, so every one of these — quality
+ * preset, weather, camera mode — fired its change and then kept the highlight
+ * exactly where it was. The quality preset genuinely worked; it simply looked
+ * like it did not, which is the same thing to whoever is clicking it.
+ *
+ * `set()` remains for the cases where something else owns the value and the
+ * group has to follow it.
+ */
 export function segmented<T extends string>(opts: SegmentedOpts<T>): SegmentedHandle<T> {
   const buttons = new Map<T, HTMLButtonElement>();
   const group = el('div', { class: 'bh-seg', role: 'radiogroup', 'aria-label': opts.label });
+
+  const select = (v: T): void => {
+    for (const [id, b] of buttons) {
+      const on = id === v;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-checked', String(on));
+    }
+  };
+
   for (const o of opts.options) {
     const b = el('button', {
       type: 'button',
@@ -107,20 +129,14 @@ export function segmented<T extends string>(opts: SegmentedOpts<T>): SegmentedHa
       title: o.title ?? o.label,
       class: o.id === opts.value ? 'is-active' : '',
       disabled: o.disabled,
-      onclick: () => opts.onChange(o.id),
+      onclick: () => { select(o.id); opts.onChange(o.id); },
     }, o.label) as HTMLButtonElement;
     buttons.set(o.id, b);
     group.appendChild(b);
   }
   return {
     root: group,
-    set(v: T) {
-      for (const [id, b] of buttons) {
-        const on = id === v;
-        b.classList.toggle('is-active', on);
-        b.setAttribute('aria-checked', String(on));
-      }
-    },
+    set: select,
     setDisabled(id: T, disabled: boolean, title?: string) {
       const b = buttons.get(id);
       if (!b) return;

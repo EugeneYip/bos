@@ -278,16 +278,23 @@ export class Hud implements WorldModule, HudHost {
 
   private renderQuality(): void {
     const ctx = this.ctx;
+    const app = (window as unknown as {
+      __boston?: { setQuality(t: QualityTier): void; detectedTier: QualityTier };
+    }).__boston;
+
     const tier = segmented<QualityTier>({
       label: 'Quality preset',
       options: TIERS.map((t) => ({ id: t, label: t[0].toUpperCase() + t.slice(1) })),
       value: ctx.tier,
       onChange: (v) => {
-        const app = (window as unknown as { __boston?: { setQuality(t: QualityTier): void } }).__boston;
         app?.setQuality(v);
         this.toast(`Quality: ${v}`);
       },
     });
+    // The tier can also move without a click — a URL override, or a future
+    // automatic downgrade — so follow it rather than assume this panel is the
+    // only thing that changes it.
+    ctx.on('quality-changed', (v) => tier.set(v as QualityTier));
 
     const effects = el('div');
     for (const [key, label, def] of [
@@ -306,7 +313,10 @@ export class Hud implements WorldModule, HudHost {
       tier.root,
       el('div', { class: 'bh-group-head' }, 'Effects'),
       effects,
-      hint(`Auto-detected ${ctx.tier} from your GPU. Append ?q=ultra to the URL to force a tier.`),
+      hint(
+        `Your GPU was detected as ${app?.detectedTier ?? ctx.tier}. Any preset can be selected `
+        + 'from here regardless, and ?q=low / medium / high / ultra forces one from the URL.',
+      ),
     ]);
   }
 

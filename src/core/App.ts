@@ -13,6 +13,13 @@ export class App {
   /** Set by the post-processing module to take over presentation. */
   renderOverride: ((dt: number) => void) | null = null;
 
+  /**
+   * What the GPU probe picked at boot, whatever the user has since chosen.
+   * The settings panel reports this, and a hint that silently rewrote itself to
+   * agree with the last click would be worse than no hint.
+   */
+  readonly detectedTier: QualityTier;
+
   constructor(readonly canvas: HTMLCanvasElement, tierOverride?: QualityTier) {
     const renderer = new THREE.WebGLRenderer({
       canvas,
@@ -24,7 +31,8 @@ export class App {
       logarithmicDepthBuffer: false,
     });
 
-    const tier = tierOverride ?? detectTier(renderer);
+    this.detectedTier = detectTier(renderer);
+    const tier = tierOverride ?? this.detectedTier;
     const quality = QUALITY[tier];
 
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.maxPixelRatio));
