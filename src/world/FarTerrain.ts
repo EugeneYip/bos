@@ -42,8 +42,6 @@ export class FarTerrain implements WorldModule {
   private mesh: THREE.Mesh | null = null;
   private material: THREE.MeshStandardMaterial | null = null;
   private uniforms = {
-    uHazeColor: { value: new THREE.Color(0.55, 0.65, 0.78) },
-    uHazeRange: { value: new THREE.Vector2(7000, 22000) },
     uCamY: { value: 0 },
     /** Where the outer rim starts and finishes dissolving, metres. */
     uRim: { value: new THREE.Vector2(RADIUS * 0.72, RADIUS * 0.985) },
@@ -169,11 +167,18 @@ export class FarTerrain implements WorldModule {
       depthWrite: true,
     });
 
-    // Aerial perspective: distant land has to wash out toward the horizon sky
-    // or it reads as a painted backdrop rather than as distance.
+    // Distance haze is *not* this module's job. The sky module rewrites the fog
+    // chunk to do physical aerial perspective — the sky's own in-scattered
+    // radiance in the direction of the fragment — and enrols every material
+    // whose `fog` is not false, this one included. A second, hand-authored wash
+    // on top of that used to run here, and because `dithering_fragment` comes
+    // *after* `tonemapping_fragment` it was mixing a display-referred near-white
+    // straight into the output: the hard white band across the horizon in every
+    // distant view was these hills, not the sea.
+    //
+    // All that is left is the dissolve, which is a question of where the mesh
+    // ends rather than of what the air does to it.
     mat.onBeforeCompile = (sh) => {
-      sh.uniforms.uHazeColor = this.uniforms.uHazeColor;
-      sh.uniforms.uHazeRange = this.uniforms.uHazeRange;
       sh.uniforms.uRim = this.uniforms.uRim;
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', '#include <common>\nvarying float vFarDist;')
@@ -181,11 +186,9 @@ export class FarTerrain implements WorldModule {
           '#include <begin_vertex>\n  vFarDist = length((modelMatrix * vec4(transformed, 1.0)).xz - cameraPosition.xz);');
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>',
-          '#include <common>\nvarying float vFarDist;\nuniform vec3 uHazeColor;\nuniform vec2 uHazeRange;\nuniform vec2 uRim;')
+          '#include <common>\nvarying float vFarDist;\nuniform vec2 uRim;')
         .replace('#include <dithering_fragment>', /* glsl */ `
           #include <dithering_fragment>
-          float haze = smoothstep(uHazeRange.x, uHazeRange.y, vFarDist);
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, uHazeColor, haze);
           // The mesh has to stop somewhere, and a hard rim against the sky is
           // worse than no far field at all. The last few kilometres dissolve.
           gl_FragColor.a *= 1.0 - smoothstep(uRim.x, uRim.y, vFarDist);
@@ -196,6 +199,7 @@ export class FarTerrain implements WorldModule {
 
     const mesh = new THREE.Mesh(g, mat);
     mesh.name = 'far-terrain';
+    mesh.userData.noShadow = true;
     mesh.castShadow = false;
     mesh.receiveShadow = false;   // no shadow cascade reaches this far anyway
     mesh.matrixAutoUpdate = false;
@@ -212,20 +216,9 @@ export class FarTerrain implements WorldModule {
 
   update(_dt: number, ctx: Ctx): void {
     if (!this.material) return;
-    // Track the sky's horizon so the haze always matches what it fades into.
-    const sun = ctx.sun;
-    const day = THREE.MathUtils.clamp((sun.elevation + 0.1) / 0.5, 0, 1);
-    const dusk = THREE.MathUtils.clamp(1 - Math.abs(sun.elevation) / 0.18, 0, 1);
-    this.uniforms.uHazeColor.value
-      .setRGB(0.035, 0.052, 0.088)
-      .lerp(new THREE.Color(0.62, 0.72, 0.86), day)
-      .lerp(new THREE.Color(0.88, 0.60, 0.40), dusk * 0.5);
-    // From high up you see much further before the haze closes in. At street
-    // level the far hills should be little more than a tone against the sky.
-    const y = Math.max(ctx.camera.position.y, 0);
-    this.uniforms.uHazeRange.value.set(1200 + y * 1.1, 6500 + y * 3.0);
     // Dissolve earlier when low down, where the rim would otherwise sit right
     // on the horizon line and read as a wall.
+    const y = Math.max(ctx.camera.position.y, 0);
     const rimStart = THREE.MathUtils.clamp(RADIUS * (0.52 + y / 9000), RADIUS * 0.5, RADIUS * 0.86);
     this.uniforms.uRim.value.set(rimStart, RADIUS * 0.99);
   }

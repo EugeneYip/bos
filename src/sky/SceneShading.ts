@@ -36,9 +36,16 @@ import * as THREE from 'three';
 
 const PI = '3.141592653589793';
 
-/** Declarations + the aerial-perspective evaluation, injected into fragments. */
-const AERIAL_PARS = /* glsl */ `
-#ifdef SKY_AERIAL
+/**
+ * The aerial-perspective evaluation itself, with its own include guard so it
+ * can be pasted into a hand-written `ShaderMaterial` as well as spliced into
+ * the stock fog chunk. Published on `ctx.aerial` alongside the shared uniform
+ * objects, because the modules that need it most — water, and anything else
+ * that bypasses `MeshStandardMaterial` — cannot reach this file directly.
+ */
+export const AERIAL_GLSL = /* glsl */ `
+#ifndef SKY_AERIAL_GLSL
+#define SKY_AERIAL_GLSL
 
   uniform sampler2D uApSkyView;
   uniform vec3  uApSunDir;
@@ -95,11 +102,36 @@ const AERIAL_PARS = /* glsl */ `
     return k * ( 1.0 + cosT * cosT ) / ( d * sqrt( max( d, 1e-4 ) ) );
   }
 
-  /** World-space offset from the camera to this fragment. */
-  vec3 skyApOffset( vec3 viewPos ) { return uApViewToWorld * viewPos; }
+  /**
+   * The sky's own radiance in one direction, straight from the atmosphere's
+   * sky-view table — the same table the dome is drawn from, so anything shaded
+   * with this converges to exactly the sky behind it instead of to somebody's
+   * guess at what that sky looks like.
+   *
+   * 'rough' widens the sample into a cone the way a rough mirror averages the
+   * sky it reflects: a second tap tilted toward the zenith, blended in, which
+   * flattens the horizon gradient without a second LUT.
+   */
+  vec3 skyApRadiance( vec3 dir, float rough ) {
+    vec3 a = texture2D( uApSkyView, skyApUv( dir, uApSunDir, uApViewHeight ) ).rgb;
+    if ( rough > 0.02 ) {
+      vec3 wide = normalize( dir + vec3( 0.0, 1.0, 0.0 ) * rough * 1.7 );
+      vec3 b = texture2D( uApSkyView, skyApUv( wide, uApSunDir, uApViewHeight ) ).rgb;
+      a = mix( a, b, clamp( rough * 1.25, 0.0, 0.62 ) );
+    }
+    // The 256x144 table cannot resolve the Mie forward peak, and the aureole
+    // around a low sun is most of the glare a wet surface throws back at you.
+    float cosT = dot( dir, uApSunDir );
+    a += uApSunColor * skyApMiePhase( cosT, mix( 0.80, 0.42, clamp( rough * 2.4, 0.0, 1.0 ) ) )
+       * uApInscatterGain * 0.10;
+    return a;
+  }
 
-  vec3 skyApply( vec3 color, vec3 viewPos ) {
-    vec3 offset = skyApOffset( viewPos );
+  /**
+   * Veil 'color' — the radiance leaving a surface 'offset' away in world
+   * space — with the air between it and the eye.
+   */
+  vec3 skyApplyOffset( vec3 color, vec3 offset ) {
     float dist = length( offset );
     if ( dist < 1.0 ) return color;
     vec3 rd = offset / dist;
@@ -113,7 +145,15 @@ const AERIAL_PARS = /* glsl */ `
     vec3 tau = uApBetaR * odR * uApStrength + tauM;
     vec3 tr = exp( -tau );
 
-    vec3 sky = texture2D( uApSkyView, skyApUv( rd, uApSunDir, uApViewHeight ) ).rgb;
+    // Air-light, not ground light. Below the horizon the sky-view table stops
+    // describing the atmosphere and starts describing the planet — its bottom
+    // rows are a 0.22-albedo ground term meant for the dome, where a downward
+    // ray really does end on the earth. The light scattered *into* a downward
+    // path is still sky, so the sample is lifted to the horizon, whose row is
+    // exactly the accumulated air-light along a long level path. Without this
+    // the far hills darken as the camera climbs, which is backwards.
+    vec3 rdSky = rd.y < 0.0 ? normalize( vec3( rd.x, 0.0, rd.z ) ) : rd;
+    vec3 sky = texture2D( uApSkyView, skyApUv( rdSky, uApSunDir, uApViewHeight ) ).rgb;
     vec3 inscatter = sky * ( 1.0 - tr ) * uApInscatterGain;
 
     // Forward-scattered sunlight: the glare that eats a skyline when you look
@@ -123,6 +163,13 @@ const AERIAL_PARS = /* glsl */ `
     inscatter += uApSunColor * ph * ( 1.0 - exp( -tauM ) ) * 2.2;
 
     return color * tr + inscatter;
+  }
+
+  /** World-space offset from the camera to this fragment. */
+  vec3 skyApOffset( vec3 viewPos ) { return uApViewToWorld * viewPos; }
+
+  vec3 skyApply( vec3 color, vec3 viewPos ) {
+    return skyApplyOffset( color, skyApOffset( viewPos ) );
   }
 
   /** Fraction of sunlight reaching a world point through the cloud deck. */
@@ -135,6 +182,13 @@ const AERIAL_PARS = /* glsl */ `
     return mix( 1.0, texture2D( uApCloudShadow, uv ).r, edge );
   }
 
+#endif
+`;
+
+/** Declarations + the aerial-perspective evaluation, injected into fragments. */
+const AERIAL_PARS = /* glsl */ `
+#ifdef SKY_AERIAL
+${AERIAL_GLSL}
 #endif
 `;
 
@@ -309,9 +363,21 @@ export class SceneShading {
   }
 
   /**
-   * Enrols new materials and turns on shadow casting/receiving. Opt out per
-   * object with `object.userData.noShadow = true` (water, glass canopies,
-   * anything that should not occlude the sun).
+   * Enrols new materials and turns on shadow casting/receiving.
+   *
+   * Receiving is unconditional — every lit surface in the city wants it, and
+   * it costs nothing on a material that has no lights. *Casting* is opt-out,
+   * via `object.userData.noShadow = true`, because it is not free and because
+   * some surfaces must not do it at all: a flat ground polygon drawn
+   * `DoubleSide` writes its own front faces into the shadow map (three maps
+   * `DoubleSide` to `DoubleSide` for the depth pass rather than to `BackSide`)
+   * and then fails the comparison against itself. Boston Common rendered
+   * black for exactly that reason, while the terrain one centimetre beneath it
+   * was correctly lit and correctly dappled.
+   *
+   * The flag is the only channel that works: `castShadow` defaults to false,
+   * so a module setting it false at construction is indistinguishable from one
+   * that never thought about it, and this sweep cannot tell them apart.
    *
    * Swept every frame while the city streams in, then every half second, so a
    * module that builds geometry late still gets haze and shadows.
@@ -329,9 +395,9 @@ export class SceneShading {
     const mesh = obj as THREE.Mesh;
     const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
     if (mat) {
-      if (mesh.isMesh && obj.userData.noShadow !== true) {
-        mesh.castShadow = true;
+      if (mesh.isMesh) {
         mesh.receiveShadow = true;
+        if (obj.userData.noShadow !== true) mesh.castShadow = true;
       }
       if (Array.isArray(mat)) for (const m of mat) this.enrol(m);
       else this.enrol(mat);

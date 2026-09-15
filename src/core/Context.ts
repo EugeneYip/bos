@@ -20,6 +20,28 @@ export interface SunState {
 }
 
 /**
+ * Physical aerial perspective, published by the sky module once its scattering
+ * tables exist.
+ *
+ * Anything built on `MeshStandardMaterial` already gets this through the fog
+ * chunk the sky module rewrites, and needs nothing from here. A hand-written
+ * `ShaderMaterial` — the water — cannot be reached that way, so it pastes
+ * `glsl` into its fragment stage and merges `uniforms` into its own. Sharing
+ * the uniform *objects* is the point: the sky writes them once a frame and
+ * every consumer sees the same atmosphere, which is the only way the water,
+ * the far terrain and the dome can meet at the horizon without a seam.
+ */
+export interface AerialPerspective {
+  /**
+   * Declares the `uApXxx` uniforms and defines `skyApRadiance( dir, rough )`,
+   * `skyApplyOffset( colour, worldOffset )` and `skyCloudTransmittance( p )`.
+   * Self-guarded, so including it twice is harmless.
+   */
+  glsl: string;
+  uniforms: Record<string, THREE.IUniform>;
+}
+
+/**
  * The single object threaded through every world module. Modules read from it
  * and may publish capabilities onto it (e.g. the terrain module installs
  * `sampleHeight`). Keep additions additive so modules stay decoupled.
@@ -46,6 +68,9 @@ export interface Ctx {
 
   /** Environment map used for IBL; installed by the sky module. */
   envMap: THREE.Texture | null;
+
+  /** Shared atmosphere for shaders that cannot use the fog chunk; see above. */
+  aerial: AerialPerspective | null;
 
   /** Shared PBR texture/material library; installed by the Materials module. */
   materials: MaterialLibrary;

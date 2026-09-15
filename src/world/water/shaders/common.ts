@@ -15,8 +15,8 @@
  *     what water actually does. Fetch squeezes the whole spectrum: the
  *     impounded Charles gets 6-34 m chop a few centimetres high, the outer
  *     harbour gets a 0.3 m, 88 m swell.
- *  3. 'WATER_SKY_GLSL' / 'WATER_BRDF_GLSL' — the fallback sky and the
- *     dielectric response.
+ *  3. 'WATER_GLOW_GLSL' / 'WATER_BRDF_GLSL' — Boston's own skyglow and the
+ *     dielectric response. The sky itself comes from 'ctx.aerial'.
  */
 
 export const WATER_CONST_GLSL = /* glsl */ `
@@ -205,35 +205,22 @@ WaveOut oceanWaves(
 `;
 
 /**
- * The sky the water sees when nothing better is available.
+ * What the city itself contributes to the water.
  *
- * Not a substitute for the Sky module's IBL — the priority in the shader is
- * planar reflection, then 'ctx.envMap', then this. But it is what keeps the
- * Charles from turning into a black hole before Sky finishes its probe, it is
- * what fills the enormous part of every reflection that is sky rather than
- * city, and its horizon term is reused as the colour the water melts into at
- * 20 km, so there is never a hard line where the harbour stops.
+ * There used to be a hand-authored analytic sky here — a zenith-to-horizon
+ * gradient with a sun lobe bolted on — which the surface reflected and which
+ * it also melted into at twenty kilometres. It had to be tuned deliberately
+ * *dimmer* than the rendered dome so the harbour could never come out brighter
+ * than the air above it, and that guaranteed the two would never match either.
+ * The reflection now samples the atmosphere's own sky-view table through
+ * 'ctx.aerial', which is the same table the dome is drawn from, so there is
+ * nothing left to calibrate.
+ *
+ * Sodium and LED spill off Boston is not in that table, and after dark it is
+ * the brightest thing the river can reflect, so it stays here.
  */
-export const WATER_SKY_GLSL = /* glsl */ `
-uniform vec3 uSkyZenith;
-uniform vec3 uSkyHorizon;
-uniform vec3 uSkyGlow;
+export const WATER_GLOW_GLSL = /* glsl */ `
 uniform vec3 uCityGlow;
-
-vec3 analyticSky(vec3 dir, vec3 sunDir, float rough) {
-  float up = clamp(dir.y, -1.0, 1.0);
-  // A rough surface sees an average over a cone, which flattens the gradient.
-  float t = pow(1.0 - clamp(up, 0.0, 1.0), mix(4.2, 1.5, clamp(rough * 2.6, 0.0, 1.0)));
-  vec3 col = mix(uSkyZenith, uSkyHorizon, t);
-  col = mix(uSkyHorizon * 0.72, col, smoothstep(-0.10, 0.015, up));
-
-  float cosT = max(dot(dir, sunDir), 0.0);
-  float sharp = mix(36.0, 5.0, clamp(rough * 3.0, 0.0, 1.0));
-  col += uSkyGlow * (pow(cosT, sharp) * 1.6 + pow(cosT, 5.0) * 0.20);
-  // Sodium/LED spill off the city, strongest just above the horizon.
-  col += uCityGlow * pow(1.0 - clamp(abs(up), 0.0, 1.0), 22.0);
-  return col;
-}
 `;
 
 /** Schlick Fresnel for an air/water interface, plus the GGX pieces. */

@@ -1,7 +1,7 @@
 import {
   WATER_BRDF_GLSL,
   WATER_CONST_GLSL,
-  WATER_SKY_GLSL,
+  WATER_GLOW_GLSL,
   WATER_WIND_GLSL,
 } from './common';
 
@@ -22,7 +22,7 @@ import {
  * against an estuary rather than a reef — and a shoreline whose waterline
  * actually moves and piles foam up on whichever bank the wind is pushing at.
  */
-export const WATER_FRAG = /* glsl */ `
+export const waterFrag = (aerialGlsl: string): string => /* glsl */ `
 precision highp float;
 
 #include <common>
@@ -74,7 +74,6 @@ uniform vec3 uBedB;
 uniform vec3 uSiltA;
 uniform vec3 uSiltB;
 uniform vec3 uFoamColor;
-uniform vec2 uHorizonFade;
 
 varying vec3  vWorld;
 varying vec3  vGN;
@@ -87,8 +86,12 @@ varying float vLostVar;
 
 ${WATER_CONST_GLSL}
 ${WATER_WIND_GLSL}
-${WATER_SKY_GLSL}
+${WATER_GLOW_GLSL}
 ${WATER_BRDF_GLSL}
+
+// The atmosphere, shared verbatim with every other material in the city. See
+// 'ctx.aerial'. It brings 'skyApRadiance' and 'skyApplyOffset' with it.
+${aerialGlsl}
 
 /** One detail-normal octave, returned as an xz slope plus its breakup mask. */
 vec3 rippleOctave(vec2 p, float tile, float speed, vec2 drift, float rot, float gain) {
@@ -208,16 +211,20 @@ void main() {
   vec3 R = reflect(-V, N);
   R.y = abs(R.y);   // never sample below the horizon into the seabed
 
-  vec3 sky = analyticSky(R, normalize(uSunDir), rough);
+  // The sky the water reflects is the sky-view table the dome itself is drawn
+  // from, sampled in the mirror direction. It used to be a hand-authored
+  // gradient tuned by eye to sit *below* the real sky so the harbour could
+  // never come out brighter than the air above it — which meant the two could
+  // never agree either, and any seam between them showed.
+  vec3 sky = skyApRadiance(R, rough);
 
 #if WATER_ENV == 1
-  // The probe carries the sun, the clouds and the city's own bounce, all of
-  // which belong in the reflection — but it also averages in a lot of ground,
-  // so it tints rather than replaces the analytic sky.
+  // The probe carries the clouds and the city's own bounce, which belong in
+  // the reflection — but it also averages in a lot of ground, so it tints
+  // rather than replaces the atmosphere.
   vec3 probe = textureCubeUV(envMap, R, clamp(rough * 1.6, 0.02, 1.0)).rgb;
-  sky = mix(sky, probe, 0.50);
+  sky = mix(sky, probe, 0.35);
 #endif
-  sky *= uEnvIntensity;
 
 #if WATER_PLANAR == 1
   if (uReflStrength > 0.001) {
@@ -267,6 +274,14 @@ void main() {
   vec3 down = uSunColor * sunUp + uSkyAmbient;
   vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
 
+  // The sky module winds exposure up after sunset so the dim sky still reads.
+  // Everything *authored* here — the bed, the backscatter, the silt, the foam,
+  // the city's glow — is display-referred and has to come down by the same
+  // factor or the river is the brightest thing in a night frame. The reflected
+  // sky and the sun's glitter need no such correction: they come from the
+  // atmosphere and from 'ctx.sun', which are already as dim as the real thing.
+  float authored = mix(0.055, 1.0, clamp(uEnvIntensity, 0.0, 1.0));
+
   // Depth reads as colour, not just as darkness: the channel is deep and
   // green, the margins are a shallow, silty, distinctly browner band. On the
   // Charles that band is tannin; in the harbour it is mud stirred by the tide.
@@ -282,7 +297,7 @@ void main() {
   // ----------------------------------------------------------- fresnel ----
   float fres = fresnelWater(NoV, rough);
 
-  vec3 color = mix(body, sky, fres);
+  vec3 color = mix(body * authored, sky, fres);
 
   // ---------------------------------------------------------- specular ----
   // Anisotropic GGX on the wind axis: a low sun stretches into a long path of
@@ -340,7 +355,7 @@ void main() {
 
     // Just inside the waterline the sheet is thin and glossy over wet sand.
     float wet = (1.0 - smoothstep(0.0, 2.6, edge)) * 0.55;
-    color = mix(color, siltCol * down * 1.9, wet * (1.0 - foam));
+    color = mix(color, siltCol * down * 1.9 * authored, wet * (1.0 - foam));
   }
 #endif
 
@@ -366,27 +381,17 @@ void main() {
   // same sun and sky as everything else, or it glows in the dark — and with
   // the night exposure lift a constant floor here clips the whole channel to
   // white.
-  vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * 0.55);
+  vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * 0.55) * authored;
   color = mix(color, foamLit, foam);
 
   // At night the city is the brightest thing the water can reflect.
-  color += uCityGlow * fres * 0.55 * uNight;
+  color += uCityGlow * fres * 0.55 * uNight * authored;
 
-  // Far water melts into the horizon haze instead of ending at a hard line.
-  // Far water has to become the horizon outright, not 85% of it: at grazing
-  // incidence the surface mirrors the sky almost totally, and letting even a
-  // sliver of that through left a hard white band across every distant view.
-  float haze = smoothstep(uHorizonFade.x, uHorizonFade.y, vViewDist);
-  // Far water has to become the horizon outright, not 85% of it: at grazing
-  // incidence the surface mirrors the sky almost totally, and letting even a
-  // sliver of that through left a hard white band across every distant view.
-  color = mix(color, uSkyHorizon * uEnvIntensity * 0.95, haze);
-
-  // The sky module lifts exposure ~2x after dark so the dim sky still reads.
-  // Water has no light of its own, so without matching that lift downward the
-  // river ends up the brightest thing in a night frame. uEnvIntensity already
-  // tracks day-to-night, so reuse it as the scale.
-  color *= mix(0.055, 1.0, clamp(uEnvIntensity, 0.0, 1.0));
+  // Distance. Not a fade toward somebody's idea of the horizon colour — the
+  // same physical aerial perspective the buildings, the hills and the dome all
+  // use, so at twenty kilometres the sea *is* the sky it sits in front of, at
+  // every azimuth and every sun elevation, and there is nothing left to seam.
+  color = skyApplyOffset(color, vWorld - cameraPosition);
 
   // Bound the HDR output. At a grazing angle the surface mirrors the sky
   // almost totally, and a bright dusk horizon pushed that past anything the

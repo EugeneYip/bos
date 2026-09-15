@@ -10,7 +10,7 @@ import { buildSurfaces, buildOceanSkirt } from './water/surface';
 import { buildWaterTextures, type WaterTextures } from './water/textures';
 import { PlanarReflection } from './water/reflection';
 import { WATER_VERT } from './water/shaders/water.vert';
-import { WATER_FRAG } from './water/shaders/water.frag';
+import { waterFrag } from './water/shaders/water.frag';
 import { GpuTimer } from './water/timing';
 
 /**
@@ -107,6 +107,7 @@ export class Water implements WorldModule {
     for (const [g, mat] of pieces) {
       const mesh = new THREE.Mesh(g, mat);
       mesh.name = 'water:chunk';
+      mesh.userData.noShadow = true;
       mesh.castShadow = false;
       mesh.receiveShadow = false; // shading is fully handled in the shader
       mesh.matrixAutoUpdate = false;
@@ -155,7 +156,7 @@ export class Water implements WorldModule {
     const m = new THREE.ShaderMaterial({
       name: skirt ? 'water:skirt' : 'water',
       vertexShader: WATER_VERT,
-      fragmentShader: WATER_FRAG,
+      fragmentShader: waterFrag(ctx.aerial?.glsl ?? ''),
       lights: false,
       fog: false,
       // The surface meshes are already cut to the water polygons, so there is
@@ -211,10 +212,7 @@ export class Water implements WorldModule {
 
         uSunDir: { value: new THREE.Vector3(0.4, 0.5, 0.76) },
         uSunColor: { value: new THREE.Color(1, 0.96, 0.9) },
-        uSkyZenith: { value: new THREE.Color(0.16, 0.32, 0.62) },
-        uSkyHorizon: { value: new THREE.Color(0.62, 0.72, 0.84) },
         uSkyAmbient: { value: new THREE.Color(0.3, 0.42, 0.58) },
-        uSkyGlow: { value: new THREE.Color(0.5, 0.58, 0.7) },
         uCityGlow: { value: new THREE.Color(0.9, 0.62, 0.32) },
         uEnvIntensity: { value: 1 },
         envMap: { value: null },
@@ -244,9 +242,15 @@ export class Water implements WorldModule {
         uReflBlur: { value: 9 },
         uReflSmear: { value: 1 },
         uReflDistort: { value: new THREE.Vector2(0.030, 0.085) },
-        uHorizonFade: { value: new THREE.Vector2(2600, 9000) },
       },
     });
+    // Opt into the shared atmosphere. A ShaderMaterial gets none of three's
+    // fog machinery, so the sky module's chunk rewrite never reaches here and
+    // the uniform objects have to be merged by hand — the *same* objects, so
+    // the water breathes exactly the air the rest of the city does.
+    if (ctx.aerial) Object.assign(m.uniforms, ctx.aerial.uniforms);
+    else console.warn('[Water] no atmosphere published; reflections will be black');
+
     // Tell the post chain this surface is worth tracing screen-space
     // reflections against; it cannot infer that from a ShaderMaterial.
     m.userData.ssr = !skirt;
@@ -292,21 +296,10 @@ export class Water implements WorldModule {
     const day = THREE.MathUtils.clamp((elev + 0.1) / 0.5, 0, 1);
     const dusk = THREE.MathUtils.clamp(1 - Math.abs(elev) / 0.16, 0, 1);
 
-    // Calibrated against the rendered dome: water may never come out brighter
-    // than the sky above it, and at grazing angles Fresnel alone reaches 0.7,
-    // so the authored radiance has to sit *below* what the atmosphere pass
-    // actually puts on screen. Overshoot here and the harbour turns into a
-    // sheet of white paper, which is the single easiest way to lose it.
-    m.uniforms.uSkyZenith.value
-      .setRGB(0.020, 0.045, 0.125)
-      .lerp(new THREE.Color(0.062, 0.160, 0.420), day);
-    m.uniforms.uSkyHorizon.value
-      .setRGB(0.024, 0.038, 0.075)
-      .lerp(new THREE.Color(0.325, 0.420, 0.545), day)
-      // Sunset spills warm light along the horizon, which is most of what a
-      // low camera over the Charles actually sees reflected.
-      // Sunset warms the horizon, but only briefly and never to orange paint.
-      .lerp(new THREE.Color(0.62, 0.34, 0.18), dusk * 0.38);
+    // What the *reflection* sees is no longer set here at all: it comes from
+    // the atmosphere's sky-view table through 'ctx.aerial'. All that is left is
+    // the downwelling that lights the body from above, which is an irradiance
+    // rather than a radiance and has no equivalent in that table.
     m.uniforms.uSkyAmbient.value
       .setRGB(0.020, 0.030, 0.055)
       .lerp(new THREE.Color(0.30, 0.40, 0.55), day);

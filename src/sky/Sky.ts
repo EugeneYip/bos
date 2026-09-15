@@ -15,7 +15,7 @@ import { AtmosphereLuts, PLANET_RADIUS_MM, SUN_ANGULAR_RADIUS, sunTransmittanceC
 import { CascadedShadows } from './CascadedShadows';
 import { CloudLayer, type CloudSettings } from './CloudLayer';
 import { EnvProbe } from './EnvProbe';
-import { patchGlobalChunks, SceneShading } from './SceneShading';
+import { AERIAL_GLSL, patchGlobalChunks, SceneShading } from './SceneShading';
 import { Starfield } from './Starfield';
 import { SKY_DOME_FRAG, SKY_DOME_VERT } from './shaders/skyDome';
 import { clamp, damp, GpuTimer, lerp, smoothstep } from './util';
@@ -259,6 +259,17 @@ export class Sky implements WorldModule {
     this.group.add(this.dome, this.stars.points, this.csm.group);
     scene.add(this.group);
     this.shading.ignore(this.group);
+
+    // Hand the atmosphere to modules the fog chunk cannot reach. Registration
+    // order puts Sky second, so everything downstream sees this in its own
+    // `init` and can compile against it.
+    // Bind the table now rather than on the first `update`: a consumer that
+    // compiles during init would otherwise sample an empty texture for a frame.
+    this.shading.uniforms.uApSkyView.value = this.luts.skyViewTexture;
+    ctx.aerial = {
+      glsl: AERIAL_GLSL,
+      uniforms: this.shading.uniforms as unknown as Record<string, THREE.IUniform>,
+    };
 
     ctx.on('weather', (payload) => this.setWeather(payload as WeatherPreset));
     ctx.on('time-changed', () => {
