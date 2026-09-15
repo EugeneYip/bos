@@ -335,8 +335,10 @@ export class Roads implements WorldModule {
     group.matrixAutoUpdate = false;
     let radius = 0;
     for (const m of meshes) {
-      // Paint is a decal: it must not write depth or cast shadows.
-      if (m.name.endsWith(':paint')) m.castShadow = false;
+      // Paint is a decal: it must not write depth or cast shadows. Say so with
+      // the flag as well, or the sky module's sweep hands the casting straight
+      // back and the markings shadow the tarmac a millimetre beneath them.
+      if (m.name.endsWith(':paint')) { m.userData.noShadow = true; m.castShadow = false; }
       group.add(m);
       const bs = m.geometry.boundingSphere;
       if (bs) {

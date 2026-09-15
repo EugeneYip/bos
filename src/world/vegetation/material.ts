@@ -10,10 +10,12 @@
  *    direction, plus a high-frequency flutter on the leaf cards only. Phase
  *    comes from the instance's world position, so 88 000 trees never pulse in
  *    unison and a tree keeps its phase as it crosses LOD tiers.
- *  - **Leaf transmission.** `RE_Direct` is overridden so every light also
- *    deposits the fraction that came *through* the leaf. Thin leaves are the
- *    reason a backlit canopy glows instead of reading as a black cut-out, and
- *    this single term is most of what separates a live tree from a prop.
+ *  - **Leaf transmission,** both halves. `RE_Direct` is overridden so every
+ *    light also deposits the fraction that came *through* the leaf, and the
+ *    IBL gather gains the opposite hemisphere for the same reason. Thin leaves
+ *    are why a backlit canopy glows instead of reading as a black cut-out —
+ *    and under a *closed* canopy, where there is no direct sun to transmit,
+ *    the indirect half is very nearly the only light there is.
  *  - **Season.** Summer and autumn albedos blended by day-of-year, jittered
  *    per tree and per card so a street turns over three weeks, not overnight.
  *  - **LOD cross-fade.** Interleaved-gradient-noise screen-door dither between
@@ -151,6 +153,29 @@ void RE_Direct_Veg( const in IncidentLight directLight, const in vec3 geometryPo
 #define RE_Direct RE_Direct_Veg
 `;
 
+/**
+ * The indirect half of the same physics, and the half that was missing.
+ *
+ * `RE_Direct_Veg` handles sunlight arriving through a leaf, but under a closed
+ * canopy direct sun is precisely the thing that is not there — what lights the
+ * interior of a tree, the trunk, and the ground beneath it is *skylight* that
+ * has come through the leaves above. Without this term that path carries no
+ * light at all, and Boston Common's tree line rendered as a black cut-out
+ * against the sky even at three in the afternoon.
+ *
+ * It also rescues the ground cover. Grass tufts are double-sided cards whose
+ * normals are deliberately not flipped for the back face (see the
+ * `normal_fragment_begin` patch below), so every back-facing card was gathering
+ * its irradiance from the lower hemisphere and coming out pure black; sampling
+ * the opposite hemisphere as well is exactly what a translucent blade does.
+ */
+const INDIRECT_TRANSMISSION = /* glsl */ `
+#include <lights_fragment_maps>
+#if defined( USE_ENVMAP ) && defined( ENVMAP_TYPE_CUBE_UV )
+  iblIrradiance += getIBLIrradiance( -geometryNormal ) * uTransTint * uTransAmount * 0.55;
+#endif
+`;
+
 export interface MaterialOptions {
   species: Species;
   lod: Lod;
@@ -246,6 +271,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <lights_physical_pars_fragment>',
           `#include <lights_physical_pars_fragment>\n${TRANSMISSION}`)
+        .replace('#include <lights_fragment_maps>', INDIRECT_TRANSMISSION)
         .replace('#include <normal_fragment_begin>', /* glsl */ `
           #include <normal_fragment_begin>
           // Undo three's double-sided flip: the card's normals were authored

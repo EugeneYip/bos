@@ -174,8 +174,15 @@ export class Parks implements WorldModule {
           polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
         });
       } else {
+        // No map to multiply against, so the tint has to come back down by the
+        // mean it was divided by. Without this the fallback renders at 1/0.075
+        // — thirteen times the colour asked for — and the surface clips to a
+        // flat saturated ribbon. It is easy to miss, because until the parks
+        // stopped shadowing themselves the whole layer was too dark to see.
+        console.warn(`[Parks] no albedo map for '${surface}'; using flat tint`);
         mat = new THREE.MeshStandardMaterial({
           name: `park:${surface}`, roughness: 0.95, metalness: 0, vertexColors: true,
+          color: new THREE.Color(MAP_MEAN, MAP_MEAN, MAP_MEAN),
           side: THREE.DoubleSide,
           polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
         });
@@ -184,7 +191,13 @@ export class Parks implements WorldModule {
 
       const mesh = new THREE.Mesh(g, mat);
       mesh.name = `parks:${surface}`;
-      mesh.castShadow = false;      // flat ground has nothing to cast onto
+      // Flat ground has nothing to cast onto, and casting is actively
+      // harmful here: these polygons are DoubleSide (the ear-clipped rings
+      // wind inconsistently), so their own front faces land in the shadow
+      // map and the surface fails the depth comparison against itself. The
+      // flag, not the field, is what the sky module's sweep reads.
+      mesh.userData.noShadow = true;
+      mesh.castShadow = false;
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
       this.root.add(mesh);
