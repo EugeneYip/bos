@@ -41,6 +41,17 @@ export interface AerialPerspective {
   uniforms: Record<string, THREE.IUniform>;
 }
 
+/** Street-lighting irradiance over the city; see `Ctx.lampField`. */
+export interface LampField {
+  texture: THREE.Texture;
+  /** South-west corner of the covered rectangle, world metres. */
+  origin: THREE.Vector2;
+  /** Extent of that rectangle, world metres. */
+  size: THREE.Vector2;
+  /** Metres of elevation the `.g` channel spans, starting at -8 m. */
+  groundRange: number;
+}
+
 /**
  * The single object threaded through every world module. Modules read from it
  * and may publish capabilities onto it (e.g. the terrain module installs
@@ -88,6 +99,18 @@ export interface Ctx {
 
   /** Shared atmosphere for shaders that cannot use the fog chunk; see above. */
   aerial: AerialPerspective | null;
+
+  /**
+   * Street lighting, baked once by the props module and consumed by the sky
+   * module's shared shading so every material in the city is lit by it.
+   *
+   * Ten thousand lamps cannot each be a `PointLight`. Their pools, though, are
+   * static and purely positional, so they go into a field indexed by world XZ:
+   * `.r` is the pooled irradiance, `.g` the elevation of the ground the lamps
+   * stand on, packed into `groundRange` metres from -8 m up, so the pool can
+   * thin as a facade climbs out of it on ground that is not flat.
+   */
+  lampField: LampField | null;
 
   /** Shared PBR texture/material library; installed by the Materials module. */
   materials: MaterialLibrary;

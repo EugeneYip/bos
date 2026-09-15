@@ -19,9 +19,10 @@
  * network costs a few hundred draw calls no matter where you stand.
  */
 import * as THREE from 'three';
-import type { Ctx, WorldModule } from '../core/Context';
+import type { Ctx, LampField, WorldModule } from '../core/Context';
 import { lonLatToWorld } from '../core/geo';
 import { loadRoads } from '../core/data';
+import { bakeLampField } from './roads/lamps';
 import type { RoadRecord } from '../core/types';
 
 import { MeshBuilder } from './roads/builder';
@@ -103,6 +104,7 @@ export class Roads implements WorldModule {
   private landmarkGroups = new Map<string, THREE.Group>();
 
   private net: Network | null = null;
+  private lampField: LampField | null = null;
   private items: Item[] = [];
   private junctions: Junction[] = [];
 
@@ -146,6 +148,12 @@ export class Roads implements WorldModule {
       const v = ctx.sampleHeight?.(x, z);
       return Number.isFinite(v) ? (v as number) : 0;
     };
+
+    // Street lighting, for every material in the city. Baked from the network
+    // rather than from the mapped lamps; see `roads/lamps.ts` for why.
+    this.lampField = bakeLampField(records);
+    ctx.lampField = this.lampField;
+    await yieldFrame();
 
     const t0 = performance.now();
     this.net = buildNetwork(records, sample);
@@ -531,6 +539,9 @@ export class Roads implements WorldModule {
     disposeGroup(this.root);
     ctx.scene.remove(this.root);
     this.mats?.dispose();
+    this.lampField?.texture.dispose();
+    this.lampField = null;
+    ctx.lampField = null;
     disposeFallbacks();
     this.items.length = 0;
     this.junctions.length = 0;

@@ -124,6 +124,8 @@ export class Props implements WorldModule {
     console.info(`[Props] ${total} props in ${this.buckets.length} instanced meshes`);
   }
 
+
+
   /** Shared materials keyed by role, so buckets batch where they can. */
   private material(ctx: Ctx, role: Role): THREE.Material {
     const hit = this.materials.get(role);

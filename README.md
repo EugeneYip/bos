@@ -54,15 +54,12 @@ Still rough, and worth knowing before you look:
 - **Boston's green cycle tracks** are painted for their whole length rather
   than at the conflict zones where the paint actually goes, so the Esplanade
   has a continuous emerald ribbon down it.
-- **Lit windows clip to white after dark.** The emissive facade textures are
-  authored display-referred and the night exposure lift pushes them past the
-  tonemapper's shoulder.
 - **The far-field heightfield is flat.** 407 m posts shaded by elevation and
   slope is enough for a silhouette; at 15 km, where half the hill's own colour
   still reaches the eye, it reads as a smear rather than as land.
 
-Three defects listed here through the last round are fixed, and each turned
-out to be a different thing than it looked like:
+Five defects listed here through the last two rounds are fixed, and each
+turned out to be a different thing than it looked like:
 
 - *The white band on the horizon* was not the sea mirroring the sky. It was
   the far-field terrain, which mixed a hand-authored near-white haze colour in
@@ -82,6 +79,25 @@ out to be a different thing than it looked like:
   per-frame sweep. Foliage separately gained the indirect half of its leaf
   transmission, which under a closed canopy is very nearly the only light
   there is.
+- *Lit windows clipping to white* was two problems, neither of them the
+  windows. The city had two systems setting exposure and only one was being
+  listened to: the sky publishes an artistic value on the renderer, the grade
+  blends that with its own metering, and at night the metered half is three
+  times higher — the windows compensated for 5.3 while the frame went out at
+  14. The presenter now publishes what it applied, on `ctx.exposure`. That
+  alone fixes nothing, and it is worth being precise about why: the windows are
+  most of the light in a night frame, so dimming them makes the metering raise
+  exposure and hands about half of it back. What had to change was the ratio —
+  roofs carry the same surface atlas as the walls, so their depth channel reads
+  as 'glass' and the emissive mask was lighting every flat roof downtown.
+- *The streets were pitch black after dark* — a defect the new eye-level night
+  viewpoint exposed rather than one that was listed. The lamps glowed but cast
+  no light; the road surface measured 0 to 14 out of 255. Ten thousand lamps
+  cannot each be a light in a forward renderer, but street lighting does not
+  move, so it is rasterised once into a field indexed by world XZ and read by
+  every material with one fetch. It comes from the street network rather than
+  from `highway=street_lamp`, which has about five per cent of Boston's lamps
+  and none at all within 168 m of the Financial District's central junction.
 - *The Charles reading light from altitude* was a missing `1/PI`. The water's
   diffuse body was not divided by it the way every other Lambertian surface in
   the city is, so for the same nominal albedo the water came out PI times

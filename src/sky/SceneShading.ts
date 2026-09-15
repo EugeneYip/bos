@@ -63,6 +63,12 @@ export const AERIAL_GLSL = /* glsl */ `
   uniform vec3  uApCloudShadowParams;  // centre.x, centre.z, extent
   uniform float uApCloudShadowOn;
 
+  uniform sampler2D uApLampMap;
+  uniform vec4  uApLampRect;     // originX, originZ, 1/width, 1/depth
+  uniform vec3  uApLampColor;
+  uniform float uApLampStrength; // 0 by day
+  uniform float uApLampGroundRange;
+
   #define SKY_AP_GROUND 6.360
 
   float skyApAcos( float x ) { return acos( clamp( x, -1.0, 1.0 ) ); }
@@ -172,6 +178,45 @@ export const AERIAL_GLSL = /* glsl */ `
     return skyApplyOffset( color, skyApOffset( viewPos ) );
   }
 
+  /**
+   * Irradiance from Boston's street lighting.
+   *
+   * Ten thousand lamps cannot each be a light — three would need a clustered
+   * or deferred path for that, and this renderer is neither. But their *pools*
+   * are a static, purely positional quantity, so the props module splats them
+   * once into a field over the city and every material in the scene reads it
+   * with one fetch, the same way the cloud shadow works.
+   *
+   * Two things make it read as lighting rather than as a painted-on glow:
+   *
+   *  - **Height.** The field's second channel carries the elevation of the
+   *    ground the lamps stand on, so the pool thins as a facade climbs out of
+   *    it. Without that, Beacon Hill's rooftops would be as lit as its
+   *    pavements, and absolute Y cannot be used because the city is not flat.
+   *  - **Direction.** A lamp is overhead, so the road takes nearly all of it
+   *    and a wall takes about half. The wrap keeps the shaded side of a bollard
+   *    from going black, which is what actually happens under a diffuse pool.
+   */
+  vec3 skyStreetLight( vec3 worldPos, vec3 n ) {
+    if ( uApLampStrength < 0.001 ) return vec3( 0.0 );
+    vec2 uv = ( worldPos.xz - uApLampRect.xy ) * uApLampRect.zw;
+    vec2 inside = min( uv, 1.0 - uv );
+    if ( min( inside.x, inside.y ) <= 0.0 ) return vec3( 0.0 );
+
+    vec2 field = texture2D( uApLampMap, uv ).rg;
+    float pool = field.r;
+    if ( pool <= 0.0 ) return vec3( 0.0 );
+
+    // Lamp heads sit 4-9 m up. Full strength at the pavement, gone by the
+    // fourth floor; below the reference the light is still arriving, so only
+    // the climb is penalised.
+    float above = max( worldPos.y - ( field.g * uApLampGroundRange - 8.0 ), 0.0 );
+    float fall = 1.0 / ( 1.0 + above * above * 0.010 );
+
+    float facing = clamp( n.y * 0.45 + 0.55, 0.0, 1.0 );
+    return uApLampColor * ( pool * uApLampStrength * fall * facing );
+  }
+
   /** Fraction of sunlight reaching a world point through the cloud deck. */
   float skyCloudTransmittance( vec3 worldPos ) {
     if ( uApCloudShadowOn < 0.5 ) return 1.0;
@@ -189,6 +234,21 @@ export const AERIAL_GLSL = /* glsl */ `
 const AERIAL_PARS = /* glsl */ `
 #ifdef SKY_AERIAL
 ${AERIAL_GLSL}
+#endif
+`;
+
+/**
+ * Appended to the indirect-light gather. It has to run there and not on
+ * `gl_FragColor`: street lighting is light, so it has to be multiplied by the
+ * surface's own albedo, not added over the top of it.
+ *
+ * `fog_pars_fragment` is included before `lights_pars_begin` in three's
+ * fragment template, so the declarations above are already in scope here — the
+ * same reason the cascade preamble can call `skyCloudTransmittance`.
+ */
+const LIGHTS_MAPS = /* glsl */ `
+#if defined( RE_IndirectDiffuse ) && defined( SKY_AERIAL ) && defined( USE_FOG )
+	irradiance += skyStreetLight( cameraPosition + skyApOffset( vFogViewPos ), geometryNormal );
 #endif
 `;
 
@@ -278,6 +338,9 @@ export function patchGlobalChunks(): void {
   THREE.ShaderChunk.fog_vertex = FOG_VERTEX;
   THREE.ShaderChunk.fog_pars_fragment = FOG_PARS_FRAGMENT;
   THREE.ShaderChunk.fog_fragment = FOG_FRAGMENT;
+  // Appended to the stock text, not an `#include` of it: a chunk that includes
+  // itself makes three's include resolver recurse until the stack goes.
+  THREE.ShaderChunk.lights_fragment_maps += LIGHTS_MAPS;
 
   const src = THREE.ShaderChunk.lights_fragment_begin;
   const marker = '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )';
@@ -321,6 +384,11 @@ export interface AerialUniforms {
   uApCloudShadow: THREE.IUniform<THREE.Texture | null>;
   uApCloudShadowParams: THREE.IUniform<THREE.Vector3>;
   uApCloudShadowOn: THREE.IUniform<number>;
+  uApLampMap: THREE.IUniform<THREE.Texture | null>;
+  uApLampRect: THREE.IUniform<THREE.Vector4>;
+  uApLampColor: THREE.IUniform<THREE.Color>;
+  uApLampStrength: THREE.IUniform<number>;
+  uApLampGroundRange: THREE.IUniform<number>;
 }
 
 /** Rayleigh scattering at sea level, per metre (Bucholtz 1995). */
@@ -346,6 +414,14 @@ export class SceneShading {
     uApCloudShadow: { value: null },
     uApCloudShadowParams: { value: new THREE.Vector3(0, 0, 8000) },
     uApCloudShadowOn: { value: 0 },
+    uApLampMap: { value: null },
+    uApLampRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+    // Boston finished converting its street lighting to LED in 2019: 4000 K on
+    // the arterials, 3000 K on residential streets. Not sodium — at 2700 K the
+    // tarmac came out pure orange with no blue in it at all.
+    uApLampColor: { value: new THREE.Color(1.0, 0.89, 0.76) },
+    uApLampStrength: { value: 0 },
+    uApLampGroundRange: { value: 80 },
   };
 
   private seen = new WeakSet<THREE.Material>();

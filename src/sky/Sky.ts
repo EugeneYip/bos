@@ -74,6 +74,18 @@ const SUN_DISC_RADIANCE = 1 / (Math.PI * SUN_ANGULAR_RADIUS * SUN_ANGULAR_RADIUS
  */
 const MOON_KEY_IRRADIANCE = 0.013;
 
+/**
+ * Peak irradiance under a street lamp, in the same units as the key light.
+ *
+ * Physically a 10 klm head at 9 m puts something like 20 lux on the pavement
+ * below it, against about 100 000 lux from the midday sun — a ratio of 5e-4.
+ * Rendering that literally would need the exposure curve to be physical too,
+ * and it is not: the night lift is capped so the city does not disappear. This
+ * is set instead so a lit pavement lands where a photograph puts it, a stop or
+ * so under the lit windows above it.
+ */
+const LAMP_IRRADIANCE = 0.30;
+
 /** Disc radiance of a full moon in the same units (~2500 cd/m^2). */
 const MOON_DISC_RADIANCE = 0.052;
 
@@ -530,6 +542,17 @@ export class Sky implements WorldModule {
     this.report(ctx);
   }
 
+  /**
+   * 0 by day, 1 once the lamps are fully on. Deliberately the same curve as
+   * `Props` and `Buildings` rather than this module's own `nightFactor`, which
+   * ramps over a wider band: the pool on the pavement has to arrive on exactly
+   * the frame the lamp above it starts glowing.
+   */
+  private lampFactor(): number {
+    const t = THREE.MathUtils.clamp((0.14 - this.sun.apparentElevation) / 0.21, 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
   private updateAerial(camera: THREE.PerspectiveCamera, viewHeightMm: number): void {
     const a = this.shading.uniforms;
     a.uApSkyView.value = this.luts.skyViewTexture;
@@ -544,6 +567,20 @@ export class Sky implements WorldModule {
     // The in-scattered light that reaches the eye from the key light itself.
     a.uApSunColor.value.copy(this.keyColor).multiplyScalar(this.keyIntensity);
     a.uApViewToWorld.value.setFromMatrix4(camera.matrixWorld);
+
+    // Street lighting. The props module bakes the field; the strength curve is
+    // the same civil-twilight ramp the lamps themselves come up on, so the
+    // pools appear exactly when the lamps do.
+    const lamps = this.ctx.lampField;
+    const a2 = a as unknown as Record<string, THREE.IUniform>;
+    if (lamps && a.uApLampMap.value !== lamps.texture) {
+      a.uApLampMap.value = lamps.texture;
+      (a2.uApLampRect.value as THREE.Vector4).set(
+        lamps.origin.x, lamps.origin.y, 1 / lamps.size.x, 1 / lamps.size.y,
+      );
+      a.uApLampGroundRange.value = lamps.groundRange;
+    }
+    a.uApLampStrength.value = lamps ? LAMP_IRRADIANCE * this.lampFactor() : 0;
 
     const shadowTex = this.clouds.shadowTexture;
     a.uApCloudShadow.value = shadowTex;
