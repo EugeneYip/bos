@@ -6,10 +6,23 @@ import type { QualityTier } from './config';
  * probes. This is a heuristic; the runtime adaptive-quality watchdog and the
  * settings UI can both override it afterwards.
  */
-export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
+/**
+ * What the driver says it is, or an empty string when the browser masks it.
+ *
+ * Worth surfacing: every tier decision hangs off this one string, and when it
+ * comes back masked the fallback is a texture-size probe that cannot tell a
+ * laptop from a workstation. A user who thinks the quality control is broken is
+ * usually looking at a machine the probe guessed low.
+ */
+export function gpuName(renderer: THREE.WebGLRenderer): string {
   const gl = renderer.getContext();
   const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-  const raw = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+  return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+}
+
+export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
+  const gl = renderer.getContext();
+  const raw = gpuName(renderer);
   const name = raw.toLowerCase();
 
   const mobile = /iphone|ipad|android|mobile/i.test(navigator.userAgent);

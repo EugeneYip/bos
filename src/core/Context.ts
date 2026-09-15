@@ -97,6 +97,9 @@ export interface Ctx {
    */
   exposure: number;
 
+  /** Pixels rendered per CSS pixel. Set by `App`; read by the HUD. */
+  resolution: number;
+
   /** Shared atmosphere for shaders that cannot use the fog chunk; see above. */
   aerial: AerialPerspective | null;
 

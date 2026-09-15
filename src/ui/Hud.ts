@@ -279,7 +279,13 @@ export class Hud implements WorldModule, HudHost {
   private renderQuality(): void {
     const ctx = this.ctx;
     const app = (window as unknown as {
-      __boston?: { setQuality(t: QualityTier): void; detectedTier: QualityTier };
+      __boston?: {
+        setQuality(t: QualityTier): void;
+        setResolution(s: number | null): void;
+        detectedTier: QualityTier;
+        gpu: string;
+        resolutionState: { ratio: number; explicit: boolean; dpr: number };
+      };
     }).__boston;
 
     const tier = segmented<QualityTier>({
@@ -309,13 +315,45 @@ export class Hud implements WorldModule, HudHost {
       effects.appendChild(toggle(label, def, (v) => ctx.emit('post:set', { key, value: v })).root);
     }
 
+    // Resolution is its own control, not a consequence of the preset. The tier
+    // caps pixels per CSS pixel, and `low` caps it at 1 — so on a Retina panel
+    // the frame was drawn at a quarter of the screen's pixels and stretched
+    // over it. Plenty of machines that cannot afford four shadow cascades can
+    // comfortably afford their own screen's resolution, and being unable to say
+    // so is the single most visible thing a settings panel can get wrong.
+    const dpr = app?.resolutionState.dpr ?? 1;
+    const RES: Array<{ id: string; label: string; value: number | null }> = [
+      { id: 'auto', label: 'Auto', value: null },
+      { id: 'half', label: '50%', value: 0.5 },
+      { id: 'one', label: '100%', value: 1 },
+    ];
+    if (dpr > 1.05) RES.push({ id: 'native', label: `Native ${dpr.toFixed(1)}x`, value: dpr });
+    const state = app?.resolutionState;
+    const current = !state || !state.explicit
+      ? 'auto'
+      : (RES.find((r) => r.value !== null && Math.abs(r.value - state.ratio) < 0.05)?.id ?? 'auto');
+
+    const res = segmented<string>({
+      label: 'Resolution',
+      options: RES.map((r) => ({ id: r.id, label: r.label })),
+      value: current,
+      onChange: (v) => {
+        const pick = RES.find((r) => r.id === v);
+        app?.setResolution(pick ? pick.value : null);
+        this.toast(`Resolution: ${pick?.label ?? 'auto'}`);
+      },
+    });
+
     append(this.panelBody, [
       tier.root,
+      el('div', { class: 'bh-group-head' }, 'Resolution'),
+      res.root,
       el('div', { class: 'bh-group-head' }, 'Effects'),
       effects,
       hint(
-        `Your GPU was detected as ${app?.detectedTier ?? ctx.tier}. Any preset can be selected `
-        + 'from here regardless, and ?q=low / medium / high / ultra forces one from the URL.',
+        `${app?.gpu ? `Reported GPU: ${app.gpu}. ` : 'Your browser masks the GPU name, so the tier was guessed from a capability probe. '}`
+        + `Detected as ${app?.detectedTier ?? ctx.tier}; your choice is remembered across reloads. `
+        + 'Append ?q=low / medium / high / ultra to force one from the URL.',
       ),
     ]);
   }

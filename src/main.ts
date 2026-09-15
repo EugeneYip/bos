@@ -36,6 +36,7 @@ async function main(): Promise<void> {
   const tier = tierParam && ['low', 'medium', 'high', 'ultra'].includes(tierParam) ? tierParam : undefined;
 
   const app = new App(canvas, tier);
+  app.ctx.resolution = app.ctx.renderer.getPixelRatio();
 
   // Post takes over presentation, so it needs the App itself. Ctx deliberately
   // does not expose it, so the hand-over is explicit rather than a global.

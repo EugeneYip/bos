@@ -127,6 +127,17 @@ for (const panel of ['Time of day', 'Camera', 'Landmarks', 'Settings']) {
   }
 }
 
+// The quality tier is remembered across reloads. It was not, which made every
+// deliberate upgrade look like a control that does not work: the GPU probe
+// re-ran on load and put a machine that measures as `low` straight back there.
+await page.evaluate(() => window.__boston.setQuality('ultra'));
+await new Promise((r) => setTimeout(r, 600));
+await page.reload({ waitUntil: 'networkidle2', timeout: 180000 });
+await page.waitForFunction('window.__ready === true', { timeout: 300000 });
+const afterReload = await page.evaluate(() => window.__boston.ctx.tier);
+if (afterReload !== 'ultra') failures.push(`quality tier not remembered: reloaded as "${afterReload}"`);
+else log('quality tier survives a reload');
+
 await browser.close();
 server.kill();
 

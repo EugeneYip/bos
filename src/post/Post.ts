@@ -134,6 +134,12 @@ export class Post implements WorldModule {
     this.app.renderOverride = (dt) => this.present(dt);
 
     ctx.on('quality-changed', () => { this.applyTier(ctx); this.resize(this.width, this.height, ctx); });
+    ctx.on('resolution-changed', (scale) => {
+      this.resolutionPinned = scale !== null;
+      this.applyTier(ctx);
+      this.applyUrlOverrides();
+      this.resize(this.width, this.height, ctx);
+    });
     ctx.on('post:set', (p) => this.apply(p as DeepPartial<PostSettings>));
     ctx.on('photo-mode', (on) => { this.settings.dof.enabled = on !== false; });
 
@@ -170,7 +176,11 @@ export class Post implements WorldModule {
     s.ssr.steps = ultra ? 40 : 24;
     s.motionBlur.enabled = q.motionBlur && ultra;
 
-    s.renderScale = ctx.tier === 'low' ? 0.72 : ctx.tier === 'medium' ? 0.85 : 1;
+    // The lower tiers render below the panel's resolution and upscale with
+    // FSR. If the user has asked for a resolution outright, doing that as well
+    // takes it straight back off them, so the chain renders 1:1 instead.
+    s.renderScale = this.resolutionPinned ? 1
+      : ctx.tier === 'low' ? 0.72 : ctx.tier === 'medium' ? 0.85 : 1;
     s.finalAA = q.taa ? 'none' : 'fxaa';
     s.profile = ultra || ctx.tier === 'high';
   }
@@ -378,6 +388,8 @@ export class Post implements WorldModule {
 
   /** Owns presentation while the chain is up. */
   /** One in-flight 1x1 readback of the metered exposure; see `publishExposure`. */
+  /** True once the user has chosen a resolution; see `applyTier`. */
+  private resolutionPinned = false;
   private lumBuffer = new Float32Array(4);
   private lumPending = false;
   /** Last metered EV that came back, or null until the first read lands. */

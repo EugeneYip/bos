@@ -149,6 +149,7 @@ const ctx = {
   envMap: null as THREE.Texture | null,
   aerial: null,
   exposure: RENDER.exposure,
+  resolution: 1,
   lampField: null,
   materials: {
     textures: () => undefined,

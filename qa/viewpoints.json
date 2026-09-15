@@ -286,5 +286,117 @@
     ],
     "hour": 11.0,
     "note": "Party walls and roof planes at close range. Adjacent rowhouses are traced separately in OpenStreetMap, so their shared wall is two coincident quads and their roofs meet in overlapping slivers; this is where that shows."
+  },
+  {
+    "id": "constitution",
+    "title": "USS Constitution at the Charlestown Navy Yard",
+    "pos": [
+      880,
+      26,
+      -1810
+    ],
+    "target": [
+      725,
+      22,
+      -1905
+    ],
+    "hour": 10.2,
+    "note": "Three masts, yards, standing rigging, black-and-white hull, the granite pier and Dry Dock 1. The oldest commissioned warship afloat; it has to read as a ship, not a hull with poles."
+  },
+  {
+    "id": "navy-yard",
+    "title": "Charlestown Navy Yard from the harbour",
+    "pos": [
+      1180,
+      70,
+      -1700
+    ],
+    "target": [
+      600,
+      30,
+      -2050
+    ],
+    "hour": 16.0,
+    "note": "The Constitution, the yard's brick storehouses and Bunker Hill Monument behind."
+  },
+  {
+    "id": "harvard",
+    "title": "Harvard Yard from the south",
+    "pos": [
+      -4180,
+      80,
+      -1880
+    ],
+    "target": [
+      -4235,
+      25,
+      -2111
+    ],
+    "hour": 11.2,
+    "note": "Widener's colonnade, Memorial Church's spire, the Yard's brick and the trees over it."
+  },
+  {
+    "id": "mit-campus",
+    "title": "MIT across Killian Court",
+    "pos": [
+      -2208,
+      60,
+      -250
+    ],
+    "target": [
+      -2200,
+      40,
+      -470
+    ],
+    "hour": 9.6,
+    "note": "The Great Dome on axis over Killian Court, the limestone wings, and the Charles behind the camera."
+  },
+  {
+    "id": "northeastern",
+    "title": "Northeastern University on Huntington Avenue",
+    "pos": [
+      -1790,
+      40,
+      1650
+    ],
+    "target": [
+      -1953,
+      25,
+      1833
+    ],
+    "hour": 14.4,
+    "note": "Snell Library's glass drum, the quad, Huntington Avenue and the Green Line reservation."
+  },
+  {
+    "id": "water-detail",
+    "title": "Charles River surface, close",
+    "pos": [
+      -1500,
+      7,
+      -420
+    ],
+    "target": [
+      -1180,
+      4,
+      -300
+    ],
+    "hour": 17.2,
+    "note": "Wave shape, foam, glitter and turbidity at the distance a person actually stands from water."
+  },
+  {
+    "id": "flags",
+    "title": "Flags on the Financial District",
+    "pos": [
+      660,
+      80,
+      -90
+    ],
+    "target": [
+      820,
+      60,
+      -230
+    ],
+    "hour": 13.6,
+    "note": "American flags on facades and roofs, hanging and flying, at a size you can read."
   }
 ]
