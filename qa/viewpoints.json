@@ -222,5 +222,37 @@
     ],
     "hour": 21.5,
     "note": "Street lamps, shopfronts, headlights and wet-looking tarmac. The only eye-level night test: every emissive in the city is authored display-referred and has to survive the exposure lift."
+  },
+  {
+    "id": "prudential",
+    "title": "The Prudential Tower and its podium from the south-west",
+    "pos": [
+      -1720,
+      230,
+      1290
+    ],
+    "target": [
+      -1364,
+      150,
+      902
+    ],
+    "hour": 10.5,
+    "note": "Landmark-vs-OSM overlap: the hand-authored tower has to sit in its podium, not through the buildings around it."
+  },
+  {
+    "id": "prudential-low",
+    "title": "Boylston Street below the Prudential",
+    "pos": [
+      -1420,
+      14,
+      1160
+    ],
+    "target": [
+      -1364,
+      180,
+      902
+    ],
+    "hour": 15.5,
+    "note": "Looking up the tower from the street; any footprint intersecting the mesh shows here first."
   }
 ]

@@ -54,6 +54,9 @@ Still rough, and worth knowing before you look:
 - **Boston's green cycle tracks** are painted for their whole length rather
   than at the conflict zones where the paint actually goes, so the Esplanade
   has a continuous emerald ribbon down it.
+- **Four duplicate footprints survive** the extraction pass, down from 111.
+  They are pairs mapped twice with genuinely different shapes, where picking a
+  winner needs a judgement the pipeline does not have.
 - **The far-field heightfield is flat.** 407 m posts shaded by elevation and
   slope is enough for a silhouette; at 15 km, where half the hill's own colour
   still reaches the eye, it reads as a smear rather than as land.
@@ -98,6 +101,19 @@ turned out to be a different thing than it looked like:
   every material with one fetch. It comes from the street network rather than
   from `highway=street_lamp`, which has about five per cent of Boston's lamps
   and none at all within 168 m of the Financial District's central junction.
+- *A building crashing into the Prudential Center* was a duplicate footprint.
+  OpenStreetMap carries the tower twice: `w29869880`, tagged and named, and
+  `w240259392`, a `building:part` repeating the tower's exact outline and
+  stopping 14.6 m below its roof. The extractor's de-duplication asked whether
+  a part's height was *similar* to its parent's, which is a different question
+  from whether it is *contained*, so it kept it. That was harmless for as long
+  as the parent was drawn over it — and then the parent, being a landmark, was
+  suppressed in favour of the hand-authored mesh, and the invisible part became
+  the only thing there: a bare grey slab standing inside the Prudential Tower.
+  The test is containment now, and it runs on the footprint rather than on the
+  area, which also clears 111 Huntington's three dozen crown pinnacles out of
+  the inside of its own tower. 1,241 enclosed parts and 148 duplicate
+  footprints leave the data; 651 records in total, none of them ever visible.
 - *The Charles reading light from altitude* was a missing `1/PI`. The water's
   diffuse body was not divided by it the way every other Lambertian surface in
   the city is, so for the same nominal albedo the water came out PI times
@@ -117,6 +133,9 @@ turned out to be a different thing than it looked like:
 
 Append `?q=low` / `medium` / `high` / `ultra` to the URL to force a quality
 tier, or `?ui=off` for a clean capture.
+
+`node qa/shoot.mjs` photographs the reference viewpoints; `node qa/ui-check.mjs`
+drives the interface, which no screenshot of the city can check.
 
 `?post=off` bypasses post-processing entirely; `?post=taa,ao,bloom` runs only
 the stages you name (`taa`, `ao`, `ssr`, `bloom`, `mb`, `dof`, `exposure`,

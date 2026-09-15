@@ -18,7 +18,7 @@ must be offered under ODbL, and any **Produced Work** (for example a rendered
 image or an interactive 3D scene) must carry the attribution above in a place
 users can find it.
 
-Retrieved via the public Overpass API (2026-09-14).
+Retrieved via the public Overpass API (2026-09-15).
 
 ## Elevation — AWS Open Data "elevation-tiles-prod" (public domain)
 

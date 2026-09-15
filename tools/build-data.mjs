@@ -121,6 +121,17 @@ function shard(prefix, records, per, clean) {
     const slice = records.slice(i * size, (i + 1) * size).map(clean);
     names.push(writeJson(`${prefix}-${String(i).padStart(2, '0')}.json`, slice));
   }
+  // A rebuild that drops records can need fewer shards than the last one, and
+  // the surplus files stay on disk. The manifest stops the app loading them, so
+  // nothing breaks — they simply ship, megabytes of superseded city that
+  // nobody ever reads. Sweep them.
+  const keep = new Set(names);
+  for (const f of fs.readdirSync(OUT)) {
+    if (new RegExp(`^${prefix}-\\d\\d\\.json$`).test(f) && !keep.has(f)) {
+      fs.unlinkSync(path.join(OUT, f));
+      console.log(`      swept stale ${f}`);
+    }
+  }
   return names;
 }
 
