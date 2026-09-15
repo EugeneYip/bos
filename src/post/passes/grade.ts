@@ -182,25 +182,41 @@ void main() {
   graded = mix(graded, sampleLut(graded), clamp(uLutStrength, 0.0, 1.0));
 #endif
 
-  // ---- grain ---------------------------------------------------------------
-#ifdef USE_GRAIN
-  // Two hashes combined approximate a Gaussian; grain lives in the midtones and
-  // shadows and grows with the exposure gain, exactly like sensor noise at
-  // higher ISO.
-  vec2 gseed = gl_FragCoord.xy + uTime * 137.0;
-  float n = (hash12(gseed) + hash12(gseed + 41.7) - 1.0);
-  float gl = luma(graded);
-  float shadowW = mix(1.0, uGrainShadowBias, saturate1(1.0 - gl * 1.6));
-  float hiRoll = 1.0 - smoothstep(0.75, 1.0, gl);
-  graded += n * uGrain * shadowW * hiRoll * uIsoGain;
-  graded = max(graded, vec3(0.0));
-#endif
-
   // ---- output --------------------------------------------------------------
 #ifdef OUTPUT_SRGB
   vec3 outc = linearToSrgb(graded);
 #else
   vec3 outc = graded;
+#endif
+
+  // ---- grain ---------------------------------------------------------------
+  // Grain belongs in display space, not in light.
+  //
+  // It used to be added to 'graded' — tonemapped, but still linear — and then
+  // encoded. The encode expands small values by roughly a factor of ten, so a
+  // fixed amplitude that is invisible in a highlight is larger than the signal
+  // itself in a shadow. The Charles at grazing incidence sits near 0.01 linear,
+  // correctly, because it is reflecting a genuinely dark sky; against that,
+  // 0.013 of grain biased toward the shadows and multiplied by the ISO gain was
+  // several times the signal, and gamma turned it into salt-and-pepper static.
+  // The water shader was blamed for that twice and rewritten once.
+  //
+  // Applied after the encode, one unit of grain is one unit of visible grain
+  // wherever it lands — which is what film does, and what a sensor looks like
+  // once an image has been developed off it.
+#ifdef USE_GRAIN
+  // Two hashes combined approximate a Gaussian.
+  vec2 gseed = gl_FragCoord.xy + uTime * 137.0;
+  float n = (hash12(gseed) + hash12(gseed + 41.7) - 1.0);
+  float gl = luma(outc);
+  float shadowW = mix(1.0, uGrainShadowBias, saturate1(1.0 - gl * 1.6));
+  float hiRoll = 1.0 - smoothstep(0.75, 1.0, gl);
+  // Undeveloped grains carry no density, so film is clean in the deep shadow as
+  // well as in the highlight. Without this the grain simply moves from eating
+  // the water to speckling the night sky.
+  float loRoll = smoothstep(0.0, 0.05, gl);
+  outc += n * uGrain * shadowW * hiRoll * loRoll * uIsoGain;
+  outc = max(outc, vec3(0.0));
 #endif
 
 #ifdef USE_DITHER
