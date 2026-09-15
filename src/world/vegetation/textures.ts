@@ -2,17 +2,23 @@
  * Every pixel the vegetation module draws is generated here, on a 2D canvas,
  * at boot. Nothing is fetched.
  *
- * Three families of art:
+ * Four families of art:
  *
- *  - **Foliage cards.** A cluster of individually-drawn leaves radiating from
- *    a stem at the bottom edge of the tile. Alpha-tested. This is what gives a
- *    crown a real leaf silhouette and lets daylight through it, instead of the
- *    solid "broccoli" you get from a displaced icosahedron.
- *  - **Bark.** Tileable vertical furrows, three habits (ridged, plated, and
- *    cherry's horizontal lenticels).
- *  - **Impostors.** A side and a top view of the whole tree, drawn from the
- *    same leaf outlines so a tree does not change species when it crosses the
- *    LOD boundary.
+ *  - **Foliage cards (near).** A twig spray with *correctly sized* leaves.
+ *    This is the one number that decides whether a tree reads as a tree from
+ *    four metres away: the card is authored for a known physical size (see
+ *    `cardMeters`) and each leaf is drawn at `species.leafMeters` within it, so
+ *    a red maple leaf comes out 10 cm across rather than half a metre. Getting
+ *    it wrong is the difference between foliage and bunting.
+ *  - **Foliage clumps (mid).** The same leaves, but a 3-4 m mass of them with
+ *    the form lighting baked in. A mid-tier card covers eight times the area of
+ *    a near card, and drawing it with near-card art is exactly how you get
+ *    dinner-plate leaves at 120 m.
+ *  - **Bark.** Tileable vertical furrows, four habits (ridged, plated, cherry's
+ *    horizontal lenticels, and London plane's mottled camouflage plates).
+ *  - **Impostors.** A side and a top view of the whole tree, built from the
+ *    species' crown envelope so a tree does not change shape when it crosses
+ *    the LOD boundary.
  *
  * Everything is drawn in near-neutral luminance: the shader multiplies by the
  * species' summer/autumn colour, so one grey texture serves a green June and a
@@ -52,6 +58,57 @@ function tex(c: HTMLCanvasElement, srgb: boolean, aniso: number): THREE.Texture 
   t.anisotropy = aniso;
   t.needsUpdate = true;
   return t;
+}
+
+/**
+ * Alpha-weighted mean linear luminance of a canvas texture.
+ *
+ * Every family of art here is drawn in near-neutral luminance and then
+ * multiplied in the shader by a species tint that is itself a real albedo. If
+ * the art's mean is not 1, the two dark numbers multiply and the surface comes
+ * out far darker than the colour anybody asked for — bark was landing at 0.033
+ * linear against a real tree's 0.10-0.20. So the shader divides the map
+ * through by this, turning it into a modulation around 1 and leaving the tint
+ * as the albedo. Measuring it rather than hardcoding it means the art can be
+ * redrawn without silently re-introducing the error.
+ *
+ * Alpha-weighted because a foliage card is mostly empty tile, and the average
+ * that matters is the average over the leaves that actually get drawn.
+ */
+export function mapMean(t: THREE.Texture): number {
+  const c = t.image as HTMLCanvasElement | undefined;
+  if (!c?.getContext) return 1;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  if (!g) return 1;
+  // A 512x512 read is about a megabyte; at nine textures this is a few
+  // milliseconds against the two seconds the drawing itself takes.
+  const d = g.getImageData(0, 0, c.width, c.height).data;
+  const lin = (v: number): number => {
+    const u = v / 255;
+    return u <= 0.04045 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4);
+  };
+  let sum = 0;
+  let weight = 0;
+  // Every fourth pixel in each direction: a texture this size has nothing at
+  // that frequency worth resolving and it cuts the cost sixteen-fold.
+  for (let y = 0; y < c.height; y += 4) {
+    for (let x = 0; x < c.width; x += 4) {
+      const i = (y * c.width + x) * 4;
+      const a = d[i + 3] / 255;
+      sum += a * (0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]));
+      weight += a;
+    }
+  }
+  return weight > 1e-3 ? Math.max(0.02, sum / weight) : 1;
+}
+
+/**
+ * Physical size of one near-tier foliage card for a species, metres. Geometry
+ * derives the same number from `cardScale`; keeping the two in one expression
+ * is what guarantees the leaves come out life-size.
+ */
+export function cardMeters(sp: Species): number {
+  return sp.cardScale * sp.spread * 0.5 * sp.height * 0.8;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +178,16 @@ function ovatePath(g: G2D, len: number): void {
   g.closePath();
 }
 
+/** Elm: an ellipse that is fatter and blunter on one side of the midrib. */
+function ellipticPath(g: G2D, len: number): void {
+  const w = len * 0.44;
+  g.beginPath();
+  g.moveTo(0, 0);
+  g.bezierCurveTo(w * 0.7, -len * 0.10, w * 1.06, -len * 0.42, 0, -len);
+  g.bezierCurveTo(-w * 0.86, -len * 0.44, -w * 0.56, -len * 0.08, 0, 0);
+  g.closePath();
+}
+
 const MAPLE_TIPS: Tip[] = [
   { a: 0, r: 1.0 },
   { a: 0.72, r: 0.93 },
@@ -133,12 +200,24 @@ const OAK_TIPS: Tip[] = [
   { a: 1.12, r: 0.66 },
   { a: 1.46, r: 0.42 },
 ];
+/** London plane: three broad shallow lobes, wider than long. */
+const PLANE_TIPS: Tip[] = [
+  { a: 0, r: 1.0 },
+  { a: 0.95, r: 0.95 },
+  { a: 1.72, r: 0.60 },
+];
 
 /** Draws one leaf pointing "up" (-y) from the current origin. */
 function drawLeaf(g: G2D, shape: LeafShape, len: number, fill: string, vein: string): void {
+  const fine = len > 14;
   switch (shape) {
     case 'maple':
       lobedPath(g, MAPLE_TIPS, len, 1.05, 0.38);
+      g.fillStyle = fill;
+      g.fill();
+      break;
+    case 'palmate':
+      lobedPath(g, PLANE_TIPS, len, 1.22, 0.44);
       g.fillStyle = fill;
       g.fill();
       break;
@@ -157,27 +236,32 @@ function drawLeaf(g: G2D, shape: LeafShape, len: number, fill: string, vein: str
       g.fillStyle = fill;
       g.fill();
       break;
+    case 'elliptic':
+      ellipticPath(g, len);
+      g.fillStyle = fill;
+      g.fill();
+      break;
     case 'pinnate': {
       // A compound leaf: bare rachis with small opposite leaflets. Reads as the
       // lacy, see-through canopy honey locust actually has.
       g.strokeStyle = vein;
-      g.lineWidth = Math.max(0.6, len * 0.014);
+      g.lineWidth = Math.max(0.5, len * 0.016);
       g.beginPath();
       g.moveTo(0, 0);
       g.lineTo(0, -len);
       g.stroke();
       g.fillStyle = fill;
-      const pairs = 8;
+      const pairs = len > 20 ? 9 : 6;
       for (let i = 1; i <= pairs; i++) {
         const t = i / (pairs + 0.6);
         const y = -len * t;
-        const s = len * 0.19 * (1 - 0.35 * Math.abs(t - 0.5));
+        const s = len * 0.20 * (1 - 0.35 * Math.abs(t - 0.5));
         for (const side of [-1, 1]) {
           g.save();
           g.translate(side * len * 0.02, y);
           g.rotate(side * 1.15);
           g.beginPath();
-          g.ellipse(0, -s * 0.5, s * 0.30, s * 0.55, 0, 0, Math.PI * 2);
+          g.ellipse(0, -s * 0.5, Math.max(0.6, s * 0.30), Math.max(0.9, s * 0.55), 0, 0, Math.PI * 2);
           g.fill();
           g.restore();
         }
@@ -190,7 +274,7 @@ function drawLeaf(g: G2D, shape: LeafShape, len: number, fill: string, vein: str
       g.lineCap = 'round';
       for (let i = 0; i < 5; i++) {
         const a = (i / 4 - 0.5) * 0.44;
-        g.lineWidth = Math.max(0.7, len * 0.026);
+        g.lineWidth = Math.max(0.55, len * 0.05);
         g.beginPath();
         g.moveTo(0, 0);
         g.quadraticCurveTo(Math.sin(a) * len * 0.4, -len * 0.55,
@@ -200,7 +284,8 @@ function drawLeaf(g: G2D, shape: LeafShape, len: number, fill: string, vein: str
       return;
     }
   }
-  // Midrib, for close-range detail.
+  if (!fine) return;
+  // Midrib, only where the leaf is big enough on screen for it to be visible.
   g.strokeStyle = vein;
   g.lineWidth = Math.max(0.5, len * 0.022);
   g.beginPath();
@@ -210,62 +295,97 @@ function drawLeaf(g: G2D, shape: LeafShape, len: number, fill: string, vein: str
 }
 
 // ---------------------------------------------------------------------------
-// Foliage card
+// Foliage cards
 // ---------------------------------------------------------------------------
 
+interface Slot { x: number; y: number; a: number; s: number; depth: number }
+
+/** Near-neutral leaf fill with a small per-leaf warm/cool skew. */
+function leafPaint(r: () => number, lo: number, span: number): { fill: string; vein: string } {
+  const v = lo + r() * span;
+  const warm = (r() - 0.5) * 0.18;
+  const cr = Math.round(255 * Math.min(1, v * (1 + warm)));
+  const cg = Math.round(255 * Math.min(1, v * (1 + warm * 0.15)));
+  const cb = Math.round(255 * Math.min(1, v * (1 - warm * 0.55) * 0.93));
+  return {
+    fill: `rgb(${cr},${cg},${cb})`,
+    vein: `rgba(${Math.round(cr * 0.6)},${Math.round(cg * 0.6)},${Math.round(cb * 0.6)},0.8)`,
+  };
+}
+
 /**
- * One card of the leaf mass: a short forked twig rising from the bottom-centre
- * of the tile with leaves along it. The bottom edge is the attachment point, so
- * cards can be pinned to branch tips and fan outwards.
+ * One near-tier card of the leaf mass: a forked twig rising from the
+ * bottom-centre of the tile with life-size leaves along it. The bottom edge is
+ * the attachment point, so cards can be pinned to branch tips and fan outwards.
  */
 export function foliageCardTexture(sp: Species, size: number, aniso: number): THREE.Texture {
   const { c, g } = surface(size, size);
-  const r = rand(Math.round(sp.height * 7919 + sp.spread * 104729 + sp.leaf.length * 31));
+  const r = rand(Math.round(sp.height * 7919 + sp.spread * 104729 + sp.name.length * 3121));
   g.clearRect(0, 0, size, size);
 
   const baseX = size * 0.5;
   const baseY = size * 0.995;
-  const leafLen = size * (sp.leaf === 'needle' ? 0.30 : sp.leaf === 'pinnate' ? 0.34 : 0.235);
-  const twigs = sp.leaf === 'needle' ? 7 : 5;
-
-  interface Slot { x: number; y: number; a: number; s: number; depth: number }
+  // The whole point of this file: the leaf is a fixed fraction of a card whose
+  // physical size is known, so it lands at its real length in metres.
+  const leafLen = Math.max(4, size * (sp.leafMeters / cardMeters(sp)));
+  const twigs = sp.conifer ? 7 : 5;
   const slots: Slot[] = [];
 
   for (let t = 0; t < twigs; t++) {
-    const spread = sp.leaf === 'pinnate' ? 1.15 : 0.95;
-    const a = ((t + 0.5) / twigs - 0.5) * 2 * spread + (r() - 0.5) * 0.22;
-    const len = size * (0.52 + r() * 0.34);
-    const tipX = baseX + Math.sin(a) * len * 0.82;
+    const spread = sp.leaf === 'pinnate' ? 1.2 : 1.0;
+    const a = ((t + 0.5) / twigs - 0.5) * 2 * spread + (r() - 0.5) * 0.24;
+    const len = size * (0.56 + r() * 0.36);
+    const tipX = baseX + Math.sin(a) * len * 0.84;
     const tipY = baseY - Math.cos(a) * len;
 
     // Twig, drawn dark so it reads as structure inside the leaf mass.
-    g.strokeStyle = 'rgba(70,58,44,0.85)';
-    g.lineWidth = Math.max(1, size * 0.008 * (1 - t / (twigs * 2)));
+    g.strokeStyle = 'rgba(66,54,40,0.9)';
+    g.lineWidth = Math.max(1, size * 0.006 * (1 - t / (twigs * 2)));
     g.lineCap = 'round';
     g.beginPath();
     g.moveTo(baseX, baseY);
     g.quadraticCurveTo(baseX + Math.sin(a) * len * 0.3, baseY - len * 0.55, tipX, tipY);
     g.stroke();
 
-    const n = sp.leaf === 'needle' ? 9 : sp.leaf === 'pinnate' ? 5 : 7;
-    for (let i = 0; i < n; i++) {
-      const u = 0.22 + 0.82 * (i / n) + r() * 0.08;
-      const px = baseX + (tipX - baseX) * u + (r() - 0.5) * size * 0.05;
-      const py = baseY + (tipY - baseY) * u + (r() - 0.5) * size * 0.05;
+    // Leaves along the twig at a realistic internode: roughly half a leaf
+    // length apart, alternating sides.
+    const along = Math.max(4, Math.round((len * 0.8) / (leafLen * 0.52)));
+    for (let i = 0; i < along; i++) {
+      const u = 0.14 + 0.88 * (i / along) + r() * 0.05;
+      const px = baseX + (tipX - baseX) * u + (r() - 0.5) * leafLen * 0.5;
+      const py = baseY + (tipY - baseY) * u + (r() - 0.5) * leafLen * 0.5;
       const side = i % 2 === 0 ? 1 : -1;
-      const la = a + side * (0.55 + r() * 0.5) * (1 - u * 0.45);
-      slots.push({ x: px, y: py, a: la, s: 0.72 + r() * 0.5, depth: u });
+      const la = a + side * (0.5 + r() * 0.6) * (1 - u * 0.4);
+      slots.push({ x: px, y: py, a: la, s: 0.78 + r() * 0.42, depth: u });
+
+      // A short side shoot every third internode, which is what fills the
+      // mass out without turning it into a flat fan.
+      if (i % 3 === 1 && i > 1) {
+        const sa = a + side * (0.75 + r() * 0.5);
+        const sl = leafLen * (1.4 + r() * 1.6);
+        const n2 = Math.max(2, Math.round(sl / (leafLen * 0.55)));
+        for (let k = 0; k < n2; k++) {
+          const v = (k + 1) / n2;
+          slots.push({
+            x: px + Math.sin(sa) * sl * v,
+            y: py - Math.cos(sa) * sl * v,
+            a: sa + (r() - 0.5) * 1.0,
+            s: 0.66 + r() * 0.4,
+            depth: u + 0.05,
+          });
+        }
+      }
     }
   }
   // A handful of outliers so the silhouette is ragged rather than a clean lobe.
-  for (let i = 0; i < 7; i++) {
-    const a = (r() - 0.5) * 2.1;
-    const d = size * (0.5 + r() * 0.42);
+  for (let i = 0; i < 10; i++) {
+    const a = (r() - 0.5) * 2.2;
+    const d = size * (0.52 + r() * 0.44);
     slots.push({
-      x: baseX + Math.sin(a) * d * 0.85,
+      x: baseX + Math.sin(a) * d * 0.88,
       y: baseY - Math.cos(a) * d,
-      a: a + (r() - 0.5) * 1.1,
-      s: 0.55 + r() * 0.4,
+      a: a + (r() - 0.5) * 1.2,
+      s: 0.5 + r() * 0.4,
       depth: 1,
     });
   }
@@ -273,31 +393,99 @@ export function foliageCardTexture(sp: Species, size: number, aniso: number): TH
   // Back to front, so leaves near the stem sit behind the outer ones.
   slots.sort((p, q) => p.depth - q.depth);
   for (const s of slots) {
-    // Near-neutral luminance with a slight warm/cool skew per leaf: the shader
-    // supplies the hue, this supplies the variation.
-    const v = 0.56 + r() * 0.44;
-    const warm = (r() - 0.5) * 0.16;
-    const cr = Math.round(255 * Math.min(1, v * (1 + warm)));
-    const cg = Math.round(255 * Math.min(1, v * (1 + warm * 0.15)));
-    const cb = Math.round(255 * Math.min(1, v * (1 - warm * 0.55) * 0.93));
-    const fill = `rgb(${cr},${cg},${cb})`;
-    const vein = `rgba(${Math.round(cr * 0.62)},${Math.round(cg * 0.62)},${Math.round(cb * 0.62)},0.85)`;
+    const paint = leafPaint(r, 0.5, 0.5);
     g.save();
     g.translate(s.x, s.y);
     g.rotate(s.a);
-    drawLeaf(g, sp.leaf, leafLen * s.s, fill, vein);
+    drawLeaf(g, sp.leaf, leafLen * s.s, paint.fill, paint.vein);
     g.restore();
   }
 
   // Bake a little self-shadowing: the base of the cluster sits inside the crown.
+  shadeFromBelow(g, size, 0.5);
+
+  const t = tex(c, true, aniso);
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  return t;
+}
+
+/** Darken the attachment end of a card: it is buried in the crown. */
+function shadeFromBelow(g: G2D, size: number, strength: number): void {
   g.globalCompositeOperation = 'source-atop';
   const shade = g.createLinearGradient(0, size, 0, 0);
-  shade.addColorStop(0, 'rgba(18,26,14,0.55)');
-  shade.addColorStop(0.45, 'rgba(24,32,18,0.18)');
+  shade.addColorStop(0, `rgba(18,26,14,${0.62 * strength})`);
+  shade.addColorStop(0.5, `rgba(24,32,18,${0.2 * strength})`);
   shade.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = shade;
   g.fillRect(0, 0, size, size);
   g.globalCompositeOperation = 'source-over';
+}
+
+/**
+ * Mid-tier card: a 3-4 m clump of the same foliage, with the form lighting
+ * baked in. Built as a handful of overlapping sprays inside a ragged envelope,
+ * so the *silhouette* keeps leaf-scale notches while the interior resolves to
+ * a mass — which is what a crown actually looks like from 120 m.
+ */
+export function foliageClumpTexture(
+  sp: Species, size: number, aniso: number, meters: number,
+): THREE.Texture {
+  const { c, g } = surface(size, size);
+  const r = rand(Math.round(sp.height * 2711 + sp.spread * 31337 + sp.name.length * 911));
+  g.clearRect(0, 0, size, size);
+
+  const leafLen = Math.max(3.0, size * (sp.leafMeters / meters));
+  // Coverage target: a dense species fills the clump, an airy one lets the sky
+  // through. Leaf silhouette area is ~0.42 of its bounding square.
+  const cover = 0.30 + 0.52 * Math.min(1.2, sp.density);
+  const perLeaf = leafLen * leafLen * 0.42;
+  const total = Math.min(3400, Math.max(120, Math.round((size * size * cover) / perLeaf)));
+
+  // Lobes of the clump, bottom-attached like the near card.
+  const lobes = 5;
+  const centres: [number, number, number][] = [];
+  for (let i = 0; i < lobes; i++) {
+    const a = ((i + 0.5) / lobes - 0.5) * 2.0;
+    const d = size * (0.34 + r() * 0.30);
+    centres.push([
+      size * 0.5 + Math.sin(a) * d * 0.92,
+      size * 0.96 - Math.cos(a) * d,
+      size * (0.16 + r() * 0.12),
+    ]);
+  }
+
+  // Twig structure, dark, drawn first.
+  g.strokeStyle = 'rgba(58,48,36,0.85)';
+  g.lineCap = 'round';
+  for (const [cx, cy, cr0] of centres) {
+    g.lineWidth = Math.max(1, size * 0.008);
+    g.beginPath();
+    g.moveTo(size * 0.5, size * 0.99);
+    g.quadraticCurveTo((size * 0.5 + cx) * 0.5, (size * 0.99 + cy) * 0.5, cx, cy);
+    g.stroke();
+    void cr0;
+  }
+
+  for (let i = 0; i < total; i++) {
+    const lobe = centres[Math.floor(r() * centres.length)];
+    // Bias outward so the rim is where the leaves are and the core stays dark.
+    const a = r() * Math.PI * 2;
+    const q = Math.pow(r(), 0.55);
+    const x = lobe[0] + Math.cos(a) * q * lobe[2] * 1.35;
+    const y = lobe[1] + Math.sin(a) * q * lobe[2];
+    if (y > size * 1.02 || y < -leafLen) continue;
+    // Bake the form: lit from up and to the left, shadowed underneath.
+    const lift = 0.44 + 0.62 * (1 - y / size) + 0.16 * (0.5 - (x / size - 0.5));
+    const paint = leafPaint(r, Math.min(0.95, 0.30 + 0.62 * lift), 0.26);
+    g.save();
+    g.translate(x, y);
+    g.rotate(a + (r() - 0.5) * 1.6);
+    drawLeaf(g, sp.leaf, leafLen * (0.7 + r() * 0.6), paint.fill, paint.vein);
+    g.restore();
+  }
+
+  shadeFromBelow(g, size, 0.85);
 
   const t = tex(c, true, aniso);
   t.wrapS = THREE.ClampToEdgeWrapping;
@@ -369,6 +557,37 @@ export function barkTexture(kind: BarkKind, size: number, aniso: number): THREE.
       g.fillStyle = `rgba(${30 + r() * 30 | 0},${24 + r() * 24 | 0},${20 + r() * 20 | 0},${0.25 + r() * 0.45})`;
       g.fillRect(x, y, w, Math.max(1, size * 0.006));
     }
+  } else if (kind === 'mottled') {
+    // London plane: pale cream under-bark showing through olive-grey flakes
+    // that shed in irregular jigsaw plates. Unmistakable close up.
+    g.fillStyle = '#c9c4ad';
+    g.fillRect(0, 0, size, size);
+    const plates = 54;
+    for (let i = 0; i < plates; i++) {
+      const x = r() * size;
+      const y = r() * size;
+      const rx = size * (0.06 + r() * 0.14);
+      const ry = size * (0.07 + r() * 0.17);
+      const shade = r();
+      const col = shade < 0.42
+        ? `rgba(${96 + r() * 26 | 0},${96 + r() * 24 | 0},${74 + r() * 20 | 0},0.85)`
+        : shade < 0.78
+          ? `rgba(${150 + r() * 28 | 0},${148 + r() * 24 | 0},${120 + r() * 22 | 0},0.8)`
+          : `rgba(${212 + r() * 28 | 0},${208 + r() * 26 | 0},${182 + r() * 24 | 0},0.85)`;
+      g.fillStyle = col;
+      g.beginPath();
+      const lobes = 8;
+      for (let k = 0; k <= lobes; k++) {
+        const a = (k / lobes) * Math.PI * 2;
+        const kk = 0.6 + r() * 0.7;
+        const px = x + Math.cos(a) * rx * kk;
+        const py = y + Math.sin(a) * ry * kk;
+        if (k === 0) g.moveTo(px, py);
+        else g.lineTo(px, py);
+      }
+      g.closePath();
+      g.fill();
+    }
   }
 
   // Fine grain.
@@ -393,10 +612,10 @@ export function barkTexture(kind: BarkKind, size: number, aniso: number): THREE.
 function dab(g: G2D, x: number, y: number, rx: number, ry: number, r: () => number, fill: string): void {
   g.fillStyle = fill;
   g.beginPath();
-  const lobes = 7;
+  const lobes = 9;
   for (let i = 0; i <= lobes; i++) {
     const a = (i / lobes) * Math.PI * 2;
-    const k = 0.62 + r() * 0.72;
+    const k = 0.5 + r() * 0.9;
     const px = x + Math.cos(a) * rx * k;
     const py = y + Math.sin(a) * ry * k;
     if (i === 0) g.moveTo(px, py);
@@ -407,14 +626,19 @@ function dab(g: G2D, x: number, y: number, rx: number, ry: number, r: () => numb
 }
 
 /**
- * Two 256 px views of a whole tree, side by side: [side | top]. The side view
- * carries the species silhouette for ground-level distance, the top view is
- * what an aerial camera sees — without it, a vertical billboard is edge-on from
- * above and the city's canopy vanishes at altitude.
+ * Two views of a whole tree, side by side: [side | top]. The side view carries
+ * the species silhouette for ground-level distance; the top view is what an
+ * aerial camera sees. The two are cross-faded in the shader by the view's
+ * elevation angle, so neither is ever visible edge-on as a flat card.
+ *
+ * The thing that makes an impostor read as a *tree* rather than a green ball
+ * at 300 m is, in order: a visible trunk and crown base; an outline that
+ * follows the species' crown envelope and is notched at clump scale; and
+ * baked form lighting with genuine shadow underneath.
  */
 export function impostorTexture(sp: Species, tile: number, aniso: number): THREE.Texture {
   const { c, g } = surface(tile * 2, tile);
-  const r = rand(Math.round(sp.height * 3733 + sp.spread * 65537 + sp.shape.length));
+  const r = rand(Math.round(sp.height * 3733 + sp.spread * 65537 + sp.name.length * 77));
   g.clearRect(0, 0, tile * 2, tile);
 
   const leafFill = (v: number): string => {
@@ -425,65 +649,95 @@ export function impostorTexture(sp: Species, tile: number, aniso: number): THREE
   };
 
   // ---- side view -----------------------------------------------------------
-  const base = tile * 0.985;
-  const top = tile * 0.02;
+  const base = tile * 0.995;
+  const top = tile * 0.015;
   const H = base - top;
   const cx = tile * 0.5;
-  const halfW = tile * 0.5 * 0.94;
+  // The crown fills the tile width; the billboard quad is `spread` wide, so
+  // the two agree and the tree is neither pinched nor clipped.
+  const halfW = tile * 0.5 * 0.96;
   const cb = sp.crownBase;
+  const crownTop = base - H;
 
-  // Trunk and primary limbs, drawn first so the leaf mass buries most of them.
-  g.strokeStyle = 'rgba(96,86,74,1)';
-  g.lineCap = 'round';
-  g.lineWidth = Math.max(2, tile * sp.trunkRadius * 1.9);
+  // Trunk: tapered, flared at the root, carried up to the crown base and a
+  // little beyond. Drawn as a filled shape so the taper is real.
+  const rBase = Math.max(1.6, tile * sp.trunkRadius * 2.1);
+  const trunkTop = base - H * (cb * 0.96 + (sp.conifer ? 0.55 : 0.12));
+  g.fillStyle = 'rgba(78,68,56,1)';
   g.beginPath();
-  g.moveTo(cx, base);
-  g.lineTo(cx, base - H * (cb + 0.1));
-  g.stroke();
-  for (let i = 0; i < sp.limbs; i++) {
+  g.moveTo(cx - rBase * 1.5, base);
+  g.quadraticCurveTo(cx - rBase * 0.95, base - H * cb * 0.35, cx - rBase * 0.5, trunkTop);
+  g.lineTo(cx + rBase * 0.5, trunkTop);
+  g.quadraticCurveTo(cx + rBase * 0.95, base - H * cb * 0.35, cx + rBase * 1.5, base);
+  g.closePath();
+  g.fill();
+
+  // Primary limbs, following the crown envelope so the armature and the leaf
+  // mass agree.
+  g.strokeStyle = 'rgba(74,64,52,1)';
+  g.lineCap = 'round';
+  const limbs = Math.max(3, sp.limbs);
+  for (let i = 0; i < limbs; i++) {
     const side = i % 2 ? 1 : -1;
-    const t = 0.1 + 0.55 * (i / sp.limbs);
-    const y0 = base - H * (cb + t * 0.25);
-    const rr = crownRadius(sp.shape, t) * halfW * (sp.spread / 0.8);
-    g.lineWidth = Math.max(1.2, tile * sp.trunkRadius * (1.1 - 0.5 * t));
+    const t = 0.12 + 0.72 * (i / limbs);
+    const y0 = base - H * (cb * (sp.conifer ? 0.3 : 0.92) + t * 0.18);
+    const rr = crownRadius(sp.shape, t) * halfW;
+    g.lineWidth = Math.max(1.0, rBase * (1.05 - 0.55 * t));
     g.beginPath();
-    g.moveTo(cx, y0);
-    g.quadraticCurveTo(cx + side * rr * 0.4, y0 - H * 0.08,
-      cx + side * rr * 0.8, base - H * (cb + (1 - cb) * (t + 0.25)));
+    g.moveTo(cx + side * rBase * 0.2, y0);
+    g.quadraticCurveTo(
+      cx + side * rr * 0.35, y0 - H * (1 - cb) * 0.18,
+      cx + side * rr * 0.86, base - H * (cb + (1 - cb) * Math.min(0.98, t + 0.22)),
+    );
     g.stroke();
   }
 
-  const dabs = Math.round(150 * sp.density);
+  // Leaf mass: clumps laid on the crown envelope, biased to the rim, with the
+  // dab radius set in *metres* so a 24 m elm is not built from the same size
+  // of clump as a 9 m cherry.
+  const clumpM = 1.5;
+  const dabPx = Math.max(2.5, (clumpM / sp.height) * H);
+  const dabs = Math.round(THREE.MathUtils.clamp((H * halfW * 1.1 * sp.density) / (dabPx * dabPx * 2.4), 40, 420));
   for (let i = 0; i < dabs; i++) {
     const t = Math.pow(r(), 0.72);
     const rr = crownRadius(sp.shape, t);
     // Bias outwards so the interior stays open and the rim is dense.
     const q = Math.sqrt(r()) * rr;
     const sign = r() < 0.5 ? -1 : 1;
-    const x = cx + sign * q * halfW * (sp.spread / 0.8);
+    const x = cx + sign * q * halfW;
     const y = base - H * (cb + (1 - cb) * t);
-    const s = tile * 0.055 * (0.7 + r() * 0.7) * (sp.conifer ? 0.8 : 1);
+    const s = dabPx * (0.72 + r() * 0.66) * (sp.conifer ? 0.85 : 1);
     // Bake form: brighter up and to the left, deep shade underneath.
-    const lift = 0.42 + 0.58 * t;
-    const sideLight = 0.86 + 0.28 * (0.5 - sign * q * 0.5);
-    dab(g, x, y, s * (sp.conifer ? 0.9 : 1.15), s * 0.85, r,
-      leafFill(lift * sideLight * (0.72 + r() * 0.5)));
+    const lift = 0.34 + 0.66 * t;
+    const sideLight = 0.84 + 0.30 * (0.5 - sign * q * 0.5);
+    dab(g, x, y, s * (sp.conifer ? 0.9 : 1.2), s * 0.8, r,
+      leafFill(lift * sideLight * (0.70 + r() * 0.52)));
   }
+  void crownTop;
 
   // ---- top view ------------------------------------------------------------
   const tx = tile * 1.5;
   const ty = tile * 0.5;
-  const tr = tile * 0.47;
-  const topDabs = Math.round(130 * sp.density);
+  const tr = tile * 0.48;
+  const topDabPx = Math.max(2.5, (clumpM / (sp.spread * sp.height)) * tile);
+  const topDabs = Math.round(THREE.MathUtils.clamp(
+    (Math.PI * tr * tr * sp.density) / (topDabPx * topDabPx * 2.2), 40, 420,
+  ));
+  // A crown from above is a lobed dome, not a disc: a handful of big limb
+  // masses with gaps between them.
+  const sectors = 4 + Math.floor(r() * 3);
+  const lobeAmp: number[] = [];
+  for (let i = 0; i < sectors; i++) lobeAmp.push(0.74 + r() * 0.3);
   for (let i = 0; i < topDabs; i++) {
     const a = r() * Math.PI * 2;
-    const q = Math.pow(r(), 0.55);
+    const lobe = lobeAmp[Math.floor(((a / (Math.PI * 2)) * sectors)) % sectors];
+    const q = Math.pow(r(), 0.5) * lobe;
     const x = tx + Math.cos(a) * q * tr;
     const y = ty + Math.sin(a) * q * tr;
-    const s = tile * 0.055 * (0.7 + r() * 0.7);
-    // A crown from above is a dome: bright centre, shaded rim.
-    const lift = 1.06 - 0.42 * q;
-    dab(g, x, y, s * 1.1, s, r, leafFill(lift * (0.72 + r() * 0.5)));
+    const s = topDabPx * (0.72 + r() * 0.66);
+    // Lit from the same side as the side view; rim in shadow.
+    const lift = 1.02 - 0.40 * q + 0.14 * (Math.cos(a) * -0.5 - Math.sin(a) * 0.5);
+    dab(g, x, y, s * 1.1, s, r, leafFill(lift * (0.72 + r() * 0.46)));
   }
 
   const t = tex(c, true, aniso);
@@ -496,30 +750,62 @@ export function impostorTexture(sp: Species, tile: number, aniso: number): THREE
 // Ground cover
 // ---------------------------------------------------------------------------
 
-/** A tuft of grass blades filling the tile, attached along the bottom edge. */
-export function grassTexture(size: number, aniso: number): THREE.Texture {
+/**
+ * Width of one grass card in metres. `GroundCover` scales its instances to the
+ * same number, so the blades drawn here land at a real blade's width on screen.
+ */
+export const GRASS_CARD = 0.40;
+
+/**
+ * A tuft of grass blades filling the tile, attached along the bottom edge.
+ * `tileMeters` sets the blade width, and a card whose "blades" are 40 mm wide
+ * reads as reeds. A park's coarse ryegrass/fescue sward runs 5-7 mm across,
+ * near the top of the range for turf, because the thinner it is authored the
+ * more of it the mip chain and the alpha test throw away: at 3.8 mm the blades
+ * came out a pixel and a half wide on screen and the lawn read as bare paint.
+ */
+export function grassTexture(size: number, aniso: number, tileMeters = GRASS_CARD): THREE.Texture {
   const { c, g } = surface(size, size);
   const r = rand(90210);
   g.clearRect(0, 0, size, size);
   g.lineCap = 'round';
-  const blades = 54;
+  const bladeW = Math.max(1.4, (0.0060 / tileMeters) * size);
+  const blades = 150;
   for (let i = 0; i < blades; i++) {
-    const x0 = size * (0.08 + r() * 0.84);
-    const h = size * (0.42 + r() * 0.56);
-    const lean = (r() - 0.5) * size * 0.34;
-    const v = 0.46 + r() * 0.5;
-    const w = size * (0.008 + r() * 0.016);
-    g.strokeStyle = `rgb(${Math.round(232 * v)},${Math.round(255 * v)},${Math.round(196 * v)})`;
-    g.lineWidth = w;
+    const x0 = size * (0.04 + r() * 0.92);
+    const h = size * (0.34 + r() * 0.62);
+    const lean = (r() - 0.5) * size * 0.42 * (0.4 + h / size);
+    const v = 0.40 + r() * 0.56;
+    g.strokeStyle = `rgb(${Math.round(226 * v)},${Math.round(255 * v)},${Math.round(184 * v)})`;
+    g.lineWidth = bladeW * (0.7 + r() * 0.7);
     g.beginPath();
     g.moveTo(x0, size);
-    g.quadraticCurveTo(x0 + lean * 0.3, size - h * 0.6, x0 + lean, size - h);
+    // A real blade is straight for most of its length and folds near the tip.
+    g.quadraticCurveTo(x0 + lean * 0.18, size - h * 0.62, x0 + lean, size - h);
     g.stroke();
+  }
+  // A few broadleaf weeds and clover rosettes at the base: no lawn is a
+  // monoculture, least of all a public park's.
+  for (let i = 0; i < 26; i++) {
+    const x = size * (0.06 + r() * 0.88);
+    const y = size * (0.72 + r() * 0.27);
+    const s = size * (0.05 + r() * 0.05);
+    const v = 0.38 + r() * 0.34;
+    g.fillStyle = `rgb(${Math.round(210 * v)},${Math.round(255 * v)},${Math.round(180 * v)})`;
+    for (let k = 0; k < 3; k++) {
+      g.save();
+      g.translate(x, y);
+      g.rotate((k / 3) * Math.PI * 2 + r());
+      g.beginPath();
+      g.ellipse(0, -s * 0.5, s * 0.34, s * 0.5, 0, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+    }
   }
   // Roots in shade.
   g.globalCompositeOperation = 'source-atop';
-  const shade = g.createLinearGradient(0, size, 0, size * 0.35);
-  shade.addColorStop(0, 'rgba(20,28,14,0.6)');
+  const shade = g.createLinearGradient(0, size, 0, size * 0.3);
+  shade.addColorStop(0, 'rgba(20,28,14,0.66)');
   shade.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = shade;
   g.fillRect(0, 0, size, size);
@@ -536,27 +822,28 @@ export function shrubTexture(size: number, aniso: number): THREE.Texture {
   const { c, g } = surface(size, size);
   const r = rand(4242);
   g.clearRect(0, 0, size, size);
-  const n = 190;
+  // A clipped hedge unit is ~1.2 m of card and its leaves are 25-40 mm.
+  const leafPx = Math.max(3, size * 0.032);
+  const n = 900;
   for (let i = 0; i < n; i++) {
-    const a = (r() - 0.5) * 2.4;
-    const d = Math.pow(r(), 0.6) * size * 0.62;
-    const x = size * 0.5 + Math.sin(a) * d * 0.9;
+    const a = (r() - 0.5) * 2.5;
+    const d = Math.pow(r(), 0.55) * size * 0.66;
+    const x = size * 0.5 + Math.sin(a) * d * 0.92;
     const y = size - Math.cos(a) * d;
     if (y < 0) continue;
-    const v = 0.44 + r() * 0.52;
-    const s = size * (0.05 + r() * 0.05);
+    const v = 0.40 + r() * 0.56;
     g.save();
     g.translate(x, y);
-    g.rotate(a + (r() - 0.5) * 1.4);
-    g.fillStyle = `rgb(${Math.round(240 * v)},${Math.round(255 * v)},${Math.round(214 * v)})`;
-    ovatePath(g, s * 2.2);
+    g.rotate(a + (r() - 0.5) * 1.6);
+    g.fillStyle = `rgb(${Math.round(236 * v)},${Math.round(255 * v)},${Math.round(206 * v)})`;
+    ovatePath(g, leafPx * (0.7 + r() * 0.7));
     g.fill();
     g.restore();
   }
   g.globalCompositeOperation = 'source-atop';
   const shade = g.createLinearGradient(0, size, 0, 0);
-  shade.addColorStop(0, 'rgba(16,24,12,0.62)');
-  shade.addColorStop(0.55, 'rgba(20,28,14,0.16)');
+  shade.addColorStop(0, 'rgba(16,24,12,0.66)');
+  shade.addColorStop(0.55, 'rgba(20,28,14,0.18)');
   shade.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = shade;
   g.fillRect(0, 0, size, size);
@@ -570,32 +857,65 @@ export function shrubTexture(size: number, aniso: number): THREE.Texture {
 
 export interface VegTextures {
   leaf: THREE.Texture[];
+  clump: THREE.Texture[];
   bark: Map<BarkKind, THREE.Texture>;
   impostor: THREE.Texture[];
   grass: THREE.Texture;
   shrub: THREE.Texture;
+  /** Physical size of a mid-tier clump card, metres, per species. */
+  clumpMeters: number[];
+  /** Mean linear luminance of each map. See `mapMean`. */
+  mean: {
+    leaf: number[];
+    clump: number[];
+    bark: Map<BarkKind, number>;
+    impostor: number[];
+    grass: number;
+    shrub: number;
+  };
 }
 
-export function buildTextures(species: Species[], aniso: number, hiRes: boolean): VegTextures {
+const BARK_KINDS: BarkKind[] = ['ridged', 'plated', 'lenticel', 'mottled'];
+
+export function buildTextures(
+  species: Species[], aniso: number, hiRes: boolean, clumpMeters: number[],
+): VegTextures {
   const leafSize = hiRes ? 512 : 256;
+  const clumpSize = hiRes ? 512 : 256;
   const barkSize = hiRes ? 512 : 256;
   const impSize = hiRes ? 256 : 128;
   const bark = new Map<BarkKind, THREE.Texture>();
-  for (const k of ['ridged', 'plated', 'lenticel'] as BarkKind[]) {
-    bark.set(k, barkTexture(k, barkSize, aniso));
-  }
+  for (const k of BARK_KINDS) bark.set(k, barkTexture(k, barkSize, aniso));
+  const leaf = species.map((s) => foliageCardTexture(s, leafSize, aniso));
+  const clump = species.map((s, i) => foliageClumpTexture(s, clumpSize, aniso, clumpMeters[i]));
+  const impostor = species.map((s) => impostorTexture(s, impSize, aniso));
+  const grass = grassTexture(hiRes ? 512 : 256, aniso);
+  const shrub = shrubTexture(hiRes ? 512 : 256, aniso);
+  const barkMean = new Map<BarkKind, number>();
+  for (const [k, t] of bark) barkMean.set(k, mapMean(t));
   return {
-    leaf: species.map((s) => foliageCardTexture(s, leafSize, aniso)),
+    leaf,
+    clump,
     bark,
-    impostor: species.map((s) => impostorTexture(s, impSize, aniso)),
-    grass: grassTexture(hiRes ? 512 : 256, aniso),
-    shrub: shrubTexture(hiRes ? 512 : 256, aniso),
+    impostor,
+    grass,
+    shrub,
+    clumpMeters,
+    mean: {
+      leaf: leaf.map(mapMean),
+      clump: clump.map(mapMean),
+      bark: barkMean,
+      impostor: impostor.map(mapMean),
+      grass: mapMean(grass),
+      shrub: mapMean(shrub),
+    },
   };
 }
 
 export function disposeTextures(t: VegTextures | undefined): void {
   if (!t) return;
   for (const x of t.leaf) x.dispose();
+  for (const x of t.clump) x.dispose();
   for (const x of t.bark.values()) x.dispose();
   for (const x of t.impostor) x.dispose();
   t.grass.dispose();

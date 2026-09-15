@@ -34,6 +34,9 @@ export interface TreeField {
   py: Float32Array;
   pz: Float32Array;
   rot: Float32Array;
+  /** Lean off vertical, radians, and the azimuth of the lean axis. */
+  tilt: Float32Array;
+  tiltAz: Float32Array;
   /** Total height, metres. */
   height: Float32Array;
   /** Crown width multiplier relative to the species default. */
@@ -220,6 +223,8 @@ export function buildTreeField(sets: PropSet[], o: PlacementOptions): TreeField 
   // --- species, size, ground -----------------------------------------------
   const height = new Float32Array(count);
   const width = new Float32Array(count);
+  const tilt = new Float32Array(count);
+  const tiltAz = new Float32Array(count);
   const species = new Uint8Array(count);
   const stats = { street: 0, park: 0, forest: 0, lawn: 0, infill: infilled };
   const counts = new Array(SPECIES.length).fill(0);
@@ -245,27 +250,33 @@ export function buildTreeField(sets: PropSet[], o: PlacementOptions): TreeField 
     switch (h) {
       case 'street':
         // Pruned, root-restricted, replanted often.
-        mul = 0.56 + 0.40 * vigour;
-        wid = 0.86 + 0.20 * hash2(x, z, 53);
+        mul = 0.50 + 0.48 * vigour;
+        wid = 0.78 + 0.32 * hash2(x, z, 53);
         break;
       case 'park': {
         // Room to grow, and the bigger the park the older the specimens.
         const room = Math.min(1, Math.max(0, (o.mask.extentAt(x, z) - 45) / 380));
-        mul = 0.80 + 0.36 * vigour + 0.22 * room;
-        wid = 1.0 + 0.26 * hash2(x, z, 59);
+        mul = 0.74 + 0.44 * vigour + 0.24 * room;
+        wid = 0.94 + 0.38 * hash2(x, z, 59);
         break;
       }
       case 'forest':
         // Competition: tall and narrow.
-        mul = 0.82 + 0.30 * vigour;
-        wid = 0.70 + 0.18 * hash2(x, z, 61);
+        mul = 0.80 + 0.34 * vigour;
+        wid = 0.64 + 0.26 * hash2(x, z, 61);
         break;
       default:
-        mul = 0.72 + 0.38 * vigour;
-        wid = 0.94 + 0.24 * hash2(x, z, 67);
+        mul = 0.68 + 0.46 * vigour;
+        wid = 0.88 + 0.34 * hash2(x, z, 67);
     }
     height[i] = sp.height * mul;
     width[i] = wid;
+    // Lean. Street trees are staked young and come out near-vertical; a park
+    // specimen has spent eighty years reaching for the nearest gap in the
+    // canopy, and a woodland tree more than that.
+    const leanMax = h === 'street' ? 0.022 : h === 'forest' ? 0.075 : 0.05;
+    tilt[i] = leanMax * (0.25 + 0.75 * hash2(x, z, 71));
+    tiltAz[i] = hash2(x, z, 73) * Math.PI * 2;
     // Resample the ground: the shipped Y came from the raw DEM, the runtime
     // terrain is upsampled, and a 20 cm gap under a trunk is very visible.
     py[i] = o.sampleHeight(x, z) - Math.max(0.15, height[i] * 0.012);
@@ -284,6 +295,8 @@ export function buildTreeField(sets: PropSet[], o: PlacementOptions): TreeField 
     py,
     pz: pz.subarray(0, count),
     rot: rot.subarray(0, count),
+    tilt,
+    tiltAz,
     height,
     width,
     species,

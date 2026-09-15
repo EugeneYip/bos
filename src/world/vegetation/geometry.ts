@@ -47,18 +47,24 @@ class Builder {
   fol: number[] = [];
   lev: number[] = [];
   pha: number[] = [];
+  /** Impostor only: 0 on the crossed vertical cards, 1 on the horizontal one. */
+  crd: number[] = [];
 
   get vertices(): number {
     return this.pos.length / 3;
   }
 
-  vert(p: THREE.Vector3, n: THREE.Vector3, u: number, v: number, f: number, lever: number, phase: number): void {
+  vert(
+    p: THREE.Vector3, n: THREE.Vector3, u: number, v: number,
+    f: number, lever: number, phase: number, card = 0,
+  ): void {
     this.pos.push(p.x, p.y, p.z);
     this.nor.push(n.x, n.y, n.z);
     this.uv.push(u, v);
     this.fol.push(f);
     this.lev.push(lever);
     this.pha.push(phase);
+    this.crd.push(card);
   }
 }
 
@@ -250,11 +256,14 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
   const cb = sp.crownBase;
   const crownH = 1 - cb;
   const crownR = sp.spread * 0.5;
-  const centre = new THREE.Vector3(0, cb + crownH * (sp.shape === 'vase' ? 0.62 : 0.45), 0);
+  const high = sp.shape === 'vase' || sp.shape === 'goblet';
+  const centre = new THREE.Vector3(0, cb + crownH * (high ? 0.62 : 0.45), 0);
   const anchors: Anchor[] = [];
 
   // --- trunk ---------------------------------------------------------------
-  const trunkTop = cb + crownH * (sp.conifer ? 0.9 : 0.16);
+  // A goblet elm carries a single clean bole to the crotch and then stops; a
+  // pine's leader runs almost to the tip; everything else forks low.
+  const trunkTop = cb + crownH * (sp.conifer ? 0.9 : sp.shape === 'goblet' ? 0.05 : 0.16);
   const tPts: THREE.Vector3[] = [];
   const tRad: number[] = [];
   const lean = (r() - 0.5) * 0.035;
@@ -262,8 +271,10 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
   for (let i = 0; i <= nT; i++) {
     const u = i / nT;
     tPts.push(new THREE.Vector3(lean * u * u, trunkTop * u, lean * 0.6 * u * u));
-    // Strong flare at the base reads as a rooted tree rather than a post.
-    tRad.push(sp.trunkRadius * (1.55 * Math.pow(1 - u, 2.2) + 1 - 0.55 * u));
+    // Strong flare at the base reads as a rooted tree rather than a post, and
+    // the taper above it follows a power law rather than a straight line —
+    // a cylinder with a cone on the end is the classic CG trunk tell.
+    tRad.push(sp.trunkRadius * (1.7 * Math.pow(1 - u, 2.6) + Math.pow(1 - u * 0.86, 1.35)));
   }
   tube(bark, tPts, tRad, d.radial[0], cb, r(), 0.35, 3.0);
 
@@ -286,7 +297,11 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
       // Where the limb leaves the trunk, and where its tip lands on the shell.
       const startT = whorled
         ? 0.02 + 0.9 * (tier / tiers) + r() * 0.05
-        : 0.0 + 0.22 * (li / Math.max(1, limbCount - 1)) + r() * 0.06;
+        : sp.shape === 'goblet'
+          // All the limbs leave within a metre of each other: that single
+          // crotch low in the crown is the elm's whole silhouette.
+          ? 0.0 + 0.05 * (li / Math.max(1, limbCount - 1)) + r() * 0.03
+          : 0.0 + 0.22 * (li / Math.max(1, limbCount - 1)) + r() * 0.06;
       const tipT = whorled
         ? Math.min(0.99, startT + 0.1 + r() * 0.08)
         : Math.min(0.99, 0.42 + 0.55 * (li / Math.max(1, limbCount - 1)) + r() * 0.2);
@@ -300,9 +315,11 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
       const tipY = cb + crownH * tipT;
       const tip = new THREE.Vector3(ca * tipR, tipY, sa * tipR);
 
-      // Bow the limb: spreading oaks sag then lift, vases sweep up and out.
+      // Bow the limb: spreading oaks sag then lift, vases sweep up and out,
+      // and the elm's limbs arch harder than anything else in the city.
       const sag = sp.shape === 'spreading' || sp.shape === 'umbrella' ? -0.09
-        : sp.shape === 'vase' ? 0.11 : whorled ? -0.03 : 0.04;
+        : sp.shape === 'goblet' ? 0.19
+          : sp.shape === 'vase' ? 0.11 : whorled ? -0.03 : 0.04;
       const pts: THREE.Vector3[] = [];
       const rad: number[] = [];
       const nS = d.segs[1];
@@ -360,20 +377,33 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
   const total = Math.max(4, Math.round(d.cards * sp.density));
   const bend = 0.85;
 
+  /**
+   * Which way a spray of leaves points depends on where it sits in the crown:
+   * at the top they reach for the light, around the flanks they stand out
+   * sideways, and along the underside they hang. Biasing everything upward —
+   * which is the easy thing to do — is why so many CG canopies look like a
+   * bowl of parsley from underneath, and the underside is exactly what you see
+   * standing on Boston Common.
+   */
+  const yBias = (y: number): number => {
+    const t = THREE.MathUtils.clamp((y - cb) / Math.max(0.1, crownH), 0, 1);
+    return -0.34 + 0.86 * t * t;
+  };
+
   // Two thirds hang off real branch tips; the rest fill the envelope so the
   // silhouette closes up without the interior turning solid.
   const fromAnchors = Math.min(anchors.length, Math.round(total * 0.62));
   for (let i = 0; i < fromAnchors; i++) {
     const a = anchors[Math.floor(r() * anchors.length)];
     const dir = a.d.clone();
-    dir.x += (r() - 0.5) * 0.7;
-    dir.y += (r() - 0.5) * 0.5 + 0.18;
-    dir.z += (r() - 0.5) * 0.7;
+    dir.x += (r() - 0.5) * 0.8;
+    dir.y += (r() - 0.5) * 0.45 + yBias(a.p.y);
+    dir.z += (r() - 0.5) * 0.8;
     dir.normalize();
     const jitter = new THREE.Vector3(
-      (r() - 0.5) * crownR * 0.18,
-      (r() - 0.5) * crownH * 0.1,
-      (r() - 0.5) * crownR * 0.18,
+      (r() - 0.5) * crownR * 0.22,
+      (r() - 0.5) * crownH * 0.12,
+      (r() - 0.5) * crownR * 0.22,
     );
     const scale = 0.78 + r() * 0.5;
     card(leaf, a.p.clone().add(jitter), dir, r() * Math.PI * 2,
@@ -381,7 +411,7 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
   }
 
   for (let i = fromAnchors; i < total; i++) {
-    const t = Math.pow(r(), sp.shape === 'vase' ? 1.5 : 0.85);
+    const t = Math.pow(r(), high ? 1.5 : 0.85);
     const az2 = r() * Math.PI * 2;
     const shell = crownRadius(sp.shape, t);
     // Hollow: keep the cards on the outer 55 % of the radius so light gets in.
@@ -392,7 +422,7 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
       Math.sin(az2) * q * crownR,
     );
     const dir = new THREE.Vector3().subVectors(p, centre).normalize();
-    dir.y += 0.25;
+    dir.y += yBias(p.y);
     dir.normalize();
     // Pull the origin inward so the card straddles the shell.
     p.addScaledVector(dir, -cardH * 0.45);
@@ -425,6 +455,9 @@ function assemble(bark: Builder, leaf: Builder): TreeGeometry {
   const pha = new Float32Array(nBark + nLeaf);
   pha.set(bark.pha, 0);
   pha.set(leaf.pha, nBark);
+  const crd = new Float32Array(nBark + nLeaf);
+  crd.set(bark.crd, 0);
+  crd.set(leaf.crd, nBark);
 
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
@@ -432,6 +465,7 @@ function assemble(bark: Builder, leaf: Builder): TreeGeometry {
   g.setAttribute('foliage', new THREE.BufferAttribute(fol, 1));
   g.setAttribute('lever', new THREE.BufferAttribute(lev, 1));
   g.setAttribute('phase', new THREE.BufferAttribute(pha, 1));
+  g.setAttribute('cardKind', new THREE.BufferAttribute(crd, 1));
   g.computeBoundingSphere();
 
   const twoGroups = nBark > 0 && nLeaf > 0;
@@ -446,7 +480,10 @@ function assemble(bark: Builder, leaf: Builder): TreeGeometry {
  * The distance impostor: two crossed vertical cards carrying the species
  * silhouette plus one horizontal card carrying the crown seen from above.
  * Without the horizontal card a vertical billboard is edge-on from an aerial
- * camera and the city's whole canopy disappears at altitude.
+ * camera and the city's whole canopy disappears at altitude — but with *both*
+ * always drawn, a tree seen from a low oblique reads as a ball with a plate
+ * through it. So each card is tagged (`cardKind` 0 / 1) and the shader
+ * cross-fades them on the view's elevation angle.
  */
 function buildImpostor(sp: Species): TreeGeometry {
   const leaf = new Builder();
@@ -454,8 +491,8 @@ function buildImpostor(sp: Species): TreeGeometry {
   const cb = sp.crownBase;
 
   const push = (
-    p: THREE.Vector3, n: THREE.Vector3, u: number, v: number, lever: number,
-  ): void => leaf.vert(p, n, u, v, 1, lever, 0.5);
+    p: THREE.Vector3, n: THREE.Vector3, u: number, v: number, lever: number, kind: number,
+  ): void => leaf.vert(p, n, u, v, 1, lever, 0.5, kind);
 
   // Crossed vertical cards, UV into the left (side) tile.
   for (let q = 0; q < 2; q++) {
@@ -472,12 +509,12 @@ function buildImpostor(sp: Species): TreeGeometry {
       const [p, u, v, lv] = corners[i];
       // Dome-ish normals: mostly up, leaning out. Yawed with the billboard.
       const n = new THREE.Vector3(p.x, 0.55 * w, p.z).normalize();
-      push(p, n, u, v, lv * 0.85);
+      push(p, n, u, v, lv * 0.85, 0);
     }
   }
 
   // Horizontal canopy card, UV into the right (top) tile.
-  const y = cb + (1 - cb) * 0.62;
+  const y = cb + (1 - cb) * 0.66;
   const h = w * 0.5;
   const top: [THREE.Vector3, number, number][] = [
     [new THREE.Vector3(-h, y, -h), 0.5, 0.0],
@@ -487,14 +524,25 @@ function buildImpostor(sp: Species): TreeGeometry {
   ];
   for (const i of [0, 1, 2, 0, 2, 3]) {
     const [p, u, v] = top[i];
-    push(p, new THREE.Vector3(p.x * 0.35, w, p.z * 0.35).normalize(), u, v, 0.8);
+    push(p, new THREE.Vector3(p.x * 0.35, w, p.z * 0.35).normalize(), u, v, 0.8, 1);
   }
 
   return assemble(new Builder(), leaf);
 }
 
-const NEAR: Detail = { radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards: 62, cardSize: 1.0 };
-const MID: Detail = { radial: [4, 3, 0], segs: [2, 1, 1], secondaries: 1, cards: 13, cardSize: 2.0 };
+/**
+ * Card counts are tied to card *size*: halving the linear size of a foliage
+ * card quarters what it covers, so the count has to go up by the same factor
+ * or the crown opens up into a scaffold. The near card is authored at about
+ * 1.5 m (see `textures.cardMeters`) and the mid card at 2.8x that.
+ */
+const NEAR: Detail = { radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards: 155, cardSize: 1.0 };
+const MID: Detail = { radial: [5, 3, 3], segs: [2, 2, 1], secondaries: 2, cards: 34, cardSize: 2.8 };
+
+/** Physical size in metres of the mid tier's clump card for a species. */
+export function midCardMeters(sp: Species): number {
+  return sp.cardScale * sp.spread * 0.5 * sp.height * 0.8 * MID.cardSize;
+}
 
 export function buildTreeLods(sp: Species, seed: number): TreeLods {
   return {

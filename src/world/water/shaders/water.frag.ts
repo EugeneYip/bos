@@ -4,6 +4,7 @@ import {
   WATER_GLOW_GLSL,
   WATER_WIND_GLSL,
 } from './common';
+import { WAVE_SLOPE_RANGE } from '../textures';
 
 /**
  * Water surface fragment stage.
@@ -21,6 +22,14 @@ import {
  * Under that sits a turbid, shallow, strongly absorbing body — Beer-Lambert
  * against an estuary rather than a reef — and a shoreline whose waterline
  * actually moves and piles foam up on whichever bank the wind is pushing at.
+ *
+ * The detail normal is a four-octave *cascade*, not a sum: each octave is
+ * sampled at a position pushed back along the slope of everything coarser than
+ * it, and its amplitude is modulated by the coarser height. That is the two
+ * things a plain sum of octaves cannot give you — crests that narrow while
+ * troughs broaden, and fine ripple that piles onto the crests and is smoothed
+ * out of the troughs — and between them they are most of the difference
+ * between chop and a bumpy carpet.
  */
 export const waterFrag = (aerialGlsl: string): string => /* glsl */ `
 precision highp float;
@@ -33,6 +42,7 @@ uniform float uSeaLevel;
 uniform float uRippleGain;
 uniform float uGlitter;
 uniform float uFoamGain;
+uniform float uChop;       // detail-cascade crest sharpening
 uniform float uDetail;     // 1 = full ripple stack, 0 = cheapest
 
 uniform sampler2D uFieldDist;
@@ -89,16 +99,38 @@ ${WATER_WIND_GLSL}
 ${WATER_GLOW_GLSL}
 ${WATER_BRDF_GLSL}
 
+// The atlas stores slope and height directly rather than a packed unit normal:
+// the shader wants slope, and re-deriving it from a normal cost a divide and
+// clipped the range exactly where it matters, at the crests.
+#define WAVE_SLOPE_RANGE ${WAVE_SLOPE_RANGE.toFixed(1)}
+
 // The atmosphere, shared verbatim with every other material in the city. See
 // 'ctx.aerial'. It brings 'skyApRadiance' and 'skyApplyOffset' with it.
 ${aerialGlsl}
 
-/** One detail-normal octave, returned as an xz slope plus its breakup mask. */
-vec3 rippleOctave(vec2 p, float tile, float speed, vec2 drift, float rot, float gain) {
-  vec2 uv = (wRot(rot) * p + drift * (uTime * speed)) / tile;
-  vec4 t = texture2D(uWaves, uv);
-  vec3 n = t.xyz * 2.0 - 1.0;
-  return vec3((n.xy / max(abs(n.z), 0.10)) * gain, t.w);
+/**
+ * One detail octave.
+ *
+ * 'q' is the position in the *wind* frame — x downwind, y across it — and the
+ * slope comes back in that frame too. The atlas spectrum is biased along its
+ * own u axis, so sampling it in world coordinates pointed every ripple crest
+ * at world north whatever the wind was doing. Crests run across the wind; it
+ * is the single most recognisable thing about a wind-blown surface.
+ *
+ * 'R' decorrelates one octave from the next by a few degrees. It rotates the
+ * sampling frame, so the slope has to come back through its transpose or the
+ * normals belong to a surface rotated away from the one the heights describe.
+ */
+struct Rip { vec2 s; float h; float b; };
+
+Rip ripOct(vec2 q, mat2 R, float tile, vec2 drift) {
+  vec2 uv = (R * (q + drift)) / tile;
+  vec4 c = texture2D(uWaves, uv);
+  Rip r;
+  r.s = ((c.rg - 0.5) * (2.0 * WAVE_SLOPE_RANGE)) * R;
+  r.h = c.b * 2.0 - 1.0;
+  r.b = c.a;
+  return r;
 }
 
 void main() {
@@ -152,37 +184,116 @@ void main() {
   // and the harbour cannot be mistaken for each other.
   float rip = mix(0.36, 1.45, fetch);
   float shoal = smoothstep(0.0, 8.0, shoreD);
-  // Real water rarely exceeds ~0.2 rms slope even in a fresh breeze; push
-  // past that and every pixel finds a grazing angle somewhere, the Fresnel
-  // saturates and the whole surface turns into flat sky-coloured paint.
-  float windGain = mix(0.26, 1.15, windiness) * mix(0.62, 1.0, fetch) * shoal;
+  // Amplitude of the octaves that are actually *resolved* into a normal.
+  //
+  // Measured against the atlas (per-axis slope rms 0.52 along the wind), the
+  // gains below put the four-octave sum at 0.131 * gain. Cox-Munk gives the
+  // rms slope of a clean sea as sqrt(0.003 + 0.00512 U): 0.13 at 4 m/s, 0.20
+  // at 8. The old factor left the Charles at gain 0.49, i.e. an rms slope of
+  // 0.064 — three degrees, which is not chop, it is glass, and it is why the
+  // near field of a bankside view had no relief at all to beat the grain.
+  //
+  // Two changes get it onto the physical scale. The wind range opens up, and
+  // the fetch penalty nearly goes away: fetch limits wave *height* and
+  // *length*, not short-wave *steepness* — a fetch-limited sea is if anything
+  // steeper than a developed one — and 'rip' above already shortens every
+  // tile by a factor of four for the basin. Taxing the slope as well counted
+  // the same limit twice.
+  float windGain = mix(0.30, 1.55, windiness) * mix(0.88, 1.0, fetch) * shoal;
   float gain = uRippleGain * windGain;
 
-  float t0 = 3.2 * rip, t1 = 11.5 * rip, t2 = 41.0 * rip;
+  // The variance handed to the *roughness* when an octave fades out below the
+  // sampling limit keeps its old calibration, deliberately. It is the term
+  // that stops the far field turning into flat sky-coloured paint, it was
+  // tuned from altitude, and unlike the resolved slope it describes scales
+  // that fetch genuinely does suppress.
+  float varGain = mix(0.26, 1.15, windiness) * mix(0.62, 1.0, fetch) * shoal;
+
+  // Tile sizes in metres, coarsest to finest. On the Charles that is roughly
+  // 15 / 4.2 / 1.2 / 0.4 m, in the outer harbour 60 / 17 / 4.7 / 1.7 m. The
+  // finest is the capillary band and lives only in the near field.
+  float tA = 41.0 * rip, tB = 11.5 * rip, tC = 3.2 * rip, tD = 1.15 * rip;
   // Fade each octave out once its features are a couple of pixels wide, and
   // remember how much slope was lost so it can be added back as roughness.
   //
   // Distance alone is the wrong measure: at 20 degrees above a water plane one
   // pixel covers three times the ground it would head-on, so the texture is
   // three times as minified and the leftover slope turns into a lattice of
-  // sparkling dots. Stretch the fade by the grazing factor of the *macro*
-  // normal and the speckle goes away without flattening the near field.
+  // sparkling dots. Stretching the fade by the grazing factor of the *macro*
+  // normal is what stops that — but the stretch has to be *bounded*, because
+  // the sampler is not helpless: it has eight-to-one anisotropy and a mip
+  // chain, and it filters a stretched footprint correctly up to that ratio.
+  // At the ninefold clamp this used to carry, the first thing a camera did on
+  // dropping toward the water was throw away every octave but the coarsest,
+  // and the harbour — the one view that should be all texture — came out as
+  // three soft bands of airbrush.
   vec3 gn0 = normalize(vGN);
   float graze0 = 1.0 / clamp(abs(dot(gn0, V)), 0.055, 1.0);
-  float eDist = vViewDist * min(graze0, 9.0);
-  float f0 = 1.0 - smoothstep(t0 * 55.0, t0 * 190.0, eDist);
-  float f1 = 1.0 - smoothstep(t1 * 55.0, t1 * 190.0, eDist);
-  float f2 = 1.0 - smoothstep(t2 * 55.0, t2 * 190.0, eDist);
-  f0 *= uDetail;
+  float eDist = vViewDist * min(graze0, 4.0);
+  float fA = 1.0 - smoothstep(tA * 55.0, tA * 190.0, eDist);
+  float fB = 1.0 - smoothstep(tB * 55.0, tB * 190.0, eDist);
+  float fC = (1.0 - smoothstep(tC * 55.0, tC * 190.0, eDist)) * uDetail;
+  float fD = (1.0 - smoothstep(tD * 48.0, tD * 150.0, eDist)) * uDetail;
 
-  const float G0 = 0.170, G1 = 0.125, G2 = 0.085;
-  vec2 slope = vec2(0.0);
-  vec3 o0 = rippleOctave(p, t0, 1.35 * sqrt(rip), wind, 0.31, G0 * gain * f0);
-  vec3 o1 = rippleOctave(p, t1, 2.45 * sqrt(rip), wind * 0.78 + perp * 0.30, -0.87, G1 * gain * f1);
-  vec3 o2 = rippleOctave(p, t2, 4.10 * sqrt(rip), wind, 1.94, G2 * gain * f2);
-  slope += o0.xy + o1.xy + o2.xy;
+  const float GA = 0.090, GB = 0.125, GC = 0.150, GD = 0.130;
 
-  slope += gn0.xz / max(gn0.y, 0.25);
+  // World -> wind frame. Rows are the downwind and cross-wind axes.
+  mat2 WF = mat2(wind.x, -wind.y, wind.y, wind.x);
+  vec2 q = WF * p;
+  // The macro Gerstner slope is the coarsest rung of the cascade, and it has
+  // to be in the same frame as everything the cascade does with it.
+  vec2 macro = gn0.xz / max(gn0.y, 0.25);
+  vec2 macroQ = WF * macro;
+  // Slope converts to a horizontal Gerstner offset through lambda / 2pi.
+  float chop = uChop * 0.159;
+  // Deep-water phase speed of each octave's dominant mode, lambda ~ tile/3.2:
+  // c = sqrt(g * lambda / 2pi). Nothing to tune, and the coarse octaves come
+  // out four to six times faster than the capillary one, which is what makes a
+  // long look at the water read as a spectrum rather than a scrolling texture.
+  // The sample point moves *upwind* so the pattern travels downwind; the drift
+  // used to carry the opposite sign and every wave on the Charles ran into the
+  // breeze.
+  float cA = -uTime * 0.70 * sqrt(tA);
+  float cB = -uTime * 0.70 * sqrt(tB);
+  float cC = -uTime * 0.70 * sqrt(tC);
+  float cD = -uTime * 0.70 * sqrt(tD);
+  // Directional spread: short waves run a few degrees off the wind.
+  mat2 RA = wRot(0.05), RB = wRot(-0.21), RC = wRot(0.29), RD = wRot(-0.13);
+
+  Rip rA = ripOct(q - macroQ * (uChop * 3.0), RA, tA, vec2(cA, 0.0));
+  vec2 sA = rA.s * (GA * gain * fA);
+
+  // Wind ripple rides the crests of the chop under it and is smoothed out of
+  // the troughs; without this the octaves are a uniform carpet.
+  float mB = 1.0 + 0.55 * rA.h;
+  Rip rB = ripOct(q - (macroQ * 0.5 + sA) * (chop * tA), RB, tB,
+                  vec2(cB, uTime * 0.22));
+  vec2 sB = rB.s * (GB * gain * fB * mB);
+
+  // The last two octaves are dead over most of the frame in any wide shot, so
+  // they are branched rather than faded to zero: the test is on view distance
+  // and is therefore coherent across a warp.
+  vec2 sC = vec2(0.0), sD = vec2(0.0);
+  float bC = 0.5, bD = 0.5;
+  if (fC > 0.002) {
+    float mC = 1.0 + 0.62 * rB.h;
+    Rip rC = ripOct(q - (sA + sB) * (chop * tB), RC, tC, vec2(cC, uTime * -0.09));
+    sC = rC.s * (GC * gain * fC * mC);
+    bC = rC.b;
+    // Capillary band. Cat's paws are exactly this: a patch where the smallest
+    // scale suddenly exists. It is gated hard on the gust so the slicks stay
+    // glassy right up to the camera.
+    if (fD > 0.002) {
+      float mD = (1.0 + 0.70 * rC.h) * (0.25 + 0.95 * windiness);
+      Rip rD = ripOct(q - (sB + sC) * (chop * tC), RD, tD, vec2(cD, 0.0));
+      sD = rD.s * (GD * gain * fD * mD);
+      bD = rD.b;
+    }
+  }
+
+  // Back to world before it meets the Gerstner normal.
+  vec2 slope = (sA + sB + sC + sD) * WF;
+  slope += macro;
 
   vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
   // The surface is drawn double-sided *because the OSM ring winding is not
@@ -200,15 +311,25 @@ void main() {
   // sits near 0.03 and still mirrors; a gust cell climbs past 0.25 and the
   // reflection inside it dissolves into scattered sky. That contrast is the
   // whole difference between water and a sheet of glass.
-  float lostRipple = ((1.0 - f0) * G0 + (1.0 - f1) * G1 + (1.0 - f2) * G2) * 0.72 * windGain;
+  float lostRipple = ((1.0 - fA) * GA + (1.0 - fB) * GB
+                    + (1.0 - fC) * GC + (1.0 - fD) * GD * 0.45) * 0.62 * varGain;
+  // Capillary roughness, from the scales below the finest octave. It used to
+  // be an unconditional 0.26 * windiness, which counted the same slope
+  // variance twice wherever the octaves still resolved it: the Fresnel ceiling
+  // (1 - rough) collapsed to about a half a metre from the camera, the mirror
+  // was blurred by nine mips and the glitter lobe was a dome — at the one
+  // distance where all of those should be at their sharpest. It now backs off
+  // as the capillary octave fades in.
+  float micro = 0.058 + 0.215 * windiness * mix(0.55, 1.0, fetch);
   float rough = mix(0.020, 0.048, fetch)
-              + 0.26 * windiness * mix(0.55, 1.0, fetch)
+              + micro * (1.0 - 0.78 * clamp(fD, 0.0, 1.0))
               + lostRipple
               + clamp(vLostVar, 0.0, 0.15);
   rough = clamp(rough, 0.016, 0.55);
 
   // -------------------------------------------------------- reflection ----
-  vec3 R = reflect(-V, N);
+  vec3 Rraw = reflect(-V, N);
+  vec3 R = Rraw;
   R.y = abs(R.y);   // never sample below the horizon into the seabed
 
   // The sky the water reflects is the sky-view table the dome itself is drawn
@@ -226,6 +347,18 @@ void main() {
   sky = mix(sky, probe, 0.35);
 #endif
 
+  // A rough surface reflects a *cone*, and at a grazing angle a good half of
+  // that cone points below the horizon — at the water in between, at the far
+  // bank, at a hull. Folding R up (which we must, or the lobe reads the
+  // seabed) silently replaces all of it with more sky, and that is most of why
+  // rough grazing water used to render as a sheet of pale sky rather than the
+  // dark, streaky matte it is. Because the occluded fraction is driven by
+  // roughness, it also hands the gust cells the internal structure they were
+  // missing: the rough patches go matte and dark, the slicks stay bright.
+  float cone = 0.75 * rough + 0.015;
+  float below = clamp(0.5 - Rraw.y * (0.5 / cone), 0.0, 1.0);
+  sky *= 1.0 - 0.55 * below;
+
 #if WATER_PLANAR == 1
   if (uReflStrength > 0.001) {
     vec4 rc = uReflMatrix * vec4(vWorld, 1.0);
@@ -240,9 +373,13 @@ void main() {
 
     // Rough water blurs what it reflects, and stretches it vertically. Three
     // taps up the v axis is enough to turn a crisp window into the vertical
-    // streak of light you actually see on a harbour at night.
+    // streak of light you actually see on a harbour at night. The stretch also
+    // has to grow at a grazing angle whatever the roughness: a slick a
+    // kilometre away is seen along the surface, so even a centimetre of relief
+    // drags the mirror image into a streak. Without that, every slick on the
+    // Charles reflected sunlit brick as a hard-edged white cut-out.
     float lod = clamp(rough * uReflBlur, 0.0, uReflMaxLod);
-    float smear = uReflSmear * (0.002 + rough * 0.085);
+    float smear = uReflSmear * (0.002 + rough * 0.085) * (0.45 + 1.5 * (1.0 - NoV));
     vec4 r0 = textureLod(uReflMap, ruv, lod);
     vec4 r1 = textureLod(uReflMap, clamp(ruv + vec2(0.0, smear), vec2(0.0015), vec2(0.9985)), lod);
     vec4 r2 = textureLod(uReflMap, clamp(ruv - vec2(0.0, smear * 0.7), vec2(0.0015), vec2(0.9985)), lod);
@@ -287,7 +424,13 @@ void main() {
   // factor or the river is the brightest thing in a night frame. The reflected
   // sky and the sun's glitter need no such correction: they come from the
   // atmosphere and from 'ctx.sun', which are already as dim as the real thing.
-  float authored = mix(0.055, 1.0, clamp(uEnvIntensity, 0.0, 1.0));
+  //
+  // 'uEnvIntensity' is the *measured* compensation, 2.5 / exposure. It used to
+  // be a proxy for daylight — 0.05 + 0.95 * day^2 — which at five in the
+  // afternoon reads 0.46 and halved the body of the river four hours before
+  // the exposure it was compensating for moves at all. The golden hour is the
+  // hour the water matters most and it was the hour that was wrong.
+  float authored = clamp(uEnvIntensity, 0.04, 1.25);
 
   // Depth reads as colour, not just as darkness: the channel is deep and
   // green, the margins are a shallow, silty, distinctly browner band. On the
@@ -302,8 +445,11 @@ void main() {
   // patchy across a whole basin, and from altitude that patchiness is the only
   // structure the water has: the ripples are long since sub-pixel and Fresnel
   // is down at two per cent, so without it the river is a solid fill.
-  float plume = texture2D(uWaves, p * 0.0018 + wind * uTime * 0.0012).w;
-  body = mix(body, siltCol * down * 1.12, smoothstep(0.55, 1.0, shallow) * plume * 0.45);
+  float silty = smoothstep(0.55, 1.0, shallow);
+  if (silty > 0.002) {
+    float plume = texture2D(uNoise, p * 0.00055 + wind * uTime * 0.0004).b;
+    body = mix(body, siltCol * down * 1.12, silty * plume * 0.45);
+  }
   // Across the open basin the patchiness rides on 'swell' — the wind field's
   // ~1.4 km octave, already computed above and otherwise unused here. It costs
   // nothing and, unlike another tap into the ripple atlas, it does not tile:
@@ -311,29 +457,54 @@ void main() {
   // visible chequerboard the length of the Charles.
   body *= 1.0 + (wf.z - 0.5) * 0.36 * (1.0 - 0.45 * fetch);
 
+  // Sunlight that made it through a crest and back out toward the eye. Only a
+  // thin, back-lit, raised crest does this, which is why it reads as the wave
+  // *shape* rather than as a wash: it picks out the top few centimetres of
+  // whatever is between you and a low sun.
+  vec3 L = normalize(uSunDir);
+  float back = pow(clamp(dot(V, -normalize(L + N * 0.45)), 0.0, 1.0), 3.0);
+  float lift = clamp(0.35 + 0.65 * vCrest, 0.0, 1.0) * clamp(1.0 - 2.4 * uSunDir.y, 0.0, 1.0);
+  body += scatter * uSunColor * (back * lift * 1.6);
+
   // ----------------------------------------------------------- fresnel ----
   float fres = fresnelWater(NoV, rough);
 
   vec3 color = mix(body * authored, sky, fres);
 
   // ---------------------------------------------------------- specular ----
-  // Anisotropic GGX on the wind axis: a low sun stretches into a long path of
-  // separate highlights rather than one blown-out blob.
-  vec3 L = normalize(uSunDir);
+  // Anisotropic Beckmann on the wind axis: a Gaussian slope distribution, not
+  // GGX. A low sun still stretches into a long path of separate highlights —
+  // the stretch is area-preserving, ax * ay held at ga^2 — but the lobe now
+  // has the falloff a real sea has, so a sun *behind* the camera contributes
+  // nothing instead of washing the whole surface warm. See 'beckmannAniso'.
   vec3 H = normalize(L + V);
   float NoH = max(dot(N, H), 0.0);
   float NoL = max(dot(N, L), 0.0);
   vec3 T = normalize(vec3(wind.x, 0.0, wind.y) - N * dot(N, vec3(wind.x, 0.0, wind.y)));
   vec3 Bt = cross(N, T);
-  float aniso = clamp(0.30 + 0.55 * windiness, 0.0, 0.88);
-  float ga = clamp(rough * 0.95, 0.007, 0.45);
-  float ax = ga * (1.0 + aniso);
-  float ay = ga * (1.0 - 0.72 * aniso);
-  float D = ggxAniso(NoH, dot(T, H), dot(Bt, H), ax, ay);
+  float aniso = clamp(0.28 + 0.38 * windiness, 0.0, 0.66);
+  // 'ga' is an rms facet slope now that the lobe is Gaussian, so the old cap
+  // at 0.30 is exactly Cox-Munk's value for a near-gale and there is no
+  // reason to go past it.
+  float ga = clamp(rough * 0.90, 0.007, 0.30);
+  float st = sqrt((1.0 + aniso) / (1.0 - aniso));
+  float ax = clamp(ga * st, 0.008, 0.62);
+  float ay = clamp(ga / st, 0.006, 0.62);
+  float D = beckmannAniso(NoH, dot(T, H), dot(Bt, H), ax, ay);
   float Vs = smithVis(NoV, NoL, ga);
-  // Near the camera the individual facets are resolved by the ripple map; the
-  // breakup channel keeps them from merging into a continuous sheet.
-  float sparkle = mix(1.0, 0.62 + 0.9 * o0.z, clamp(f0, 0.0, 1.0) * 0.8);
+  // Facet statistics. A glitter path is a Poisson field of facets that happen
+  // to be tilted into the mirror direction, so a smooth lobe is wrong twice
+  // over — too uniform, and too dim where it does spike. Four scales carry it,
+  // and they have to span the whole frame: the wind streaks are tens of metres
+  // across and hold up two kilometres out, the coarse breakup mask carries
+  // ten-metre flecks, and the two fine ones are centimetres and gone inside a
+  // few hundred. With only the streaks the glitter path came out as blobs of
+  // cotton wool the size of a gust cell.
+  float sparkle = (0.26 + 1.85 * streak * streak)
+                * (0.42 + 1.16 * rA.b)
+                * mix(1.0, 0.52 + 0.96 * rB.b, clamp(fB, 0.0, 1.0) * 0.8)
+                * mix(1.0, 0.40 + 1.30 * bC, clamp(fC, 0.0, 1.0) * 0.85)
+                * mix(1.0, 0.55 + 0.95 * bD, clamp(fD, 0.0, 1.0) * 0.7);
   float spec = D * Vs * NoL * fres * uGlitter * sparkle;
   // A glitter path is many small highlights, not a sheet. Clamped at 46 the
   // lobe saturated whole square kilometres of the Charles into flat white
@@ -341,38 +512,38 @@ void main() {
   color += uSunColor * min(spec, 7.0) * smoothstep(-0.04, 0.09, uSunDir.y);
 
   // -------------------------------------------------------------- foam ----
-  float foam = 0.0;
+  float cov = 0.0;
 #ifndef WATER_SKIRT
   if (shoreD < 90.0) {
     // Shore normal straight off the distance field: it points from the bank
     // out into the water, so the dot with the wind says which bank the foam
     // is being pushed onto.
-    vec2 st = uFieldTexel * uFieldInvSize;
-    float dX = textureLod(uFieldDist, fuv + vec2(st.x, 0.0), 0.0).r - sdf;
-    float dZ = textureLod(uFieldDist, fuv + vec2(0.0, st.y), 0.0).r - sdf;
+    vec2 st2 = uFieldTexel * uFieldInvSize;
+    float dX = textureLod(uFieldDist, fuv + vec2(st2.x, 0.0), 0.0).r - sdf;
+    float dZ = textureLod(uFieldDist, fuv + vec2(0.0, st2.y), 0.0).r - sdf;
     vec2 sn = normalize(vec2(dX, dZ) + vec2(1e-5));
     float windward = clamp(-dot(wind, sn), 0.0, 1.0);
     windward = 0.22 + 0.78 * windward * windward;
 
     // The waterline breathes. Phase varies along the bank so the whole
     // shoreline does not pulse in unison.
-    float ph = texture2D(uWaves, p * 0.0042).w;
+    float ph = texture2D(uNoise, p * 0.0013).a;
     float swash = 0.5 + 0.5 * sin(uTime * 0.72 + ph * 11.0 + dot(p, perp) * 0.012);
     float band = mix(1.8, 7.0, windward) * mix(0.5, 1.3, fetch);
     float edge = shoreD - swash * band * 0.55;
 
     // Two octaves of churn, one of them running up the beach.
-    float ch1 = texture2D(uWaves, p * 0.055 - sn * (uTime * 0.16) + wind * 0.02).w;
-    float ch2 = texture2D(uWaves, p * 0.014 + wind * (uTime * 0.03)).w;
+    float ch1 = texture2D(uWaves, p * 0.055 - sn * (uTime * 0.16) + wind * 0.02).a;
+    float ch2 = texture2D(uNoise, p * 0.0045 + wind * (uTime * 0.01)).b;
     float churn = clamp((ch1 * 0.65 + ch2 * 0.55) * 1.5, 0.0, 1.4);
 
     float wash = (1.0 - smoothstep(0.0, band, edge)) * smoothstep(-2.2, 0.35, edge);
     float lace = (1.0 - smoothstep(band * 0.8, band * 3.4, edge)) * smoothstep(-1.0, 1.5, edge);
-    foam = (wash * 0.95 + lace * 0.30 * churn) * churn * windward * uFoamGain;
+    cov = (wash * 1.15 + lace * 0.36 * churn) * churn * windward * uFoamGain;
 
     // Just inside the waterline the sheet is thin and glossy over wet sand.
     float wet = (1.0 - smoothstep(0.0, 2.6, edge)) * 0.55;
-    color = mix(color, siltCol * down * 1.9 * authored, wet * (1.0 - foam));
+    color = mix(color, siltCol * down * 1.9 * authored, wet * (1.0 - clamp(cov, 0.0, 1.0)));
   }
 #endif
 
@@ -381,18 +552,43 @@ void main() {
   // never a field of white — that mistake is what makes game water look like
   // detergent. Gate on wind speed, fetch, an active gust and the top of the
   // crest distribution, then punch holes in it with noise.
-  float capSeed = texture2D(uWaves, p * 0.028 + wind * (uTime * 0.09)).w;
-  float caps = smoothstep(0.80, 0.98, vCrest)
-             * smoothstep(0.55, 1.0, fetch)
-             * smoothstep(0.55, 0.95, gust)
-             * smoothstep(6.4, 10.5, uWindSpeed)
-             * smoothstep(0.42, 0.78, capSeed);
+  float capGate = smoothstep(0.80, 0.98, vCrest)
+                * smoothstep(0.55, 1.0, fetch)
+                * smoothstep(0.55, 0.95, gust)
+                * smoothstep(6.4, 10.5, uWindSpeed);
+  float caps = 0.0;
+  if (capGate > 0.002) {
+    float capSeed = texture2D(uNoise, p * 0.0065 + wind * (uTime * 0.02)).r;
+    caps = capGate * smoothstep(0.42, 0.78, capSeed);
+  }
   // Breaking crests add to it, but only genuinely steep ones: with the
   // threshold this low and the gain above 1, the fold term saturated foam
   // across the whole harbour and the water rendered as a white sheet.
   caps += clamp(vFold - 0.62, 0.0, 1.0) * 0.30 * smoothstep(0.72, 1.0, fetch);
-  foam = clamp(foam + caps * 0.26 * uFoamGain, 0.0, 1.0);
-  foam *= 1.0 - smoothstep(1400.0, 4200.0, vViewDist);
+  cov = clamp(cov + caps * 0.34 * uFoamGain, 0.0, 1.0);
+  cov *= 1.0 - smoothstep(1400.0, 4200.0, vViewDist);
+
+  float foam = 0.0;
+  if (cov > 0.002) {
+    // Foam dissolves by *breaking up*, not by fading. Thresholding a
+    // broadband mask against the coverage gives lace at a metre and bubbles at
+    // a few centimetres, and the edge erodes from the outside in as the
+    // coverage drops — which is what a receding wash actually does. A smooth
+    // field faded by a scalar reads as airbrush every time.
+    float b1 = texture2D(uWaves, p * 0.46 + wind * (uTime * 0.06)).a;
+    float b2 = texture2D(uWaves, wRot(1.7) * p * 0.115 - perp * (uTime * 0.03)).a;
+    // Mean 0.5 either way, so the threshold below is calibrated once.
+    float bub = b1 * 0.62 + b2 * 0.38;
+    // Blur the threshold back to a plain fade once the bubbles are sub-pixel,
+    // or the foam line crawls with aliasing at a kilometre.
+    float res = 1.0 - smoothstep(180.0, 700.0, eDist);
+    float thr = 1.15 - cov * 1.45;
+    float hard = smoothstep(thr, thr + 0.30, bub);
+    foam = mix(cov, hard, res);
+    // A bubble raft is white where it is thick and merely bright where it is
+    // thin, so keep a little of the coverage under the dissolve.
+    foam = clamp(max(foam, cov * 0.35), 0.0, 1.0);
+  }
 
   // Foam is white *material*, not a light source: it has to be lit by the
   // same sun and sky as everything else, or it glows in the dark — and with

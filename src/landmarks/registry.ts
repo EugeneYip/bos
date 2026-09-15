@@ -32,6 +32,12 @@ import { buildCityHall } from './buildings/cityHall';
 import { buildMitDome } from './buildings/mitDome';
 import { buildLongfellow } from './buildings/longfellow';
 import { buildCitgo } from './buildings/citgo';
+import {
+  buildConstitution,
+  CONSTITUTION_BEARING,
+  CONSTITUTION_LAT,
+  CONSTITUTION_LON,
+} from './buildings/constitution';
 
 export interface Landmark {
   /** Matches `BuildingRecord.landmark`. */
@@ -270,6 +276,19 @@ export const LANDMARKS: Landmark[] = [
     radius: 22,
     tier: 2,
     build: buildCitgo,
+  },
+  {
+    slug: 'uss-constitution',
+    name: 'USS Constitution & Charlestown Navy Yard',
+    lon: CONSTITUTION_LON,
+    lat: CONSTITUTION_LAT,
+    // Her keel lies along the Pier 1 quay face; +X is the bow, heading NW.
+    rotation: bearingX(CONSTITUTION_BEARING),
+    height: 67,
+    radius: 150,
+    tier: 2,
+    absorbs: ['charlestown-navy-yard', 'dry-dock-1'],
+    build: buildConstitution,
   },
 ];
 

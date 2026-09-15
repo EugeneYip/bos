@@ -199,18 +199,22 @@ export function fountain(): Part[] {
   ];
 }
 
+/**
+ * The 132 ground flagpoles OSM knows about — the pole, the shoe and the truck,
+ * and deliberately no cloth. The flag that flies from a *mapped* flagpole is
+ * the Traffic module's (`Traffic.buildFlags` reads this same prop set), and a
+ * second sheet in the same cubic metre is two flags fighting over the same
+ * pixels. `props/Flags.ts` supplies the ones the data does not know about:
+ * facade staffs, parapet poles and hanging banners, derived from the building
+ * footprints.
+ */
 export function flagpole(): Part[] {
   const pole = new THREE.CylinderGeometry(0.045, 0.09, 11.0, 8);
   pole.translate(0, 5.5, 0);
   const base = tube(0.3, 0.5, 0, 0, 0, 10);
   const ball = new THREE.SphereGeometry(0.1, 8, 6);
   ball.translate(0, 11.1, 0);
-  const flag = new THREE.PlaneGeometry(1.6, 1.0);
-  flag.translate(0.8, 9.9, 0);
-  return [
-    { geo: merge([pole, base, ball]), role: 'metal' },
-    { geo: flag, role: 'metal' },
-  ];
+  return [{ geo: merge([pole, base, ball]), role: 'metal' }];
 }
 
 /** Radio / antenna mast with guy-wire-ish bracing. */

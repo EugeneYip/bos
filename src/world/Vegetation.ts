@@ -3,7 +3,7 @@ import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord, PropSet, RoadRecord } from '../core/types';
 import { loadAreas, loadProps, loadRoads } from '../core/data';
 import { SPECIES, autumnFactor } from './vegetation/species';
-import { buildTreeLods, type TreeGeometry } from './vegetation/geometry';
+import { buildTreeLods, midCardMeters, type TreeGeometry } from './vegetation/geometry';
 import { createSharedUniforms, createVegMaterial, type Lod, type SharedUniforms } from './vegetation/material';
 import { buildTextures, disposeTextures, type VegTextures } from './vegetation/textures';
 import { LandMask } from './vegetation/landmask';
@@ -57,9 +57,9 @@ interface SpeciesTier {
 }
 
 /** Tier reach, metres. The near tier has to cover a street; the mid, a park. */
-const NEAR_RADIUS = 90;
-const MID_RADIUS = 270;
-const FADE_BAND = 28;
+const NEAR_RADIUS = 145;
+const MID_RADIUS = 300;
+const FADE_BAND = 30;
 const GRID_CELL = 64;
 const FAR_TILES = 4;
 
@@ -123,8 +123,14 @@ export class Vegetation implements WorldModule {
 
     const aniso = Math.min(ctx.quality.anisotropy, ctx.renderer.capabilities.getMaxAnisotropy());
     const hiRes = ctx.tier === 'high' || ctx.tier === 'ultra';
-    this.textures = buildTextures(SPECIES, aniso, hiRes);
+    this.textures = buildTextures(SPECIES, aniso, hiRes, SPECIES.map(midCardMeters));
     const tex = this.textures;
+    console.info('[VegDiag] mean', JSON.stringify({
+      bark: [...tex.mean.bark.entries()], leaf: tex.mean.leaf.map((v) => +v.toFixed(3)),
+      clump: tex.mean.clump.map((v) => +v.toFixed(3)),
+      imp: tex.mean.impostor.map((v) => +v.toFixed(3)),
+      grass: tex.mean.grass, shrub: tex.mean.shrub,
+    }));
     const tGeo = performance.now();
 
     this.buildGrid(field);
@@ -152,7 +158,7 @@ export class Vegetation implements WorldModule {
     }
 
     this.ground = new GroundCover(this.mask, this.root);
-    this.ground.build(ctx, this.shared, tex.grass, tex.shrub);
+    this.ground.build(ctx, this.shared, tex.grass, tex.shrub, tex.mean.grass, tex.mean.shrub);
 
     this.shared.season.value = autumnFactor(ctx.dayOfYear);
     this.rebuild(ctx);
@@ -190,16 +196,25 @@ export class Vegetation implements WorldModule {
       far: { in: MID_RADIUS - FADE_BAND, out: 1e9 },
     }[lod];
 
+    // Each tier gets art authored for its own card size: near cards carry
+    // life-size leaves, mid cards carry a 4 m clump of them with the form
+    // lighting baked in, and the impostor carries the whole tree.
+    const map = lod === 'far' ? tex.impostor[s] : lod === 'mid' ? tex.clump[s] : tex.leaf[s];
+    const mapMean = lod === 'far' ? tex.mean.impostor[s]
+      : lod === 'mid' ? tex.mean.clump[s] : tex.mean.leaf[s];
+
     const leaf = createVegMaterial({
       species: sp,
       lod,
       role: 'leaf',
-      map: lod === 'far' ? tex.impostor[s] : tex.leaf[s],
+      map,
       shared: this.shared,
       fadeIn: fade.in,
       fadeOut: fade.out,
       fadeBand: FADE_BAND,
       envMapIntensity: lod === 'far' ? 1.5 : 1.15,
+      canopy: lod === 'far' ? 0.26 : 0.42,
+      mapMean,
     }).material;
     void ctx;
 
@@ -214,7 +229,15 @@ export class Vegetation implements WorldModule {
       fadeIn: fade.in,
       fadeOut: fade.out,
       fadeBand: FADE_BAND,
-      envMapIntensity: 1,
+      envMapIntensity: 1.3,
+      // A trunk stands under its own crown. Nothing in the renderer knows
+      // that, and its screen-space occlusion assumes the worst, so without a
+      // skylight floor every trunk on the Common is a black post. Measured on
+      // the Commonwealth Avenue Mall, 0.85 still left the elm boles at nine of
+      // 255 with two thirds of their pixels below the grade pass's grain
+      // floor, i.e. no bark at all.
+      canopy: 1.3,
+      mapMean: tex.mean.bark.get(sp.bark),
     }).material;
     return [bark, leaf];
   }
@@ -361,15 +384,29 @@ export class Vegetation implements WorldModule {
 
   private static _m = new THREE.Matrix4();
   private static _q = new THREE.Quaternion();
+  private static _qt = new THREE.Quaternion();
   private static _up = new THREE.Vector3(0, 1, 0);
+  private static _ax = new THREE.Vector3();
   private static _p = new THREE.Vector3();
   private static _s = new THREE.Vector3();
 
+  /**
+   * One species is one mesh, so every red maple on the Common is the same
+   * geometry. Yaw alone does not hide that — but a tree leans, and a few
+   * degrees of lean about a random axis, different for every individual, does.
+   */
   private write(field: TreeField, mesh: THREE.InstancedMesh, slot: number, i: number): void {
     const h = field.height[i];
     const w = field.width[i] * h;
     Vegetation._p.set(field.px[i], field.py[i], field.pz[i]);
     Vegetation._q.setFromAxisAngle(Vegetation._up, field.rot[i]);
+    const tilt = field.tilt[i];
+    if (tilt !== 0) {
+      const a = field.tiltAz[i];
+      Vegetation._ax.set(Math.cos(a), 0, Math.sin(a));
+      Vegetation._qt.setFromAxisAngle(Vegetation._ax, tilt);
+      Vegetation._q.premultiply(Vegetation._qt);
+    }
     Vegetation._s.set(w, h, w);
     Vegetation._m.compose(Vegetation._p, Vegetation._q, Vegetation._s);
     mesh.setMatrixAt(slot, Vegetation._m);

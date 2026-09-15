@@ -48,6 +48,10 @@ const RAW = [
   ['old-state-house', ['old state house'], 42.3588, -71.0576, 150],
   ['boston-city-hall', ['boston city hall', 'city hall'], 42.3603, -71.0578, 220],
   ['td-garden', ['td garden', 'td banknorth garden', 'boston garden'], 42.3662, -71.0621, 300],
+  // OpenStreetMap traces the ship herself as `building=yes` + `historic=ship`
+  // (w166151194), so without this she extrudes as a 62 x 11 m, 9.6 m tall
+  // plaster slab in the middle of the hand-authored frigate.
+  ['uss-constitution', ['uss constitution'], 42.3724, -71.0566, 120],
 ];
 
 const TABLE = RAW.filter((e) => e[4] > 0).map(([slug, names, lat, lon, r, tag]) => {

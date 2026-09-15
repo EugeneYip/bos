@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import type { Ctx, WorldModule } from '../core/Context';
-import type { AreaKind, AreaRecord } from '../core/types';
-import { loadAreas } from '../core/data';
+import type { AreaKind, AreaRecord, PropSet } from '../core/types';
+import { loadAreas, loadProps } from '../core/data';
+import { applyAntiTiling } from '../materials/Materials';
 import { earcut } from './buildings/earcut';
 
 /**
@@ -15,20 +16,48 @@ import { earcut } from './buildings/earcut';
  * surface. It is a decal layer, which is a normal way to do land use anyway:
  * the polygon edges come out crisp instead of filtered through a 4.5 m
  * raster, and each kind gets its own colour and texture scale.
+ *
+ * Three things make the difference between "a green polygon" and ground:
+ *
+ *  - **No tile lattice.** The library's hex-cell stochastic sampler is
+ *    compiled in, because a lawn is the worst possible surface for a repeating
+ *    tile: it is seen at a grazing angle, it fills half the frame, and the eye
+ *    finds the grid instantly. With a 4.5 m repeat it read as corduroy.
+ *  - **An albedo that means something.** The library's ground maps are
+ *    authored dark and the tint used to be divided through by their mean,
+ *    which multiplied the map's *peaks* to six times the colour asked for and
+ *    clipped Boston Common to a sheet of fluorescent green. The map is now
+ *    reduced to a luminance-preserving modulation around 1 and the vertex tint
+ *    is the albedo, full stop.
+ *  - **Wear.** Real parkland is not uniform. It is bare and compacted under
+ *    the big trees and scuffed to earth wherever people cut a corner, and the
+ *    bare ground has to land under the *actual* trees — so the same tree
+ *    points the Vegetation module plants are splatted into a canopy raster and
+ *    handed to the shader.
  */
 
 /** Kinds worth drawing, with a base colour and how big the texture tiles. */
 const GREEN: Partial<Record<AreaKind, { color: number; tile: number; surface: string }>> = {
-  park:     { color: 0x4f7a3c, tile: 5.5, surface: 'grass' },
-  grass:    { color: 0x55823f, tile: 5.5, surface: 'grass' },
-  forest:   { color: 0x33542c, tile: 6.5, surface: 'grass' },
-  cemetery: { color: 0x4c7540, tile: 5.5, surface: 'grass' },
-  golf:     { color: 0x5b8a41, tile: 6.0, surface: 'grass' },
-  pitch:    { color: 0x4a7a46, tile: 4.5, surface: 'grass' },
-  wetland:  { color: 0x556b3a, tile: 6.0, surface: 'grass' },
-  beach:    { color: 0xc2ae86, tile: 4.0, surface: 'sand' },
-  sand:     { color: 0xc4b089, tile: 4.0, surface: 'sand' },
+  park:     { color: 0x5d7040, tile: 4.5, surface: 'grass' },
+  grass:    { color: 0x64784a, tile: 4.5, surface: 'grass' },
+  forest:   { color: 0x41522f, tile: 5.5, surface: 'grass' },
+  cemetery: { color: 0x5b7042, tile: 4.5, surface: 'grass' },
+  golf:     { color: 0x66803f, tile: 5.0, surface: 'grass' },
+  pitch:    { color: 0x5a7440, tile: 4.0, surface: 'grass' },
+  wetland:  { color: 0x5c6739, tile: 5.0, surface: 'grass' },
+  beach:    { color: 0xbfae8c, tile: 4.0, surface: 'sand' },
+  sand:     { color: 0xc1b08f, tile: 4.0, surface: 'sand' },
 };
+
+/**
+ * Bare, compacted soil: what a lawn turns into under a closed crown.
+ *
+ * Dry trodden earth in dappled shade is around 0.09 linear, not 0.06 — and
+ * because the post chain's screen-space occlusion multiplies the *whole*
+ * shaded colour under a canopy rather than only its indirect part, anything
+ * darker than this reads as a hole in the ground rather than as soil.
+ */
+const SOIL = new THREE.Vector3(0.088, 0.068, 0.047);
 
 /**
  * Lift above the terrain, metres. The terrain uses continuous-LOD morphing,
@@ -44,17 +73,37 @@ const LIFT = 0.22;
  * re-sampling the terrain at every new vertex makes the surface follow it.
  *
  * Boston's parks are gentle, so 38 m is plenty: at 18 m the city's greenery
- * alone cost 444k triangles of dead-flat ground for no visible gain.
+ * alone cost 444k triangles of dead-flat ground for no visible gain. Every
+ * sub-38 m variation — patchiness, wear, bare ground under the canopy — is a
+ * shader term instead, which is both cheaper and sharper.
  */
 const MAX_EDGE = 38;
 /**
  * Mean linear luminance of the library's ground albedo maps, measured off the
- * baked textures. Vertex tints are divided by it so the product lands on the
- * colour actually asked for rather than on its square.
+ * baked textures. The shader divides the sampled map through by it to get a
+ * modulation whose mean is 1, so the vertex tint survives as the albedo.
  */
 const MAP_MEAN = 0.075;
 /** Ceiling on the subdivided triangle count, city-wide. */
 const TRI_BUDGET = 220000;
+
+/** Canopy raster cell, metres. A crown is 8-14 m across, so this resolves one. */
+const CANOPY_CELL = 6;
+/** Weight one tree deposits into the accumulator: 4 on its cell, 1 on each neighbour. */
+const STAMP_W = 12;
+/** 9 blur taps x STAMP_W, divided by (crown area / cell area) ~ 78/36. */
+const COVER_DIV = (9 * STAMP_W) / (78 / (CANOPY_CELL * CANOPY_CELL));
+/** Un-occluded skylight floor for park ground. See `surfaceMaterial`. */
+const SKY_FLOOR = 0.55;
+
+interface CanopyField {
+  tex: THREE.DataTexture;
+  /** World-space origin and 1/(size in metres), for the UV transform. */
+  originX: number;
+  originZ: number;
+  invW: number;
+  invH: number;
+}
 
 export class Parks implements WorldModule {
   readonly name = 'Parks';
@@ -62,6 +111,7 @@ export class Parks implements WorldModule {
   private meshes: THREE.Mesh[] = [];
   private materials: THREE.Material[] = [];
   private triCount = 0;
+  private canopy?: CanopyField;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'parks';
@@ -73,6 +123,12 @@ export class Parks implements WorldModule {
     } catch (err) {
       console.warn('[Parks] no area data; skipping', err);
       return;
+    }
+    // Shared with Vegetation and already cached by the loader, so this is free.
+    try {
+      this.canopy = buildCanopy(await loadProps());
+    } catch {
+      /* no props: the lawn just comes out uniformly unshaded. */
     }
 
     // One bucket per surface so the whole city's greenery is a couple of draws.
@@ -96,14 +152,11 @@ export class Parks implements WorldModule {
       if (!b) { b = { pos: [], uv: [], col: [], idx: [] }; buckets.set(spec.surface, b); }
 
       // Deterministic per-polygon shade so neighbouring lawns are not
-      // identical. The vertex colour multiplies the map, and the library's
-      // ground maps are authored dark (grass averages ~0.06 linear), so the
-      // tint is divided through by that mean — otherwise two dark values
-      // multiply together and the lawn comes out black.
+      // identical. The vertex colour *is* the albedo now — the shader hands it
+      // a mean-1 modulation rather than a dark map to fight with.
       const jitter = hash01(rec.id) * 0.22 - 0.11;
       const c = new THREE.Color(spec.color).convertSRGBToLinear();
-      c.offsetHSL(jitter * 0.04, jitter * 0.12, jitter * 0.10);
-      c.multiplyScalar(1 / MAP_MEAN);
+      c.offsetHSL(jitter * 0.05, jitter * 0.14, jitter * 0.10);
 
       // Emit as independent, terrain-sampled triangles: vertices are not
       // shared, which costs a little memory but lets each triangle subdivide
@@ -117,12 +170,7 @@ export class Parks implements WorldModule {
           // World-metre UVs, so texture scale is physical and seamless across
           // polygon boundaries.
           b!.uv.push(x / spec.tile, z / spec.tile);
-          // Low-frequency patchiness at a scale the texture repeat cannot
-          // match, which is what stops the lawn reading as a tiled grid.
-          const n = valueNoise(x * 0.021, z * 0.021) * 0.30
-                  + valueNoise(x * 0.085, z * 0.085) * 0.14;
-          const k = 0.80 + n;
-          b!.col.push(c.r * k, c.g * k, c.b * k);
+          b!.col.push(c.r, c.g, c.b);
         }
         b!.idx.push(base, base + 1, base + 2);
         this.triCount++;
@@ -140,7 +188,6 @@ export class Parks implements WorldModule {
       area += tri.area;
     }
 
-    const anyLib = ctx.materials;
     for (const [surface, b] of buckets) {
       if (!b.idx.length) continue;
       const g = new THREE.BufferGeometry();
@@ -153,40 +200,7 @@ export class Parks implements WorldModule {
       g.computeVertexNormals();
       g.computeBoundingSphere();
 
-      // Borrow the shared library's surface so parks match the rest of the
-      // ground, falling back to a plain tinted material if it is unavailable.
-      // Pull the map from the *material*: asking the library for a material
-      // forces the family to bake, whereas its TextureSet may still be empty.
-      let mat: THREE.MeshStandardMaterial;
-      const src = anyLib.get(surface) as THREE.MeshStandardMaterial | undefined;
-      const set = anyLib.textures(surface);
-      const map = src?.map ?? set?.map ?? null;
-      if (map) {
-        mat = new THREE.MeshStandardMaterial({
-          name: `park:${surface}`,
-          map, normalMap: src?.normalMap ?? set?.normalMap ?? null,
-          roughnessMap: src?.roughnessMap ?? set?.roughnessMap ?? null,
-          roughness: 1, metalness: 0, vertexColors: true,
-          // Ear-clipping in the XZ plane and then treating it as a Y-up
-          // surface flips the handedness, so these come out back-facing and
-          // FrontSide culls the lot — the same trap the water fell into.
-          side: THREE.DoubleSide,
-          polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
-        });
-      } else {
-        // No map to multiply against, so the tint has to come back down by the
-        // mean it was divided by. Without this the fallback renders at 1/0.075
-        // — thirteen times the colour asked for — and the surface clips to a
-        // flat saturated ribbon. It is easy to miss, because until the parks
-        // stopped shadowing themselves the whole layer was too dark to see.
-        console.warn(`[Parks] no albedo map for '${surface}'; using flat tint`);
-        mat = new THREE.MeshStandardMaterial({
-          name: `park:${surface}`, roughness: 0.95, metalness: 0, vertexColors: true,
-          color: new THREE.Color(MAP_MEAN, MAP_MEAN, MAP_MEAN),
-          side: THREE.DoubleSide,
-          polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
-        });
-      }
+      const mat = this.surfaceMaterial(ctx, surface);
       this.materials.push(mat);
 
       const mesh = new THREE.Mesh(g, mat);
@@ -211,6 +225,154 @@ export class Parks implements WorldModule {
       `[Parks] ${drawn} polygons, ${Math.round(area / 10000)} ha, ` +
       `${this.triCount} tris, ${this.meshes.length} draws`,
     );
+  }
+
+  // -------------------------------------------------------------------------
+
+  /**
+   * The ground surface for one land-use family.
+   *
+   * Borrows the shared library's baked maps so parks match the rest of the
+   * ground, with the hex-cell stochastic sampler compiled in, the map's
+   * contrast reduced to a modulation, and the canopy/wear field applied on
+   * top. Falls back to a plain tinted material if the library has nothing.
+   */
+  private surfaceMaterial(ctx: Ctx, surface: string): THREE.MeshStandardMaterial {
+    // Pull the map from the *material*: asking the library for a material
+    // forces the family to bake, whereas its TextureSet may still be empty.
+    const src = ctx.materials.get(surface) as THREE.MeshStandardMaterial | undefined;
+    const set = ctx.materials.textures(surface);
+    const map = src?.map ?? set?.map ?? null;
+
+    if (!map) {
+      // No map to modulate, so the tint is used directly.
+      console.warn(`[Parks] no albedo map for '${surface}'; using flat tint`);
+      return new THREE.MeshStandardMaterial({
+        name: `park:${surface}`, roughness: 0.95, metalness: 0, vertexColors: true,
+        side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
+      });
+    }
+
+    const mat = new THREE.MeshStandardMaterial({
+      name: `park:${surface}`,
+      map,
+      normalMap: src?.normalMap ?? set?.normalMap ?? null,
+      roughnessMap: src?.roughnessMap ?? set?.roughnessMap ?? null,
+      roughness: 1, metalness: 0, vertexColors: true,
+      // Ear-clipping in the XZ plane and then treating it as a Y-up surface
+      // flips the handedness, so these come out back-facing and FrontSide
+      // culls the lot — the same trap the water fell into.
+      side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
+    });
+    // Ground seen at a grazing angle over-reads slope enormously, and a lawn
+    // has about 10 mm of relief. At the library's strength the near field
+    // turned to corduroy the moment the sun got low.
+    mat.normalScale = new THREE.Vector2(0.28, 0.28);
+
+    // Small hex cells and a soft blend: a lawn has no structure to protect, so
+    // the more aggressively the lattice is broken up the better. This also
+    // installs `bosWorldPos` and `bosAtValue`, which the wear term uses.
+    applyAntiTiling(mat, {
+      hexScale: 0.3, hexContrast: 4, macroMeters: 52, macroStrength: 0.2,
+    });
+
+    const canopy = this.canopy;
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = (shader, renderer) => {
+      prev.call(mat, shader, renderer);
+      shader.uniforms.uSoil = { value: SOIL };
+      shader.uniforms.uWear = { value: surface === 'sand' ? 0 : 1 };
+      shader.uniforms.uSky = { value: SKY_FLOOR };
+      shader.uniforms.uCanopyMap = { value: canopy?.tex ?? null };
+      shader.uniforms.uCanopyXf = {
+        value: canopy
+          ? new THREE.Vector4(canopy.originX, canopy.originZ, canopy.invW, canopy.invH)
+          : new THREE.Vector4(0, 0, 0, 0),
+      };
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', /* glsl */ `
+          #include <common>
+          uniform vec3  uSoil;
+          uniform float uWear;
+          uniform float uSky;
+          uniform vec4  uCanopyXf;
+          #ifdef PARK_CANOPY
+            uniform sampler2D uCanopyMap;
+          #endif
+          // Set in <color_fragment>, read in <lights_fragment_maps>. The
+          // fragment shader runs the two in that order, so a plain global is
+          // enough and no varying is needed.
+          float parkShade = 0.0;
+        `)
+        .replace('#include <color_fragment>', /* glsl */ `
+        {
+          // The map arrives as an albedo authored around a mean of ${MAP_MEAN.toFixed(3)}
+          // linear. Reduce it to a luminance-preserving modulation whose mean
+          // is 1 and whose contrast is square-rooted, so the vertex colour
+          // that follows lands on the albedo actually asked for instead of on
+          // six times its peak.
+          float parkLum = max( dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-4 );
+          vec3 parkHue = diffuseColor.rgb / parkLum;
+          float parkK = clamp( sqrt( parkLum / ${MAP_MEAN.toFixed(4)} ), 0.42, 1.9 );
+          diffuseColor.rgb = mix( vec3( 1.0 ), parkHue, 0.4 ) * parkK;
+        }
+        #include <color_fragment>
+        {
+          // Patchiness at wavelengths the texture repeat cannot reach: this is
+          // the difference between a lawn and a billiard cloth.
+          vec2 pw = bosWorldPos.xz;
+          float parkPatch = bosAtValue( pw * 0.019 ) * 0.62 + bosAtValue( pw * 0.078 ) * 0.26
+                      + bosAtValue( pw * 0.31 ) * 0.12;
+          diffuseColor.rgb *= 0.74 + 0.52 * parkPatch;
+
+          float shade = 0.0;
+          #ifdef PARK_CANOPY
+            vec2 cuv = ( pw - uCanopyXf.xy ) * uCanopyXf.zw;
+            shade = texture2D( uCanopyMap, cuv ).r;
+          #endif
+          parkShade = shade;
+          // Bare ground. Dense shade thins the turf; so does being walked on,
+          // and a slow noise field stands in for the desire paths and worn
+          // corners that every real lawn has.
+          //
+          // Both terms are deliberately restrained. Boston Common is a lawn
+          // with worn patches, not a dust bowl, and it has to read green from
+          // three thousand feet: at 0.72 of shade capped at 0.86, the whole of
+          // the Common and the Public Garden came out olive-brown from the air
+          // and khaki at eye level.
+          float trample = smoothstep( 0.66, 0.97, bosAtValue( pw * 0.026 + 41.3 ) );
+          float bare = clamp( shade * 0.46 + trample * 0.38, 0.0, 0.58 ) * uWear;
+          diffuseColor.rgb = mix( diffuseColor.rgb, uSoil * ( 0.7 + 0.6 * parkPatch ), bare );
+          // …and it is damper and more overhung, so it is darker too.
+          diffuseColor.rgb *= 1.0 - 0.10 * shade * uWear;
+        }
+        `)
+        // Skylight that the post chain's occlusion has no business removing.
+        //
+        // A lawn in the shade of a tree still sees most of the sky, so it sits
+        // about three stops under the sunlit lawn beside it. Measured, Boston
+        // Common's shaded turf was *five* stops down — 11 of 255, under the
+        // grade pass's grain floor, so every bit of albedo, wear and blade
+        // detail in this file and in `groundcover.ts` was being thrown away.
+        // Screen-space occlusion multiplies the whole shaded colour rather
+        // than its indirect part, and the canopy overhead drives it to almost
+        // nothing. This floor is tinted green because light that has come
+        // through a canopy is green, and it is strongest where the canopy is.
+        .replace('#include <lights_fragment_maps>', /* glsl */ `
+          #include <lights_fragment_maps>
+          #if defined( USE_ENVMAP ) && defined( ENVMAP_TYPE_CUBE_UV )
+            iblIrradiance += getIBLIrradiance( vec3( 0.0, 1.0, 0.0 ) )
+              * vec3( 0.80, 1.0, 0.74 ) * uSky * ( 0.30 + 0.70 * parkShade );
+          #endif
+        `);
+    };
+    mat.defines = mat.defines ?? {};
+    if (canopy) (mat.defines as Record<string, unknown>).PARK_CANOPY = '';
+    const prevKey = mat.customProgramCacheKey;
+    mat.customProgramCacheKey = () => `park|${surface}|${canopy ? 1 : 0}|${prevKey.call(mat)}`;
+    return mat;
   }
 
   /** Ear-clip a land-use polygon, holes included, into a draped surface. */
@@ -263,8 +425,113 @@ export class Parks implements WorldModule {
     ctx.scene.remove(this.root);
     for (const m of this.meshes) m.geometry.dispose();
     for (const m of this.materials) m.dispose();
+    this.canopy?.tex.dispose();
+    this.canopy = undefined;
     this.meshes.length = 0;
   }
+}
+
+/**
+ * Splat the city's tree points into a coarse cover raster and upload it.
+ *
+ * Two passes: one to accumulate crowns, one 3x3 box blur, so the field is
+ * smooth enough for a bilinear lookup not to show the cell grid. 6 m cells
+ * over Boston is about 1.4 MB, which buys per-pixel bare ground under every
+ * tree in the city for one texture fetch.
+ */
+function buildCanopy(sets: PropSet[]): CanopyField | undefined {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  let n = 0;
+  for (const s of sets) {
+    if (s.kind !== 'tree') continue;
+    const m = s.positions.length / 3;
+    n += m;
+    for (let i = 0; i < m; i++) {
+      const x = s.positions[i * 3];
+      const z = s.positions[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  if (!n || !isFinite(minX)) return undefined;
+
+  const pad = CANOPY_CELL * 4;
+  const x0 = minX - pad;
+  const z0 = minZ - pad;
+  const nx = Math.ceil((maxX + pad - x0) / CANOPY_CELL) + 1;
+  const nz = Math.ceil((maxZ + pad - z0) / CANOPY_CELL) + 1;
+  const acc = new Uint16Array(nx * nz);
+
+  // One crown covers roughly a 12 m disc, so stamp the cell and its
+  // neighbours with a falling weight.
+  for (const s of sets) {
+    if (s.kind !== 'tree') continue;
+    const m = s.positions.length / 3;
+    for (let i = 0; i < m; i++) {
+      const ci = Math.floor((s.positions[i * 3] - x0) / CANOPY_CELL);
+      const cj = Math.floor((s.positions[i * 3 + 2] - z0) / CANOPY_CELL);
+      for (let dj = -1; dj <= 1; dj++) {
+        const jj = cj + dj;
+        if (jj < 0 || jj >= nz) continue;
+        const row = jj * nx;
+        for (let di = -1; di <= 1; di++) {
+          const ii = ci + di;
+          if (ii < 0 || ii >= nx) continue;
+          acc[row + ii] += di === 0 && dj === 0 ? 4 : 1;
+        }
+      }
+    }
+  }
+
+  const out = new Uint8Array(nx * nz);
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      let sum = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        const jj = j + dj;
+        if (jj < 0 || jj >= nz) continue;
+        const row = jj * nx;
+        for (let di = -1; di <= 1; di++) {
+          const ii = i + di;
+          if (ii < 0 || ii >= nx) continue;
+          sum += acc[row + ii];
+        }
+      }
+      // Turn the weighted stamp count into a crown *coverage fraction*, which
+      // is the only normalisation that does not have to be retuned when the
+      // tree count changes.
+      //
+      // Each tree contributes STAMP_W to `acc` spread over its 3x3, and the
+      // blur sums a further 3x3, so `sum / (9 * STAMP_W)` is the weighted
+      // number of tree centres attributable to one cell. Multiplying by
+      // (crown area / cell area) — about 78 m² over 36 m² — gives coverage.
+      //
+      // Measured against the shipped 88 229 tree points this puts the median
+      // treed cell at 0.18 and the densest 1 % at 0.76, which is what a park
+      // actually looks like. The 20 this replaced saturated at the 90th
+      // percentile, so a tenth of every green surface in the city was pinned
+      // at "fully closed canopy".
+      out[j * nx + i] = Math.min(255, Math.round((sum / COVER_DIV) * 255));
+    }
+  }
+
+  const tex = new THREE.DataTexture(out, nx, nz, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.name = 'parks:canopy';
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return {
+    tex,
+    originX: x0,
+    originZ: z0,
+    invW: 1 / (nx * CANOPY_CELL),
+    invH: 1 / (nz * CANOPY_CELL),
+  };
 }
 
 /**
@@ -300,21 +567,6 @@ function subdivide(
 }
 
 /** Bounding-box area, used only to order the work. */
-/** Cheap smooth value noise in [0,1), for ground patchiness. */
-function valueNoise(x: number, z: number): number {
-  const xi = Math.floor(x), zi = Math.floor(z);
-  const xf = x - xi, zf = z - zi;
-  const h = (a: number, b: number): number => {
-    let n = Math.imul(a, 374761393) ^ Math.imul(b, 668265263);
-    n = Math.imul(n ^ (n >>> 13), 1274126177);
-    return ((n ^ (n >>> 16)) >>> 8) / 16777216;
-  };
-  const sx = xf * xf * (3 - 2 * xf);
-  const sz = zf * zf * (3 - 2 * zf);
-  const a = h(xi, zi), b = h(xi + 1, zi), c = h(xi, zi + 1), d = h(xi + 1, zi + 1);
-  return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sz;
-}
-
 function extentOf(r: number[]): number {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (let i = 0; i < r.length; i += 2) {
@@ -324,15 +576,6 @@ function extentOf(r: number[]): number {
     if (r[i + 1] > maxZ) maxZ = r[i + 1];
   }
   return (maxX - minX) * (maxZ - minZ);
-}
-
-function pointInRing(r: number[], x: number, z: number): boolean {
-  let inside = false;
-  for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) {
-    const xi = r[i], zi = r[i + 1], xj = r[j], zj = r[j + 1];
-    if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
-  }
-  return inside;
 }
 
 function hash01(s: string): number {

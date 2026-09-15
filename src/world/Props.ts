@@ -3,6 +3,7 @@ import type { Ctx, WorldModule } from '../core/Context';
 import type { PropSet } from '../core/types';
 import { loadProps } from '../core/data';
 import { buildKind, type Part, type Role } from './props/kinds';
+import { FlagField } from './props/Flags';
 
 /**
  * Boston's street furniture: 10,853 lamps, benches, signals, bollards,
@@ -11,6 +12,13 @@ import { buildKind, type Part, type Role } from './props/kinds';
  * One `InstancedMesh` per (kind, variant, material role). At these counts that
  * is a few dozen draw calls total, so there is no need for the tiered LOD the
  * 88k trees require — just distance culling on the small stuff.
+ *
+ * Also the city's flags, which are not point features in the data at all:
+ * `props/Flags.ts` derives its own mounting points from the building
+ * footprints, because a flag belongs to a facade and not to a pavement. The
+ * 132 flagpoles OSM *does* map are a different matter — those get their pole
+ * from `kinds.ts` and their flag from the Traffic module, which has flown one
+ * from each of them since before this module had a cloth shader.
  */
 
 /** Beyond this, an object of the given size is under a pixel; stop drawing it. */
@@ -45,6 +53,7 @@ export class Props implements WorldModule {
   private materials = new Map<Role, THREE.Material>();
   private nightLit: THREE.MeshStandardMaterial[] = [];
   private lastCull = new THREE.Vector3(1e9, 1e9, 1e9);
+  private flags = new FlagField();
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'props';
@@ -122,6 +131,16 @@ export class Props implements WorldModule {
 
     ctx.stats.props = total;
     console.info(`[Props] ${total} props in ${this.buckets.length} instanced meshes`);
+
+    // Flags come last: they have to fetch and index the building footprints,
+    // and nothing else in the module waits on them.
+    try {
+      await this.flags.build(ctx, this.material(ctx, 'metal'));
+      ctx.stats.flags =
+        this.flags.counts.staff + this.flags.counts.pole + this.flags.counts.banner;
+    } catch (err) {
+      console.warn('[Props] flags failed to build', err);
+    }
   }
 
 
@@ -178,7 +197,8 @@ export class Props implements WorldModule {
     return m;
   }
 
-  update(_dt: number, ctx: Ctx): void {
+  update(dt: number, ctx: Ctx): void {
+    this.flags.update(dt, ctx);
     if (!this.buckets.length) return;
 
     // Lamps and signals come up after civil twilight, matching the landmarks'
@@ -215,6 +235,7 @@ export class Props implements WorldModule {
 
   dispose(ctx: Ctx): void {
     ctx.scene.remove(this.root);
+    this.flags.dispose(ctx);
     for (const b of this.buckets) b.mesh.geometry.dispose();
     for (const m of this.materials.values()) m.dispose();
     this.buckets.length = 0;

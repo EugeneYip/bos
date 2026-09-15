@@ -12,9 +12,9 @@
  *  2. 'WATER_WAVE_GLSL' — the gravity-wave spectrum. Wavelengths are real
  *     metres and the angular frequency comes from the deep-water dispersion
  *     relation w = sqrt(g k), so a 88 m swell travels at 11.7 m/s, which is
- *     what water actually does. Fetch squeezes the whole spectrum: the
- *     impounded Charles gets 6-34 m chop a few centimetres high, the outer
- *     harbour gets a 0.3 m, 88 m swell.
+ *     what water actually does. Fetch squeezes the whole spectrum, length
+ *     harder than height: the impounded Charles gets 3.5-21 m chop about
+ *     16 cm high, the outer harbour a 0.3 m, 88 m swell.
  *  3. 'WATER_GLOW_GLSL' / 'WATER_BRDF_GLSL' — Boston's own skyglow and the
  *     dielectric response. The sky itself comes from 'ctx.aerial'.
  */
@@ -133,9 +133,18 @@ WaveOut oceanWaves(
 ) {
   float f = clamp(fetch, 0.0, 1.0);
   float fs = f * f * (3.0 - 2.0 * f);
-  // Short fetch shortens the waves a lot and flattens them a great deal more.
+  // Fetch-limited growth: H ~ U sqrt(F), lambda ~ F^(2/3). Between the Charles
+  // (about 1.2 km of fetch) and the outer harbour (25 km) that is a length
+  // ratio near 0.13 and a *height* ratio near 0.22 — so the short-fetch sea is
+  // shorter than it is flat, which is the same thing as saying a young wind
+  // sea is steep. The 0.155 floor on length is right. The floor on height was
+  // 0.030 and squared the shaping term on top of that, which put the basin at
+  // four per cent: waves about a centimetre high on wavelengths of twenty
+  // metres. That is a mirror, and it is why the Charles had no structure left
+  // at any distance where the detail octaves had faded out — the long waves
+  // are the only thing that survives to a kilometre.
   float lenS = mix(0.155, 1.0, fs);
-  float ampS = mix(0.030, 1.0, fs * fs) * amp * energy;
+  float ampS = mix(0.20, 1.0, fs) * amp * energy;
 
   vec4 tab[4];
   tab[0] = WAVE_0; tab[1] = WAVE_1; tab[2] = WAVE_2; tab[3] = WAVE_3;
@@ -237,14 +246,33 @@ float fresnelWater(float NoV, float rough) {
 }
 
 /**
- * Anisotropic GGX NDF (Burley, via Filament). 'ax' runs along the wind, which
- * is what smears a low sun into a long glitter path instead of a round blob.
+ * Anisotropic Beckmann NDF — a *Gaussian* distribution of surface slopes.
+ *
+ * This is Cox & Munk's 1954 measurement of the sea surface, and it is not
+ * interchangeable with GGX here. GGX carries a Cauchy-like tail: at eighty
+ * degrees off the mirror direction it still returns about one per cent of its
+ * peak, which is the response of a surface containing forty-degree facets. The
+ * sea contains no such facets. With the sun *behind* the camera — the Charles
+ * at five in the afternoon, the harbour at half past eight in the morning —
+ * that tail was painting the whole surface with a warm off-specular wash, and
+ * because 'sparkle' multiplies it by anything from a ninth to three times, the
+ * wash arrived as a field of tan dashes: measured at 28 per cent of the
+ * river's brightness in a view that should have had no glitter in it at all.
+ *
+ * A Gaussian falls off as exp(-s^2), so the same geometry returns exp(-961),
+ * i.e. nothing, while the peak is untouched: at NoH = 1 both distributions are
+ * exactly 1 / (PI * ax * ay), so a real glitter path keeps its brightness and
+ * its wind-aligned stretch. 'ax' runs along the wind and is, to within a root
+ * two, the rms slope of the facets the lobe is made of.
  */
-float ggxAniso(float NoH, float ToH, float BoH, float ax, float ay) {
-  vec3 v = vec3(ay * ToH, ax * BoH, ax * ay * NoH);
-  float v2 = dot(v, v);
-  float w2 = (ax * ay) / max(v2, 1e-9);
-  return ax * ay * w2 * w2 * (1.0 / PI);
+float beckmannAniso(float NoH, float ToH, float BoH, float ax, float ay) {
+  float c = max(NoH, 1e-4);
+  // Half-vector slope, i.e. tan(theta_h) resolved onto the wind axes.
+  float sx = ToH / c;
+  float sy = BoH / c;
+  float e = sx * sx / (ax * ax) + sy * sy / (ay * ay);
+  float c2 = c * c;
+  return exp(-e) / (PI * ax * ay * c2 * c2);
 }
 
 float smithVis(float NoV, float NoL, float a) {

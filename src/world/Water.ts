@@ -79,7 +79,11 @@ export class Water implements WorldModule {
     field.buildTextures();
     this.field = field;
 
-    this.textures = buildWaterTextures(ctx.quality.anisotropy, 256);
+    // 512² is worth it: the atlas is laid down at four different tile sizes and
+    // the eye finds a repeat in a 256² map long before the fades hide it.
+    this.textures = buildWaterTextures(
+      ctx.quality.anisotropy, ctx.quality.anisotropy >= 8 ? 512 : 256,
+    );
 
     const surf = buildSurfaces(this.bodies, field, FIELD_TEXEL, CHUNK);
     const skirt = buildOceanSkirt(field, rect, SEA_LEVEL);
@@ -195,6 +199,10 @@ export class Water implements WorldModule {
         uWaveAmp: { value: 0.92 },
         uPeak: { value: 0.42 },
         uCellSize: { value: FIELD_TEXEL },
+        // How hard the detail cascade pushes each octave back along the slope
+        // of the one above it. This is the horizontal half of a Gerstner
+        // displacement and it is what turns rounded bumps into chop.
+        uChop: { value: 1.35 },
         uRippleGain: { value: 1 },
         uGlitter: { value: 1 },
         uFoamGain: { value: 1 },
@@ -224,8 +232,12 @@ export class Water implements WorldModule {
         // Nothing here is Caribbean. The harbour's backscatter is an olive
         // green with a real red component from suspended silt — drop the red
         // and it immediately reads as a tropical lagoon.
-        uScatterA: { value: new THREE.Color(0.052, 0.082, 0.058) },
-        uScatterB: { value: new THREE.Color(0.064, 0.072, 0.034) },
+        uScatterA: { value: new THREE.Color(0.052, 0.082, 0.062) },
+        // The impounded Charles: still tannin-brown, but the blue was low
+        // enough that from two kilometres up — where the body is the whole
+        // pixel — the basin read as a field of olive grass rather than as
+        // water. Half a per cent of blue is the difference.
+        uScatterB: { value: new THREE.Color(0.060, 0.072, 0.048) },
         uBedA: { value: new THREE.Color(0.085, 0.088, 0.076) },
         uBedB: { value: new THREE.Color(0.072, 0.066, 0.041) },
         // The shallow margin: mud stirred by the tide in the harbour, peat
@@ -294,7 +306,6 @@ export class Water implements WorldModule {
     // the environment probe has refreshed.
     const elev = sun.elevation;
     const day = THREE.MathUtils.clamp((elev + 0.1) / 0.5, 0, 1);
-    const dusk = THREE.MathUtils.clamp(1 - Math.abs(elev) / 0.16, 0, 1);
 
     // What the *reflection* sees is no longer set here at all: it comes from
     // the atmosphere's sky-view table through 'ctx.aerial'. All that is left is
@@ -304,14 +315,26 @@ export class Water implements WorldModule {
       .setRGB(0.020, 0.030, 0.055)
       .lerp(new THREE.Color(0.30, 0.40, 0.55), day);
 
-    m.uniforms.uEnvIntensity.value = 0.05 + 0.95 * day * day;
-
     // The sky is physically dim at night, so the sky module winds exposure up
     // ~4x. Anything authored display-referred — the city's own glow here, lit
     // windows elsewhere — has to come down by the same factor or it clips the
     // frame to white the moment the sun sets.
     const expo = ctx.exposure || 2.5;
     const comp = 2.5 / Math.max(expo, 0.1);
+
+    // The same number drives the body of the water, which is authored the same
+    // way — but only once the sun is actually down. It used to be a hand-rolled
+    // proxy for daylight, `0.05 + 0.95*day²`, which reads 0.46 at five in the
+    // afternoon and so halved the river's own colour through the entire golden
+    // hour, hours before the exposure it was meant to cancel had moved at all.
+    // Metering alone is no better: the water is the darkest large surface in
+    // the frame, so a dark river meters the exposure up, which darkens the
+    // river. Hold it at 1 while the sun is up and let the measurement take
+    // over across dusk, where it is the only thing that keeps the channel from
+    // clipping to white.
+    const daylight = THREE.MathUtils.smoothstep(elev, -0.06, 0.10);
+    m.uniforms.uEnvIntensity.value =
+      THREE.MathUtils.clamp(Math.max(comp, daylight), 0.04, 1.25);
 
     // At night the brightest thing the Charles can reflect is the city.
     const night = 1 - THREE.MathUtils.smoothstep(elev, -0.02, 0.12);

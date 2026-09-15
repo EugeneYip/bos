@@ -1,11 +1,17 @@
 /**
- * Boats, and the flags that fly over the city.
+ * Boats, their wakes, and the flags that fly over the city.
  *
- * The Charles is one of the busiest rowing rivers in the world — eights and
- * singles from the Harvard, MIT and BU boathouses are on it whenever it is
- * not frozen, along with the Community Boating fleet of small sailing dinghies
- * out of the Esplanade. The harbour is working water: MBTA ferries, harbour
- * cruise boats, tugs and the occasional container ship to Conley Terminal.
+ * The Charles is one of the busiest rowing rivers in the world — eights, fours
+ * and singles from the Harvard, MIT, BU and Community Rowing boathouses are on
+ * it whenever it is not frozen, along with the Community Boating fleet of small
+ * sailing dinghies out of the Esplanade. The harbour is working water: MBTA
+ * ferries, harbour cruise boats, water taxis, tugs and the occasional container
+ * ship to Conley Terminal.
+ *
+ * Two things here are shader-driven rather than simulated on the CPU: the
+ * rowing stroke (oars sweep, blades feather out of the water, rowers slide on
+ * their seats) and the wake, which is one instanced quad per vessel carrying a
+ * procedural Kelvin-wake texture.
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -18,7 +24,8 @@ const flat = (g: THREE.BufferGeometry): THREE.BufferGeometry => {
 const merge = (gs: THREE.BufferGeometry[]): THREE.BufferGeometry =>
   mergeGeometries(gs.map(flat), false)!;
 
-export type VesselPart = 'hull' | 'house' | 'glass' | 'sail' | 'dark';
+/** `oar` carries the rowing rig and its crew; it is the only animated part. */
+export type VesselPart = 'hull' | 'house' | 'glass' | 'sail' | 'dark' | 'oar';
 
 export interface VesselDef {
   name: string;
@@ -29,6 +36,8 @@ export interface VesselDef {
   water: 'river' | 'harbour' | 'both';
   weight: number;
   hullColor: number;
+  /** Wake size: [length, half-width] as multiples of the hull length. */
+  wake: [number, number];
   parts: Partial<Record<VesselPart, THREE.BufferGeometry>>;
 }
 
@@ -61,23 +70,74 @@ const box = (w: number, h: number, d: number, x = 0, y = 0, z = 0): THREE.Buffer
   return g;
 };
 
-/** An eight: 17 m, impossibly narrow, with blades out both sides. */
-function rowingShell(): VesselDef['parts'] {
-  const h = hull(17.0, 0.58, 0.22, 0.16);
-  const riggers: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 8; i++) {
-    const x = -6.2 + i * 1.6;
-    const side = i % 2 === 0 ? 1 : -1;
-    const oar = new THREE.BoxGeometry(0.06, 0.04, 3.4);
-    oar.translate(x, 0.30, side * 1.75);
-    riggers.push(oar);
-    const blade = new THREE.BoxGeometry(0.48, 0.02, 0.22);
-    blade.translate(x, 0.24, side * 3.4);
-    riggers.push(blade);
-    // Rowers, as simple torsos — at any real distance that is all you see.
-    riggers.push(box(0.34, 0.62, 0.34, x, 0.16));
+/**
+ * Tag rowing gear for the stroke shader. `kind` is 0 for fixed structure,
+ * +/-1 for an oar on that side of the boat, and 2 for a rower's body; `p` is
+ * the pivot — the gate for an oar, the seat for a rower.
+ */
+function rowTag(
+  g: THREE.BufferGeometry, kind: number, px: number, py: number, pz: number,
+): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count;
+  g.setAttribute('aOar', new THREE.Float32BufferAttribute(new Float32Array(n).fill(kind), 1));
+  const p = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { p[i * 3] = px; p[i * 3 + 1] = py; p[i * 3 + 2] = pz; }
+  g.setAttribute('aOarP', new THREE.Float32BufferAttribute(p, 3));
+  return g;
+}
+
+/**
+ * One rowing seat: a rigger out to the gate, the oar through it, the blade,
+ * and the rower. `side` is +1 starboard, -1 port; a sculler gets two.
+ */
+function seat(x: number, side: number, scull: boolean): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = [];
+  const gate = scull ? 0.72 : 0.88;
+  const gateY = 0.30;
+  const sides = scull ? [-1, 1] : [side];
+  for (const s of sides) {
+    // Rigger: gunwale out to the gate. Fixed structure.
+    const rig = box(0.05, 0.035, gate, x, gateY - 0.02, (s * gate) / 2);
+    out.push(rowTag(rig, 0, x, gateY, s * gate));
+    // Shaft, from the handle inboard of the gate out past it.
+    const shaft = new THREE.CylinderGeometry(0.022, 0.03, 3.55, 5);
+    shaft.rotateX(Math.PI / 2);
+    shaft.translate(x, gateY + 0.03, s * (gate + 1.12));
+    out.push(rowTag(shaft, s, x, gateY, s * gate));
+    // Blade. Boston club blades are painted; white reads at any distance.
+    const blade = box(0.52, 0.022, 0.26, x, gateY + 0.01, s * (gate + 2.62));
+    out.push(rowTag(blade, s, x, gateY, s * gate));
   }
-  return { hull: h, dark: merge(riggers) };
+  // Rower: torso plus head. Slides fore-and-aft and swings over the seat.
+  out.push(rowTag(box(0.30, 0.52, 0.32, x, 0.12), 2, x, 0.12, 0));
+  out.push(rowTag(box(0.16, 0.17, 0.16, x - 0.02, 0.66), 2, x, 0.12, 0));
+  return out;
+}
+
+/** A sweep boat: an eight or a four, with blades out alternate sides. */
+function sweepBoat(crew: number, len: number, cox: boolean): VesselDef['parts'] {
+  const h = hull(len, 0.60, 0.22, 0.17);
+  const gear: THREE.BufferGeometry[] = [];
+  const pitch = 1.42;
+  const x0 = -((crew - 1) * pitch) / 2 - 0.6;
+  for (let i = 0; i < crew; i++) {
+    gear.push(...seat(x0 + i * pitch, i % 2 === 0 ? 1 : -1, false));
+  }
+  if (cox) {
+    // The coxswain sits in the stern and does not move.
+    gear.push(rowTag(box(0.28, 0.36, 0.30, -len * 0.44, 0.06), 0, 0, 0, 0));
+  }
+  // A pale deck strip: the one thing that separates a shell from a stick.
+  const deck = rowTag(box(len * 0.96, 0.03, 0.44, 0, 0.16), 0, 0, 0, 0);
+  return { hull: h, oar: merge([...gear, deck]) };
+}
+
+/** A single sculler: 8.2 m, two blades, and nowhere to hide. */
+function sculler(): VesselDef['parts'] {
+  const h = hull(8.2, 0.44, 0.18, 0.14);
+  const gear = seat(-0.3, 1, true);
+  gear.push(rowTag(box(7.6, 0.025, 0.34, 0, 0.13), 0, 0, 0, 0));
+  return { hull: h, oar: merge(gear) };
 }
 
 /** Community Boating dinghy: white hull, tall triangular sail. */
@@ -91,6 +151,25 @@ function dinghy(): VesselDef['parts'] {
   sg.rotateY(Math.PI / 2);
   sg.translate(0.5, 0.42, 0);
   return { hull: h, dark: mast, sail: sg };
+}
+
+/** A harbour keelboat: bigger, with a jib as well as a main. */
+function sloop(): VesselDef['parts'] {
+  const h = hull(10.5, 3.1, 0.75, 0.85);
+  const mast = new THREE.CylinderGeometry(0.06, 0.09, 13.5, 6);
+  mast.translate(0.4, 6.8, 0);
+  const boom = box(4.6, 0.09, 0.09, -1.9, 1.5);
+  const main = new THREE.Shape();
+  main.moveTo(0, 0); main.lineTo(0, 12.4); main.lineTo(-4.4, 0.4); main.lineTo(0, 0);
+  const mg = new THREE.ExtrudeGeometry(main, { depth: 0.03, bevelEnabled: false });
+  mg.rotateY(Math.PI / 2);
+  mg.translate(0.4, 1.0, 0);
+  const jib = new THREE.Shape();
+  jib.moveTo(0, 0); jib.lineTo(0, 10.2); jib.lineTo(3.9, 0.3); jib.lineTo(0, 0);
+  const jg = new THREE.ExtrudeGeometry(jib, { depth: 0.03, bevelEnabled: false });
+  jg.rotateY(Math.PI / 2);
+  jg.translate(0.5, 1.1, 0.25);
+  return { hull: h, dark: merge([mast, boom]), sail: merge([mg, jg]) };
 }
 
 /** MBTA / cruise ferry: long white superstructure over a dark hull. */
@@ -151,14 +230,138 @@ function containerShip(): VesselDef['parts'] {
 
 export function vesselTypes(): VesselDef[] {
   return [
-    { name: 'eight',   length: 17,  speed: 4.4, water: 'river',   weight: 26, hullColor: 0xf0efe9, parts: rowingShell() },
-    { name: 'dinghy',  length: 4.3, speed: 2.6, water: 'river',   weight: 22, hullColor: 0xf4f4f0, parts: dinghy() },
-    { name: 'launch',  length: 11,  speed: 5.5, water: 'both',    weight: 14, hullColor: 0xdad9d2, parts: ferry(11, 3.4) },
-    { name: 'ferry',   length: 32,  speed: 7.2, water: 'harbour', weight: 16, hullColor: 0x24303c, parts: ferry(32, 9.0) },
-    { name: 'cruise',  length: 46,  speed: 6.0, water: 'harbour', weight: 8,  hullColor: 0x1d2a38, parts: ferry(46, 11.5) },
-    { name: 'tug',     length: 24,  speed: 5.0, water: 'harbour', weight: 8,  hullColor: 0x7a2420, parts: tug() },
-    { name: 'ship',    length: 190, speed: 4.0, water: 'harbour', weight: 2,  hullColor: 0x2a4f6b, parts: containerShip() },
+    { name: 'eight',   length: 17,  speed: 4.6, water: 'river',   weight: 22, hullColor: 0xf0efe9,
+      wake: [1.4, 0.34], parts: sweepBoat(8, 17.4, true) },
+    { name: 'four',    length: 13,  speed: 4.2, water: 'river',   weight: 10, hullColor: 0xe9e6dc,
+      wake: [1.4, 0.34], parts: sweepBoat(4, 13.0, false) },
+    { name: 'single',  length: 8.2, speed: 3.6, water: 'river',   weight: 10, hullColor: 0xf2f0e8,
+      wake: [1.5, 0.40], parts: sculler() },
+    { name: 'dinghy',  length: 4.3, speed: 2.6, water: 'river',   weight: 16, hullColor: 0xf4f4f0,
+      wake: [2.2, 0.78], parts: dinghy() },
+    { name: 'sloop',   length: 10.5, speed: 3.4, water: 'harbour', weight: 7, hullColor: 0xf2f2ee,
+      wake: [2.4, 0.85], parts: sloop() },
+    { name: 'launch',  length: 11,  speed: 6.4, water: 'both',    weight: 12, hullColor: 0xdad9d2,
+      wake: [4.5, 1.60], parts: ferry(11, 3.4) },
+    { name: 'ferry',   length: 32,  speed: 7.2, water: 'harbour', weight: 12, hullColor: 0x24303c,
+      wake: [3.4, 1.15], parts: ferry(32, 9.0) },
+    { name: 'cruise',  length: 46,  speed: 6.0, water: 'harbour', weight: 6,  hullColor: 0x1d2a38,
+      wake: [3.0, 1.00], parts: ferry(46, 11.5) },
+    { name: 'tug',     length: 24,  speed: 5.0, water: 'harbour', weight: 7,  hullColor: 0x7a2420,
+      wake: [3.6, 1.20], parts: tug() },
+    { name: 'ship',    length: 190, speed: 4.0, water: 'harbour', weight: 2,  hullColor: 0x2a4f6b,
+      wake: [1.6, 0.50], parts: containerShip() },
   ];
+}
+
+/* ------------------------------------------------------------- rowing */
+
+/**
+ * The stroke, in the vertex stage. `aStroke` is the per-instance phase: 0 at
+ * the catch, pi at the finish. Oars sweep about their gate, feather up out of
+ * the water on the recovery, and the crew slides toward the stern as the legs
+ * go down — get that direction wrong and rowers read as if they are rowing
+ * backwards, which anyone who has been near the Charles will notice.
+ */
+export const ROW_VERT_PARS = /* glsl */ `
+attribute float aOar;
+attribute vec3 aOarP;
+attribute float aStroke;
+`;
+
+export const ROW_VERT_POS = /* glsl */ `
+if (abs(aOar) > 0.5) {
+  vec3 rel = transformed - aOarP;
+  if (aOar > 1.5) {
+    // Rower: slide aft through the drive, swinging over the seat.
+    float lean = 0.34 * cos(aStroke);
+    float c = cos(lean), s = sin(lean);
+    rel.xy = vec2(rel.x * c + rel.y * s, -rel.x * s + rel.y * c);
+    rel.x -= 0.13 * (1.0 - cos(aStroke));
+  } else {
+    float th = 0.60 * cos(aStroke) * aOar;
+    float c = cos(th), s = sin(th);
+    rel.xz = vec2(rel.x * c + rel.z * s, -rel.x * s + rel.z * c);
+    // Feather: blade out of the water on the recovery, handle down.
+    rel.y += max(0.0, -sin(aStroke)) * 0.135 * (rel.z * aOar);
+  }
+  transformed = aOarP + rel;
+}
+`;
+
+/* --------------------------------------------------------------- wakes */
+
+/**
+ * The Kelvin wake, as a texture. A displacement hull throws two diverging
+ * crests at about 19.5 degrees either side of its track, a short bright
+ * crescent at the bow, and a band of broken water directly astern that decays
+ * over a few hull lengths. Drawing that into an alpha map and stretching one
+ * quad over it costs one draw call for the entire fleet.
+ *
+ * `u` runs bow (0) to aft (1); `v` is across the track.
+ */
+export function wakeTexture(): THREE.CanvasTexture {
+  const W = 256;
+  const H = 128;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d')!;
+  const img = g.createImageData(W, H);
+  const d = img.data;
+
+  for (let y = 0; y < H; y++) {
+    const v = (y + 0.5) / H - 0.5;            // -0.5 .. 0.5 across
+    const av = Math.abs(v) * 2;               // 0 on the track, 1 at the edge
+    for (let x = 0; x < W; x++) {
+      const u = (x + 0.5) / W;
+      let a = 0;
+
+      // Bow crescent: a tight bright arc right at the stem.
+      const bow = Math.exp(-Math.pow((u - 0.035) / 0.030, 2)) * Math.exp(-Math.pow(av / 0.16, 2));
+      a += bow * 0.95;
+
+      // Diverging crests. They leave the bow and open out linearly; the arm
+      // gets broader and softer with distance while the crest itself fades.
+      const arm = u * 0.94;                    // where the crest sits at this u
+      const wdt = 0.045 + u * 0.16;
+      const crest = Math.exp(-Math.pow((av - arm) / wdt, 2));
+      const decay = Math.exp(-u * 1.55) * (1 - Math.exp(-u * 26));
+      a += crest * decay * 1.35;
+
+      // Broken water astern: strongest just behind the transom, decaying.
+      const stern = Math.exp(-Math.pow((u - 0.22) / 0.30, 2)) * Math.exp(-Math.pow(av / 0.30, 2));
+      // A little streaky structure so it does not read as an airbrushed blob.
+      const grain = 0.72 + 0.28 * Math.sin(u * 61 + v * 17) * Math.sin(u * 23 - v * 41);
+      a += stern * grain * 0.85;
+
+      a *= 1 - Math.pow(Math.min(av, 1), 6);   // hard stop at the quad edge
+      a *= Math.min(1, (1 - u) * 6);           // and fade out at the far end
+
+      const i = (y * W + x) * 4;
+      const k = Math.max(0, Math.min(1, a));
+      d[i] = 255; d[i + 1] = 255; d[i + 2] = 255;
+      d[i + 3] = Math.round(255 * Math.min(1, k * 0.92));
+    }
+  }
+  g.putImageData(img, 0, 0);
+
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  t.anisotropy = 8;
+  return t;
+}
+
+/**
+ * The quad the wake is drawn on: unit length aft along -X from a little ahead
+ * of the stem, unit width across. The instance matrix scales it to the hull.
+ */
+export function wakeGeometry(): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(1, 1, 10, 1);
+  g.rotateX(-Math.PI / 2);   // into the XZ plane, +U along +X
+  g.rotateY(Math.PI);        // so U runs aft along -X
+  g.translate(-0.5, 0, 0);
+  return g;
 }
 
 /* ------------------------------------------------------------------ flags */

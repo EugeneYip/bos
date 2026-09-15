@@ -34,6 +34,8 @@ export interface Edge {
   length: number;
   lanes: number;
   cls: RoadClass;
+  /** Carriageway width, metres. Pedestrians need it to find the kerb. */
+  width: number;
   speed: number;
   /** Node index at the far end. */
   to: number;
@@ -82,7 +84,7 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
 
   const addEdge = (
     pts: Float32Array, from: number, to: number,
-    lanes: number, cls: RoadClass, layer: number,
+    lanes: number, cls: RoadClass, layer: number, width: number,
   ): void => {
     const n = pts.length / 3;
     if (n < 2) return;
@@ -97,7 +99,7 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
     }
     if (len < 3) return; // too short to be worth traversing
     outLists[from].push(edges.length);
-    edges.push({ pts, cum, length: len, lanes, cls, speed: table[cls] ?? 8, to, layer });
+    edges.push({ pts, cum, length: len, lanes, cls, width, speed: table[cls] ?? 8, to, layer });
   };
 
   let totalKm = 0;
@@ -122,8 +124,7 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
     const b = nodeAt(fwd[(n - 1) * 3], fwd[(n - 1) * 3 + 1], fwd[(n - 1) * 3 + 2]);
     if (a === b) continue; // a closed loop has no useful direction
 
-    addEdge(fwd, a, b, lanes, r.class, r.layer);
-    totalKm += 0;
+    addEdge(fwd, a, b, lanes, r.class, r.layer, r.width);
 
     if (!r.oneway || mode === 'walk') {
       const rev = new Float32Array(n * 3);
@@ -132,7 +133,7 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
         rev[i * 3 + 1] = fwd[(n - 1 - i) * 3 + 1];
         rev[i * 3 + 2] = fwd[(n - 1 - i) * 3 + 2];
       }
-      addEdge(rev, b, a, lanes, r.class, r.layer);
+      addEdge(rev, b, a, lanes, r.class, r.layer, r.width);
     }
   }
 
@@ -146,9 +147,13 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
   };
 }
 
-/** Position and heading a distance `s` along an edge. */
+/**
+ * Position and heading a distance `s` along an edge. `hx`/`hz` are the
+ * horizontal unit heading; `hy` is the vertical gradient (rise per metre run),
+ * which is what lets a vehicle pitch with the carriageway on a viaduct.
+ */
 export function sampleEdge(
-  e: Edge, s: number, out: { x: number; y: number; z: number; hx: number; hz: number },
+  e: Edge, s: number, out: { x: number; y: number; z: number; hx: number; hy: number; hz: number },
 ): void {
   const cum = e.cum;
   const n = cum.length;
@@ -165,8 +170,10 @@ export function sampleEdge(
   out.y = e.pts[a + 1] + (e.pts[b + 1] - e.pts[a + 1]) * t;
   out.z = e.pts[a + 2] + (e.pts[b + 2] - e.pts[a + 2]) * t;
   const dx = e.pts[b] - e.pts[a];
+  const dy = e.pts[b + 1] - e.pts[a + 1];
   const dz = e.pts[b + 2] - e.pts[a + 2];
   const inv = 1 / Math.max(Math.hypot(dx, dz), 1e-4);
   out.hx = dx * inv;
   out.hz = dz * inv;
+  out.hy = dy * inv;
 }

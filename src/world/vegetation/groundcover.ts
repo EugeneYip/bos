@@ -18,12 +18,21 @@ import type { Ctx } from '../../core/Context';
 import { grassTuft, shrubClump } from './geometry';
 import { createGroundMaterial, type SharedUniforms, type VegMaterial } from './material';
 import { CLASS_FOREST, CLASS_LAWN, LandMask } from './landmask';
+import { GRASS_CARD } from './textures';
 
-/** radius, spacing — denser close in, thinning out with distance. */
-const GRASS_RINGS: [number, number][] = [[20, 0.62], [44, 1.35], [80, 2.7]];
+/**
+ * radius, spacing — denser close in, thinning out with distance.
+ *
+ * A grass card is GRASS_CARD across, so a spacing a little under that in the
+ * first ring gives an almost closed mat immediately in front of the camera,
+ * which is where the eye actually checks. Further out the park surface's own
+ * albedo carries it and the cards only need to break the silhouette of the
+ * ground plane.
+ */
+const GRASS_RINGS: [number, number][] = [[18, 0.34], [40, 0.90], [76, 2.0]];
 const SHRUB_RADIUS = 130;
 const SHRUB_SPACING = 8.5;
-const REBUILD_MOVE = 9;
+const REBUILD_MOVE = 7;
 
 function hash2(x: number, z: number, salt: number): number {
   let h = Math.imul(x | 0, 73856093) ^ Math.imul(z | 0, 19349663) ^ Math.imul(salt, 83492791);
@@ -52,23 +61,29 @@ export class GroundCover {
     private root: THREE.Group,
   ) {}
 
-  build(ctx: Ctx, shared: SharedUniforms, grassMap: THREE.Texture, shrubMap: THREE.Texture): void {
+  build(
+    ctx: Ctx, shared: SharedUniforms,
+    grassMap: THREE.Texture, shrubMap: THREE.Texture,
+    grassMean: number, shrubMean: number,
+  ): void {
     if (!this.mask.ready) return;
     const budget = ctx.quality.treeBudget;
-    this.grassCap = THREE.MathUtils.clamp(Math.round(budget * 0.22), 1500, 13000);
-    this.bushCap = THREE.MathUtils.clamp(Math.round(budget * 0.035), 260, 2000);
+    this.grassCap = THREE.MathUtils.clamp(Math.round(budget * 0.34), 1200, 14000);
+    this.bushCap = THREE.MathUtils.clamp(Math.round(budget * 0.045), 260, 2400);
 
-    const gm = createGroundMaterial('grass', grassMap, shared, 0x7d9349, 0xa89a4e, {
-      sway: 2.6, alphaTest: 0.34, fadeOut: 96, turnBias: 0.55,
+    // Mown turf: olive, not emerald. A lawn's albedo has far more red in it
+    // than a leaf's, and the ones that do not are golf simulators.
+    const gm = createGroundMaterial('grass', grassMap, shared, 0x74853f, 0xa2913f, {
+      sway: 2.4, alphaTest: 0.2, fadeOut: 86, turnBias: 0.5, canopy: 0.78,
+      mapMean: grassMean,
     });
-    gm.material.alphaTest = 0.34;
     gm.material.side = THREE.DoubleSide;
     this.mats.push(gm);
 
-    const bm = createGroundMaterial('shrub', shrubMap, shared, 0x55763c, 0x9c6c35, {
-      sway: 1.1, alphaTest: 0.4, fadeOut: 170, turnBias: 0.8,
+    const bm = createGroundMaterial('shrub', shrubMap, shared, 0x4e6c39, 0x96682f, {
+      sway: 1.1, alphaTest: 0.3, fadeOut: 170, turnBias: 0.8, canopy: 0.72,
+      mapMean: shrubMean,
     });
-    bm.material.alphaTest = 0.4;
     this.mats.push(bm);
 
     this.grass = new THREE.InstancedMesh(grassTuft(3), gm.material, this.grassCap);
@@ -132,14 +147,32 @@ export class GroundCover {
             const cls = this.mask.plantable(x, z);
             if (!cls) continue;
             const hs = hash2(i, j, 13);
-            // Mown lawn is thinner than rough park grass and woodland floor.
-            const keep = cls === CLASS_LAWN ? 0.55 : cls === CLASS_FOREST ? 0.92 : 0.78;
+            // Mown lawn is thinner than rough park grass and woodland floor…
+            let keep = cls === CLASS_LAWN ? 0.72 : cls === CLASS_FOREST ? 0.95 : 0.88;
+            // …and the margin of a path is scuffed by everyone who ever cut
+            // the corner. A lawn that runs to a kerb at full density is the
+            // tell that nobody walks on it.
+            //
+            // Gentle, because the land mask is a 5 m raster: "edge distance 1"
+            // means somewhere inside the first five metres, not the first one,
+            // and on a park as path-riddled as the Common that band is most of
+            // the lawn. At 0.34 it took the whole of Boston Common down to
+            // eleven hundred tufts and the turf vanished.
+            const edge = this.mask.edgeDistance(x, z, 2);
+            if (edge <= 1) keep *= 0.62;
+            else if (edge === 2) keep *= 0.86;
             if (hs > keep) continue;
             const y = sample(x, z);
-            const scale = (0.30 + 0.30 * hash2(i, j, 21)) * (1 + Math.sqrt(d2) * 0.006);
-            this.p.set(x, y - 0.04, z);
+            // Cards are authored at GRASS_CARD across (see `grassTexture`).
+            // Taller and coarser as the ground gets rougher; a fraction larger
+            // with distance so the mat still closes up once the spacing opens.
+            const vary = 0.82 + 0.4 * hash2(i, j, 21);
+            const grow = 1 + Math.sqrt(d2) * 0.004;
+            const tall = cls === CLASS_LAWN ? 0.19 : cls === CLASS_FOREST ? 0.32 : 0.26;
+            this.p.set(x, y - 0.03, z);
             this.q.setFromAxisAngle(this.up, hash2(i, j, 33) * Math.PI);
-            this.s.set(scale * 1.5, scale * (cls === CLASS_LAWN ? 0.8 : 1.15), scale * 1.5);
+            const wide = GRASS_CARD * vary * grow;
+            this.s.set(wide, tall * vary * grow, wide);
             this.m.compose(this.p, this.q, this.s);
             grass.setMatrixAt(g++, this.m);
           }
