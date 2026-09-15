@@ -115,17 +115,17 @@
     "id": "fenway",
     "title": "Fenway Park and the Emerald Necklace",
     "pos": [
-      -2250,
-      190,
-      200
+      -2260,
+      170,
+      1430
     ],
     "target": [
-      -1750,
-      30,
-      -100
+      -2644,
+      25,
+      964
     ],
     "hour": 16.2,
-    "note": "The ballpark bowl, light towers, and surrounding park greenery."
+    "note": "The ballpark bowl, light towers and the Green Monster. The viewpoint used to face north-east at the Charles, which is not where Fenway Park is."
   },
   {
     "id": "golden-hour-dome",
@@ -179,17 +179,17 @@
     "id": "comm-ave",
     "title": "Commonwealth Avenue Mall at eye level",
     "pos": [
-      -1500,
-      6.6000000000000005,
-      640
+      -1150,
+      6.2,
+      415
     ],
     "target": [
-      -980,
-      8.8,
-      558
+      -760,
+      8.5,
+      272
     ],
     "hour": 16.4,
-    "note": "Street trees in rows, the mall, brownstone frontage, moving traffic and people."
+    "note": "Street trees in rows down the mall, brownstone frontage, moving traffic and people. The viewpoint used to sit in a service yard three blocks away."
   },
   {
     "id": "downtown-traffic",
@@ -254,5 +254,21 @@
     ],
     "hour": 15.5,
     "note": "Looking up the tower from the street; any footprint intersecting the mesh shows here first."
+  },
+  {
+    "id": "copley",
+    "title": "Copley Square: Trinity Church and the Boston Public Library",
+    "pos": [
+      -880,
+      120,
+      760
+    ],
+    "target": [
+      -1035,
+      30,
+      692
+    ],
+    "hour": 9.8,
+    "note": "Two hand-authored landmark meshes side by side. If either one's OSM footprint is not suppressed, it shows here as a second building in the same place."
   }
 ]

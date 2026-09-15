@@ -51,12 +51,13 @@ Still rough, and worth knowing before you look:
   chain costs roughly half the frame, so `?post=off` or `?q=medium` are both
   worth trying on a laptop. Screen-space reflections and motion blur are
   reserved for `ultra`.
-- **Boston's green cycle tracks** are painted for their whole length rather
-  than at the conflict zones where the paint actually goes, so the Esplanade
-  has a continuous emerald ribbon down it.
 - **Four duplicate footprints survive** the extraction pass, down from 111.
   They are pairs mapped twice with genuinely different shapes, where picking a
   winner needs a judgement the pipeline does not have.
+- **About two thousand footprints still overlap a neighbour** by a little.
+  Almost all are terraces whose shared party wall was traced twice, centimetres
+  apart; they z-fight along that wall at a grazing angle. Deleting either one
+  would leave a gap, so they stay.
 - **The far-field heightfield is flat.** 407 m posts shaded by elevation and
   slope is enough for a silhouette; at 15 km, where half the hill's own colour
   still reaches the eye, it reads as a smear rather than as land.
@@ -101,7 +102,44 @@ turned out to be a different thing than it looked like:
   every material with one fetch. It comes from the street network rather than
   from `highway=street_lamp`, which has about five per cent of Boston's lamps
   and none at all within 168 m of the Financial District's central junction.
-- *A building crashing into the Prudential Center* was a duplicate footprint.
+- *Buildings inside other buildings, everywhere.* The Prudential's was the one
+  that got noticed, and fixing it properly took three passes. Containment has to
+  be tested on the footprint rather than the area, or 111 Huntington's three
+  dozen crown pinnacles stay buried in their own tower. It has to tolerate the
+  boundary, because a `building:part` usually shares its parent's outer wall —
+  often the very same nodes — and point-in-polygon is undefined there; testing
+  strictly caught the Prudential, whose part floats a little inside the tower,
+  and missed a thousand that touch. And it has to refuse to let a worse-described
+  footprint swallow a better one: the Berkeley Building is named, coloured and
+  given a material but no height, so it is inferred at 16 m, while the anonymous
+  `building:part` describing its glass roof declares eight levels and comes out
+  at 26 m. Geometry said the listed building was buried inside a slab. When
+  geometry and tagging disagree that plainly, the tagging is what to trust.
+  2,395 buried parts, 35 other buried footprints and 47 duplicates leave the
+  data. Severe overlaps — both parties over 12 m tall, sharing a real volume —
+  fall from 1,000 to 356, and what is left is mostly a tower standing on its own
+  podium, which is a building, not a bug.
+- *Landmarks drawn twice.* The extractor tagged the Boston Public Library
+  `bpl-mckim` and MIT's Building 10 `mit-dome`, while the meshes were registered
+  as `boston-public-library` and `mit-great-dome`. A slug that matches nothing
+  suppresses nothing, so both footprints were extruded *and* both hand-authored
+  meshes were placed on top of them. Fenway Park's building relation is tagged
+  `building=stadium` and carries no name at all, so a name-only matcher could
+  never find it and the ballpark was being built straight through the extruded
+  one; it now has a position-guarded tag rule. Going the other way, the alias
+  list let `prudential center` claim the tower's slug — suppressing the whole
+  263 x 316 m retail podium in favour of a mesh that models only the tower, and
+  leaving the Prudential standing in an empty block.
+- *Green cycle tracks the length of the Esplanade.* Boston paints its bike lanes
+  green at conflict points — where the lane crosses a junction and a driver
+  turning across it has to look for a bike — not end to end. The obvious signal
+  is the way's own `trimStart`/`trimEnd`, which record that an end was cut back
+  for a junction fill; it does not work, because the network builder leaves
+  cycleways out of the junction graph entirely, so their trims are always zero
+  and keying the paint off them removes it from the whole city. The junction
+  positions are the real signal and have to be handed in from the module that
+  owns them.
+- *A duplicate footprint inside the Prudential Center.*
   OpenStreetMap carries the tower twice: `w29869880`, tagged and named, and
   `w240259392`, a `building:part` repeating the tower's exact outline and
   stopping 14.6 m below its roof. The extractor's de-duplication asked whether

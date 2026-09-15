@@ -45,17 +45,46 @@ const TINY = new Set([
  *   height  ->  building:levels * 3.2 (+ roof)  ->  building:height  ->  inferred.
  * @returns {{height:number, levels:number, source:string}}
  */
+/** Distance from a point to a closed ring's boundary, metres. */
+function distToRing(ring, x, z) {
+  let best = Infinity;
+  const n = ring.length / 2;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const ax = ring[j * 2], az = ring[j * 2 + 1];
+    const bx = ring[i * 2], bz = ring[i * 2 + 1];
+    const dx = bx - ax, dz = bz - az;
+    const len2 = dx * dx + dz * dz;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / len2)) : 0;
+    const px = ax + dx * t, pz = az + dz * t;
+    const d = Math.hypot(x - px, z - pz);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
 /**
- * Is every vertex of `ring` inside `poly` (outer ring, outside any hole)?
+ * Is every vertex of `ring` inside `poly`, counting the boundary as inside?
  *
- * Vertex containment is not polygon containment in general — two rings can
- * interleave with every vertex of one inside the other — but building outlines
- * are convex enough and the parent so much larger that the difference does not
- * arise, and being wrong here costs a building rather than a crash.
+ * The tolerance is not a fudge, it is the whole point. A `building:part` almost
+ * always shares its parent's outer wall — often the very same OpenStreetMap
+ * nodes — so most of its vertices lie exactly *on* the boundary, where
+ * point-in-polygon is undefined and returns whichever way the ray casting fell.
+ * Testing strictly caught the Prudential, whose part floats a little inside the
+ * tower, and missed a thousand others that touch: One Financial Center, Exchange
+ * Place, the Federal Reserve, One Post Office Square, State Street Financial
+ * Center — every one of them carrying an unnamed slab a few metres shorter than
+ * itself, sharing its walls and z-fighting with them.
+ *
+ * Vertex containment is not polygon containment in general: two rings can
+ * interleave with every vertex of one inside the other. Building outlines do not
+ * do that, and being wrong here costs a building rather than a crash.
  */
-function ringInside(ring, poly) {
+function ringInside(ring, poly, eps = 0.5) {
   for (let i = 0; i < ring.length; i += 2) {
-    if (!pointInPolygon(poly, ring[i], ring[i + 1])) return false;
+    const x = ring[i], z = ring[i + 1];
+    if (distToRing(poly.outline, x, z) <= eps) continue;
+    if (poly.holes && poly.holes.some((h) => distToRing(h, x, z) <= eps)) continue;
+    if (!pointInPolygon(poly, x, z)) return false;
   }
   return true;
 }
@@ -169,7 +198,7 @@ function resolveMaterial(tags, levels, nb, id) {
  */
 export function buildBuildings(elements, sampleGround, log = console.log) {
   const stats = {
-    ways: 0, relations: 0, ringsDropped: 0, tooSmall: 0, partsDropped: 0, duplicatesDropped: 0,
+    ways: 0, relations: 0, ringsDropped: 0, tooSmall: 0, partsDropped: 0, buriedDropped: 0, duplicatesDropped: 0,
     partsKept: 0, landmarks: new Map(), heightSource: {}, materialTagged: 0, colourTagged: 0,
   };
 
@@ -222,61 +251,87 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
     }
   }
 
-  // --- building:part de-duplication ----------------------------------------
-  // Parts are only useful when they describe a volume the parent does not: a
-  // tower on a podium, a spire. A part that repeats its parent's footprint and
-  // stays inside its height is noise, and rendering both produces z-fighting on
-  // every wall.
+  // --- buried geometry -----------------------------------------------------
+  // A footprint whose volume lies wholly inside another footprint's volume can
+  // never be seen. Drawing it buys nothing and costs a z-fight along every wall
+  // the two share, which is most of them.
   //
-  // The test is *containment*, not similarity, and the difference is not
-  // academic. The Prudential Tower's part repeats the tower's exact footprint
-  // and stops 14.6 m below its roof — similar shape, plainly different height,
-  // so the old rule kept it. It could never have been visible, being wholly
-  // inside its parent. Then the tower itself, being a hand-authored landmark,
-  // was suppressed from the generic extrusion — and the invisible part became
-  // the only thing drawn there: a bare grey slab standing inside the Prudential
-  // Tower, which is what sent me looking.
-  const parents = polys.filter((p) => !p.isPart);
-  const parentGrid = new Map();
+  // The test is *containment*, and it has to be: the rule this replaced asked
+  // whether a part's height was *similar* to its parent's, which is a different
+  // question. The Prudential Tower's part repeats the tower's footprint exactly
+  // and stops 14.6 m below its roof — plainly a different height, so it was
+  // kept. Harmless while the tower was drawn over it, and then the tower, being
+  // a landmark, was suppressed in favour of the hand-authored mesh and the
+  // invisible slab became the only thing standing there.
+  // Everything is a candidate container, not just the untagged parents: parts
+  // enclose other parts routinely, and a pair of them sharing a top with one
+  // inside the other z-fights exactly as badly as a part inside its building.
   const CELL = 120;
-  const keyOf = (x, z) => `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
-  for (const p of parents) {
-    p._bb = bbox(p.outline);
-    p._c = centroid(p.outline);
+  for (const p of polys) { p._bb = bbox(p.outline); p._c = centroid(p.outline); }
+  const grid = new Map();
+  for (const p of polys) {
     for (let j = Math.floor(p._bb[1] / CELL); j <= Math.floor(p._bb[3] / CELL); j++) {
       for (let i = Math.floor(p._bb[0] / CELL); i <= Math.floor(p._bb[2] / CELL); i++) {
         const k = `${i},${j}`;
-        let a = parentGrid.get(k);
-        if (!a) parentGrid.set(k, (a = []));
+        let a = grid.get(k);
+        if (!a) grid.set(k, (a = []));
         a.push(p);
       }
     }
   }
+
+  /** Height of the top of a footprint's walls, metres above local ground. */
+  const topOf = (p) => {
+    if (p._top === undefined) {
+      p._top = resolveHeight(p.tags, p.a, neighbourhoodAt(p._c[0], p._c[1]), p.id).height;
+    }
+    return p._top;
+  };
+  /** Named and whole beats unnamed and partial; ties go to the taller. */
+  const rank = (p) => (p.tags.name ? 4 : 0) + (p.isPart ? 0 : 2);
+
   const kept = [];
   for (const p of polys) {
-    if (!p.isPart) { kept.push(p); continue; }
-    const c = centroid(p.outline);
-    const cands = parentGrid.get(keyOf(c[0], c[1])) || [];
-    let parent = null;
-    for (const q of cands) {
-      if (c[0] < q._bb[0] || c[0] > q._bb[2] || c[1] < q._bb[1] || c[1] > q._bb[3]) continue;
-      if (!parent || q.a < parent.a) parent = q;
+    const pTop = topOf(p);
+    const pBase = baseOf(p.tags, pTop);
+    let swallowed = null;
+
+    for (let j = Math.floor(p._bb[1] / CELL); j <= Math.floor(p._bb[3] / CELL) && !swallowed; j++) {
+      for (let i = Math.floor(p._bb[0] / CELL); i <= Math.floor(p._bb[2] / CELL) && !swallowed; i++) {
+        for (const q of grid.get(`${i},${j}`) ?? []) {
+          if (q === p) continue;
+          // Cheap rejects before the ring test, which is the expensive part.
+          if (p._bb[0] < q._bb[0] - 0.5 || p._bb[2] > q._bb[2] + 0.5) continue;
+          if (p._bb[1] < q._bb[1] - 0.5 || p._bb[3] > q._bb[3] + 0.5) continue;
+          const qTop = topOf(q);
+          if (pTop > qTop + 0.5) continue;
+          if (pBase < baseOf(q.tags, qTop) - 0.5) continue;
+          // Never let a worse-described footprint swallow a better one. The
+          // Berkeley Building is named, coloured and given a material, but no
+          // height, so it is *inferred* at 16 m — while the unnamed
+          // `building:part` describing its pyramidal glass roof declares eight
+          // levels and comes out at 26 m. Geometry says the listed building is
+          // buried inside an anonymous slab. When the geometry and the tagging
+          // disagree that plainly, the tagging is the thing to trust.
+          if (rank(p) > rank(q)) continue;
+          if (!ringInside(p.outline, q)) continue;
+          // Two footprints that enclose each other are the same footprint, and
+          // without a tie-break they would swallow each other and both vanish.
+          if (Math.abs(p.a - q.a) < 0.5 && ringInside(q.outline, p)) {
+            if (rank(p) * 1e6 + pTop >= rank(q) * 1e6 + qTop) continue;
+          }
+          swallowed = q;
+          break;
+        }
+      }
     }
-    if (!parent) { kept.push(p); stats.partsKept++; continue; }
-    const nbP = neighbourhoodAt(c[0], c[1]);
-    const hPart = resolveHeight(p.tags, p.a, nbP, p.id).height;
-    const hParent = resolveHeight(parent.tags, parent.a, nbP, parent.id).height;
-    // Enclosed: the footprint lies inside the parent's and the height band lies
-    // inside the parent's. Nothing of it can ever be seen, whatever the two
-    // areas happen to be — 111 Huntington's crown is three dozen 4 m pinnacles
-    // buried in a 59 m tower, and comparing areas never catches those.
-    if (
-      hPart <= hParent + 0.5
-      && baseOf(p.tags, hPart) >= baseOf(parent.tags, hParent) - 0.5
-      && ringInside(p.outline, parent)
-    ) { stats.partsDropped++; continue; }
-    if (Math.abs(hPart - hParent) < 1.5) { stats.partsDropped++; continue; }
-    kept.push(p); stats.partsKept++;
+
+    if (swallowed) {
+      if (p.isPart) stats.partsDropped++; else stats.buriedDropped++;
+      continue;
+    }
+    kept.push(p);
+    if (p.isPart) stats.partsKept++;
   }
 
   // --- identical footprints ------------------------------------------------
@@ -353,7 +408,7 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
     if (!(minHeight >= 0) || minHeight >= height) minHeight = 0;
 
     const name = tags.name || undefined;
-    const landmark = matchLandmark(name, cx, cz);
+    const landmark = matchLandmark(name, cx, cz, tags);
     if (landmark) stats.landmarks.set(landmark, p.id);
 
     // Outer rings CCW (as seen from above), holes CW.
@@ -381,7 +436,8 @@ export function buildBuildings(elements, sampleGround, log = console.log) {
 
   log(`  buildings: ${stats.ways} ways + ${stats.relations} multipolygons -> ${out.length} records`);
   log(`    dropped: ${stats.ringsDropped} broken rings, ${stats.tooSmall} sub-${MIN_FOOTPRINT_M2}m2, `
-    + `${stats.partsDropped} enclosed building:parts (${stats.partsKept} parts kept), `
+    + `${stats.partsDropped} buried building:parts (${stats.partsKept} kept), `
+    + `${stats.buriedDropped} other buried footprints, `
     + `${stats.duplicatesDropped} identical footprints`);
   log(`    height source: ${Object.entries(stats.heightSource).map(([k, v]) => `${k}=${v}`).join(' ')}`);
   log(`    tagged material ${stats.materialTagged}, tagged colour ${stats.colourTagged}`);
