@@ -414,5 +414,21 @@
     ],
     "hour": 10.8,
     "note": "The worst remaining footprint interpenetration: a 100 m building:part crossing the walls of the 90 m relation it belongs to."
+  },
+  {
+    "id": "statehouse-face",
+    "title": "The State House south front, close",
+    "pos": [
+      129,
+      38,
+      -238
+    ],
+    "target": [
+      129,
+      36,
+      -330
+    ],
+    "hour": 11.4,
+    "note": "Landmark facade detail at conversational distance: does the brick have windows in it, or is it a blank mass with invisible recessed reveals?"
   }
 ]
