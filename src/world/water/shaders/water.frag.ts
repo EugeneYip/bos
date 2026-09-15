@@ -271,7 +271,14 @@ void main() {
 
   vec3 trans = exp(-absorb * path);
   float sunUp = clamp(uSunDir.y, 0.0, 1.0);
-  vec3 down = uSunColor * sunUp + uSkyAmbient;
+  // Downwelling *irradiance*. Everything below scatters it back diffusely, so
+  // it converts to radiance the same way every other Lambertian surface in the
+  // city does — rho * E / PI, three's 'BRDF_Lambert'. This shader was written
+  // without the 1/PI, which made the water PI times brighter than the land for
+  // the same nominal albedo. At a grazing angle Fresnel hides that; from the
+  // air, where the body is ninety-seven per cent of the pixel, it does not,
+  // and the Charles read as a sheet of pale sage paint laid over the basin.
+  vec3 down = (uSunColor * sunUp + uSkyAmbient) * RECIPROCAL_PI;
   vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
 
   // The sky module winds exposure up after sunset so the dim sky still reads.
@@ -290,9 +297,19 @@ void main() {
   // basin silt and it read as pale tan from the air instead of green.
   float shallow = smoothstep(mix(1.1, 4.0, fetch), 0.3, dclamp);
   body = mix(body, siltCol * down, shallow * 0.72);
-  // A slow silt plume so the shallows are not a clean contour line.
+  // A slow silt plume so the shallows are not a clean contour line — and, at a
+  // fifth of the strength, everywhere else as well. Suspended sediment is
+  // patchy across a whole basin, and from altitude that patchiness is the only
+  // structure the water has: the ripples are long since sub-pixel and Fresnel
+  // is down at two per cent, so without it the river is a solid fill.
   float plume = texture2D(uWaves, p * 0.0018 + wind * uTime * 0.0012).w;
   body = mix(body, siltCol * down * 1.12, smoothstep(0.55, 1.0, shallow) * plume * 0.45);
+  // Across the open basin the patchiness rides on 'swell' — the wind field's
+  // ~1.4 km octave, already computed above and otherwise unused here. It costs
+  // nothing and, unlike another tap into the ripple atlas, it does not tile:
+  // that atlas repeats every 1.8 km at the frequency this wants, and laid a
+  // visible chequerboard the length of the Charles.
+  body *= 1.0 + (wf.z - 0.5) * 0.36 * (1.0 - 0.45 * fetch);
 
   // ----------------------------------------------------------- fresnel ----
   float fres = fresnelWater(NoV, rough);
@@ -381,7 +398,7 @@ void main() {
   // same sun and sky as everything else, or it glows in the dark — and with
   // the night exposure lift a constant floor here clips the whole channel to
   // white.
-  vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * 0.55) * authored;
+  vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * RECIPROCAL_PI * 0.55) * authored;
   color = mix(color, foamLit, foam);
 
   // At night the city is the brightest thing the water can reflect.
