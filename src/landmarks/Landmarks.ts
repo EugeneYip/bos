@@ -24,8 +24,14 @@ export class Landmarks implements WorldModule {
     this.root.name = 'landmarks';
     ctx.scene.add(this.root);
 
-    // Publish the suppression list before anything else loads, so Buildings can
-    // consult it regardless of module ordering.
+    // Publish the suppression list. `Buildings` reads it *once*, at the top of
+    // its own init, to tell its workers which footprints to skip — so this
+    // module has to be registered before it. It was not, the list `Buildings`
+    // read was empty, and every hand-authored landmark was drawn on top of the
+    // OSM extrusion it exists to replace: the Prudential Tower's fluted shaft
+    // and tapered crown were inside a plain cream box with a window grid on it.
+    // The comment that used to sit here claimed this worked regardless of
+    // ordering. It does not, and nothing enforces it but `main.ts`.
     const claimed = new Set(landmarkSlugs());
     (ctx as unknown as Record<string, unknown>).landmarkSlugs = claimed;
     ctx.emit('landmark-slugs', claimed);

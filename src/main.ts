@@ -53,8 +53,12 @@ async function main(): Promise<void> {
     new Water(),
     new Parks(),
     new Roads(),
-    new Buildings(),
+    // Landmarks before Buildings: `Landmarks.init` publishes the suppression
+    // list that `Buildings` reads once, up front, to skip the OSM footprints it
+    // replaces. Registered the other way round the list is still empty when
+    // Buildings reads it and every hand-authored landmark is drawn twice.
     new Landmarks(),
+    new Buildings(),
     new Vegetation(),
     new Props(),
     new Traffic(),
