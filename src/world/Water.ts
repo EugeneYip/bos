@@ -310,7 +310,7 @@ export class Water implements WorldModule {
     // ~4x. Anything authored display-referred — the city's own glow here, lit
     // windows elsewhere — has to come down by the same factor or it clips the
     // frame to white the moment the sun sets.
-    const expo = ctx.renderer.toneMappingExposure || 2.5;
+    const expo = ctx.exposure || 2.5;
     const comp = 2.5 / Math.max(expo, 0.1);
 
     // At night the brightest thing the Charles can reflect is the city.

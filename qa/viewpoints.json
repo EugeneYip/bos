@@ -206,5 +206,21 @@
     ],
     "hour": 13.2,
     "note": "Vehicles, crossings, lane markings, kerbs and footfall in the Financial District."
+  },
+  {
+    "id": "street-night",
+    "title": "Downtown at street level after dark",
+    "pos": [
+      300,
+      9.8,
+      150
+    ],
+    "target": [
+      -120,
+      22.9,
+      -60
+    ],
+    "hour": 21.5,
+    "note": "Street lamps, shopfronts, headlights and wet-looking tarmac. The only eye-level night test: every emissive in the city is authored display-referred and has to survive the exposure lift."
   }
 ]

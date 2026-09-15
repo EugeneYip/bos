@@ -50,6 +50,11 @@ import { lerpWeather, weatherPreset, WEATHER_NAMES, type WeatherPreset, type Wea
  * | sun direction / colour / intensity / elevation / azimuth | `ctx.sun` |
  * | prefiltered environment | `ctx.envMap`, `scene.environment` |
  * | exposure | `ctx.emit('exposure', v)` and `renderer.toneMappingExposure` |
+ *
+ * The renderer's value is the *artistic base*. What the frame is finally
+ * presented at is `ctx.exposure`, written by whoever owns presentation — the
+ * post chain blends this base with its own metering. Anything display-referred
+ * must divide by that, not by this.
  * | aerial perspective + cloud shadows | injected into every material |
  * | cascaded shadows | four `DirectionalLight`s it owns exclusively |
  *

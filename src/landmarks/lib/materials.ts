@@ -354,7 +354,7 @@ export class LandmarkMaterials {
     const t = THREE.MathUtils.clamp((0.14 - e) / 0.21, 0, 1);
     // These emissives are display-referred; the sky lifts exposure ~4x after
     // dark, so scale back down or the dome and the Citgo sign clip to white.
-    const comp = 2.5 / Math.max(ctx.renderer.toneMappingExposure || 2.5, 0.1);
+    const comp = 2.5 / Math.max(ctx.exposure || 2.5, 0.1);
     const k = t * t * (3 - 2 * t) * comp;
     for (const m of this.nightLit) {
       m.emissiveIntensity = k * (m.userData.nightPeak ?? 1);

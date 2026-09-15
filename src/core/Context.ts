@@ -69,6 +69,23 @@ export interface Ctx {
   /** Environment map used for IBL; installed by the sky module. */
   envMap: THREE.Texture | null;
 
+  /**
+   * The exposure the last frame was actually presented at, written by whatever
+   * owns presentation — the post chain when it is up, the sky module otherwise.
+   *
+   * Read it, do not set it. Anything authored *display-referred* — lit windows,
+   * street lamps, vehicle lights, the city's glow on the water — has to divide
+   * by this or it clips the moment exposure winds up after sunset. The value
+   * matters more than it looks: the sky publishes an artistic exposure on the
+   * renderer, the grade then blends that with a metered one, and at night the
+   * metered half is three or four times higher. Compensating against the sky's
+   * number alone is what turned every tower into a white slab after dark.
+   *
+   * One frame stale by construction, which is nothing on a quantity that
+   * already adapts over seconds.
+   */
+  exposure: number;
+
   /** Shared atmosphere for shaders that cannot use the fog chunk; see above. */
   aerial: AerialPerspective | null;
 

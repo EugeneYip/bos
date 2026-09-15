@@ -148,6 +148,7 @@ const ctx = {
   sampleHeight: () => 0,
   envMap: null as THREE.Texture | null,
   aerial: null,
+  exposure: RENDER.exposure,
   materials: {
     textures: () => undefined,
     get: () => new THREE.MeshStandardMaterial(),

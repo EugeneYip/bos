@@ -377,6 +377,56 @@ export class Post implements WorldModule {
   }
 
   /** Owns presentation while the chain is up. */
+  /** One in-flight 1x1 readback of the metered exposure; see `publishExposure`. */
+  private lumBuffer = new Float32Array(4);
+  private lumPending = false;
+  /** Last metered EV that came back, or null until the first read lands. */
+  private meteredEV: number | null = null;
+
+  /**
+   * Hand back the exposure the frame was *actually* presented at.
+   *
+   * Two systems were setting exposure and only one of them was being listened
+   * to. The sky publishes an artistic value on the renderer, and every module
+   * with a display-referred emissive divides by it so the lights do not clip
+   * once exposure winds up after sunset. The grade then blends that value with
+   * the metered one — and at night the metered half is three or four times
+   * higher, because the frame really is dark and the metering really does want
+   * to lift it. The windows were compensating for 5.3 while the frame went out
+   * at 19, and every tower downtown rendered as a white slab.
+   *
+   * The metered value lives in a 1x1 float target, so it comes back
+   * asynchronously: one frame of latency on a quantity that already adapts
+   * over seconds, and no pipeline stall. `ctx.exposure` is recomputed from the
+   * cached EV every frame rather than only inside the callback, because the
+   * base it is blended against moves with the sun.
+   */
+  private publishExposure(r: THREE.WebGLRenderer, lum: THREE.WebGLRenderTarget | null): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+
+    if (!lum) {
+      // Metering off, or the chain bypassed: the renderer's own value is what
+      // the frame went out at.
+      this.meteredEV = null;
+      ctx.exposure = r.toneMappingExposure;
+      return;
+    }
+
+    if (!this.lumPending) {
+      this.lumPending = true;
+      r.readRenderTargetPixelsAsync(lum, 0, 0, 1, 1, this.lumBuffer)
+        .then(() => { this.meteredEV = this.lumBuffer[0]; })
+        .catch(() => { /* context lost mid-read; keep the last good value */ })
+        .finally(() => { this.lumPending = false; });
+    }
+
+    const baseEV = Math.log2(Math.max(r.toneMappingExposure, 1e-5));
+    const ev = this.meteredEV ?? baseEV;
+    const k = THREE.MathUtils.clamp(this.settings.exposure.strength, 0, 1);
+    ctx.exposure = Math.pow(2, baseEV + (ev - baseEV) * k);
+  }
+
   private present(dt: number): void {
     const ctx = this.ctx;
     if (!ctx) return;
@@ -388,6 +438,7 @@ export class Post implements WorldModule {
       if (r.toneMapping !== THREE.ACESFilmicToneMapping) {
         r.toneMapping = THREE.ACESFilmicToneMapping;
       }
+      this.publishExposure(r, null);
       r.setRenderTarget(null);
       r.render(ctx.scene, ctx.camera);
       return;
@@ -737,6 +788,7 @@ export class Post implements WorldModule {
 
     /* ---- auto exposure ---------------------------------------------------- */
     let exposureTex: THREE.Texture | null = null;
+    let exposureRT: THREE.WebGLRenderTarget | null = null;
     if (s.exposure.enabled && this.lumHistory) {
       t?.begin('exposure');
       let lw = 64;
@@ -778,6 +830,7 @@ export class Post implements WorldModule {
       au.uValid.value = this.historyValid;
       p.adapt.render(r, this.lumHistory.write);
       exposureTex = this.lumHistory.write.texture;
+      exposureRT = this.lumHistory.write;
       this.lumHistory.swap();
       t?.end();
     }
@@ -796,6 +849,7 @@ export class Post implements WorldModule {
     // since the renderer's tonemapper is off while the chain is up.
     gu.uExposureBase.value = r.toneMappingExposure;
     gu.uAutoStrength.value = exposureTex ? s.exposure.strength : 0;
+    this.publishExposure(r, exposureTex ? exposureRT : null);
     gu.uBloomIntensity.value = s.bloom.enabled ? s.bloom.intensity : 0;
     gu.uStreakIntensity.value = streakTex ? s.bloom.streak : 0;
     (gu.uStreakTint.value as THREE.Vector3).fromArray(s.bloom.streakTint);

@@ -78,7 +78,8 @@ export function installDebugApi(app: App): void {
         });
       }
       return {
-        exposure: ctx.renderer.toneMappingExposure,
+        exposure: ctx.exposure,
+        exposureBase: ctx.renderer.toneMappingExposure,
         sunIntensity: ctx.sun.intensity,
         sunElevation: ctx.sun.elevation,
         envBound: ctx.scene.environment !== null,

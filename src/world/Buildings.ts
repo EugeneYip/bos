@@ -303,11 +303,21 @@ export class Buildings implements WorldModule {
     const t = THREE.MathUtils.clamp((0.14 - e) / 0.21, 0, 1);
     u.uNight.value = t * t * (3 - 2 * t);
 
-    // Lit windows are authored display-referred, but the sky module winds
-    // exposure up ~4x once the sun is down. Without compensating, every
-    // facade clips to a white slab the moment the lights come on.
-    const expo = ctx.renderer.toneMappingExposure || 2.5;
-    u.uWindowGain.value = 2.6 * (2.5 / Math.max(expo, 0.1));
+    // Lit windows are authored display-referred, and the frame's exposure winds
+    // up roughly six-fold once the sun is down, so they have to come back down
+    // by the same factor. `ctx.exposure` is what the frame is actually
+    // presented at, which is not the same as the sky's artistic value.
+    //
+    // The gain itself is a *photographic* decision, not a physical one. At 2.6
+    // a lit window sat past the tonemapper's shoulder, so the mean of a
+    // distant facade — where the individual windows are sub-pixel and average
+    // out at about half lit — landed at 0.89 display and the whole tower went
+    // to a flat white slab. A window is a midtone in a night exposure; the
+    // highlights are the street lamps and the signs. Note that this cannot be
+    // tuned open-loop: the windows are most of the light in the frame, so the
+    // metering gives back roughly half of any reduction.
+    const expo = ctx.exposure || 2.5;
+    u.uWindowGain.value = 0.9 * (2.5 / Math.max(expo, 0.1));
 
     if (this.shell && ctx.envMap && this.shell.envMap !== ctx.envMap) {
       this.shell.envMap = ctx.envMap;

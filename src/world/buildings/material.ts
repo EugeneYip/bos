@@ -306,7 +306,14 @@ const FRAG_EMISSIVE = /* glsl */ `
     float litMix = mix(lit, 0.52, faraway);
     vec3 lamp = mix(mix(vec3(0.76, 0.86, 1.0), vec3(1.0, 0.72, 0.40), warm),
                     vec3(0.99, 0.82, 0.60), faraway);
-    float mask = gGlass * mix(gFacade, 1.0, 0.35);
+    // Glass, and only on a facade. Roofs and rooftop plant carry the same
+    // surface atlas, so their depth channel reads as 'glass' too, and handing
+    // non-facade geometry a third of the window glow lit every flat roof
+    // downtown as a slab brighter than the towers under it. Dimming the glow
+    // cannot fix that: the windows are most of the light in a night frame, so
+    // the metering simply raises exposure to compensate and the picture comes
+    // back where it started. What has to change is the ratio.
+    float mask = gGlass * gFacade;
     totalEmissiveRadiance += lamp * (bright * litMix * mask * uNight * uWindowGain);
   }
 `;

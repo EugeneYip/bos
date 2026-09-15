@@ -67,6 +67,7 @@ export class App {
       sampleHeight: () => 0,
       envMap: null,
       aerial: null,
+      exposure: RENDER.exposure,
       // Replaced by the Materials module during init; this stub keeps the app
       // bootable if Materials ever fails so the rest of the scene still shows.
       materials: {
