@@ -34,7 +34,7 @@ import { emitCrossings, emitJunctionFill, emitKerbReturns } from './roads/juncti
 import { type MatKey, RoadMaterials, surfaceMat } from './roads/materials';
 import { trimHead, reverse } from './roads/math2';
 import { type Junction, type Network, type PreparedRoad, buildNetwork } from './roads/network';
-import { emitMarkings } from './roads/paint';
+import { emitMarkings, type ConflictProbe } from './roads/paint';
 import { emitBridge, emitPortal, emitSleepers, emitTrack } from './roads/structures';
 import { TUNE } from './roads/spec';
 import { disposeFallbacks } from './roads/textures';
@@ -105,6 +105,9 @@ export class Roads implements WorldModule {
 
   private net: Network | null = null;
   private lampField: LampField | null = null;
+  /** Junction centres bucketed for the cycle-lane conflict probe. */
+  private conflictCells = new Map<string, Array<{ x: number; z: number; r: number }>>();
+  private conflictProbe: ConflictProbe | undefined;
   private items: Item[] = [];
   private junctions: Junction[] = [];
 
@@ -161,6 +164,8 @@ export class Roads implements WorldModule {
     await yieldFrame();
 
     this.bucket();
+    // After `bucket`, which is what fills `this.junctions`.
+    this.buildConflictProbe();
     await yieldFrame();
 
     const t1 = performance.now();
@@ -366,8 +371,55 @@ export class Roads implements WorldModule {
       emitKerbWalk(bk.get('kerb'), bk.get(it.walk), rib, mats.tile('kerb'), mats.tile(it.walk));
     }
     if (it.road.spec.markings || it.road.cls === 'cycleway') {
-      emitMarkings(bk.get('paint'), rib, mats.tile('paint'));
+      emitMarkings(bk.get('paint'), rib, mats.tile('paint'), this.conflictProbe);
     }
+  }
+
+  /**
+   * Where a cycle track crosses traffic.
+   *
+   * Boston paints its bike lanes green at conflict points, not along their
+   * length, and the only record of where those are is the junction list. It
+   * cannot come from the cycleway itself: the network builder leaves cycleways
+   * out of the junction graph, so their `trimStart`/`trimEnd` are always zero.
+   */
+  private buildConflictProbe(): void {
+    this.conflictCells.clear();
+    this.conflictProbe = undefined;
+    if (!this.junctions.length) return;
+
+    const CELL = 48;
+    for (const j of this.junctions) {
+      // Reach past the kerb line: the paint runs through the crossing and a
+      // little way out of it on each side.
+      const r = Math.min(34, j.radius + 9);
+      const cx = Math.floor(j.p.x / CELL);
+      const cz = Math.floor(j.p.z / CELL);
+      const span = Math.ceil(r / CELL);
+      for (let dz = -span; dz <= span; dz++) {
+        for (let dx = -span; dx <= span; dx++) {
+          const k = `${cx + dx},${cz + dz}`;
+          let a = this.conflictCells.get(k);
+          if (!a) this.conflictCells.set(k, (a = []));
+          a.push({ x: j.p.x, z: j.p.z, r });
+        }
+      }
+    }
+
+    this.conflictProbe = (x, z) => {
+      const list = this.conflictCells.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`);
+      if (!list) return 0;
+      let best = 0;
+      for (const c of list) {
+        const d = Math.hypot(x - c.x, z - c.z);
+        if (d >= c.r) continue;
+        // Flat across the crossing, easing off over the outer third.
+        const t = Math.max(0, Math.min(1, (c.r - d) / (c.r * 0.34)));
+        const k = t * t * (3 - 2 * t);
+        if (k > best) best = k;
+      }
+      return best;
+    };
   }
 
   /* ----------------------------------------------------------- structures */
@@ -545,6 +597,8 @@ export class Roads implements WorldModule {
     disposeFallbacks();
     this.items.length = 0;
     this.junctions.length = 0;
+    this.conflictCells.clear();
+    this.conflictProbe = undefined;
     this.baseTiles.clear();
     this.detailTiles.clear();
     this.microTiles.clear();

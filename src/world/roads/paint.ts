@@ -113,7 +113,12 @@ function dashQuad(
  * Full marking layout for a ribbon: wheel polish, edge lines, lane dividers
  * and the centre line, honouring `oneway` and `lanes`.
  */
-export function emitMarkings(out: MeshBuilder, rib: Ribbon, tile: number): void {
+export function emitMarkings(
+  out: MeshBuilder,
+  rib: Ribbon,
+  tile: number,
+  conflictAt?: ConflictProbe,
+): void {
   const road = rib.road;
   const hw = rib.hw;
   const lanes = road.lanes;
@@ -121,7 +126,7 @@ export function emitMarkings(out: MeshBuilder, rib: Ribbon, tile: number): void 
   const cls = road.cls;
 
   if (cls === 'cycleway') {
-    emitBikeLane(out, rib, tile);
+    emitBikeLane(out, rib, tile, conflictAt);
     return;
   }
   if (!road.spec.markings || hw < 2.2) return;
@@ -206,25 +211,67 @@ function emitWheelPolish(out: MeshBuilder, rib: Ribbon, tile: number): void {
   }
 }
 
-/** Green-painted cycle track with white edging. */
-function emitBikeLane(out: MeshBuilder, rib: Ribbon, tile: number): void {
+/**
+ * How strongly a world point sits in a traffic conflict: 1 in the middle of a
+ * junction, easing to 0 a few metres clear of it.
+ */
+export type ConflictProbe = (x: number, z: number) => number;
+
+/**
+ * A cycle track: white edge lines along its length, green paint only where it
+ * needs it.
+ *
+ * Boston does not paint its cycle lanes green end to end. The green marks a
+ * *conflict zone* — where the lane crosses a junction and a driver turning
+ * across it has to look for a bike. Painting the whole length put a continuous
+ * emerald ribbon down the Esplanade, bright enough to pick out from the air,
+ * which is not a thing the Esplanade has.
+ *
+ * The obvious signal for this is the way's own `trimStart`/`trimEnd`, which say
+ * that an end was cut back for a junction fill. It does not work: the network
+ * builder excludes cycleways from the junction graph entirely, so a cycle
+ * track's trims are always zero and keying the paint off them removes it from
+ * the whole city. The junction *positions* are the real signal, and they have
+ * to be handed in from the module that owns them.
+ *
+ * With no probe supplied, an unpainted track is the safer failure: a bike lane
+ * with white edge lines and no green is a normal Boston bike lane, and a green
+ * one where the paint does not belong is the thing being fixed.
+ */
+function emitBikeLane(
+  out: MeshBuilder,
+  rib: Ribbon,
+  tile: number,
+  conflictAt?: ConflictProbe,
+): void {
   const hw = rib.hw;
-  const l = srgbLinear(PAINT.green);
-  const seed = rib.seed + 77;
-  emitStrip(out, rib.rungs, [
-    { a: hw - 0.1, dy: crownDy(hw - 0.1, hw, rib.kerbed) + TUNE.paintLift, c: [1, 1, 1, 1] },
-    { a: -(hw - 0.1), dy: crownDy(hw - 0.1, hw, rib.kerbed) + TUNE.paintLift, c: [1, 1, 1, 1] },
-  ], {
-    uv: 'local',
-    tile,
-    lift: TUNE.surfaceLift,
-    nrm: 'up',
-    colourAt: (r) => {
-      // Green paint on a cycle track weathers hard and patchily.
-      const w = 0.34 + wave(seed, r.s * 0.09) * 0.44;
-      return [l[0] * (0.7 + w * 0.5), l[1] * (0.7 + w * 0.5), l[2] * (0.7 + w * 0.5), w];
-    },
-  });
+
+  if (conflictAt) {
+    const l = srgbLinear(PAINT.green);
+    const seed = rib.seed + 77;
+    const any = rib.rungs.some((g) => conflictAt(g.p.x, g.p.z) > 0.004);
+
+    if (any) {
+      emitStrip(out, rib.rungs, [
+        { a: hw - 0.1, dy: crownDy(hw - 0.1, hw, rib.kerbed) + TUNE.paintLift, c: [1, 1, 1, 1] },
+        { a: -(hw - 0.1), dy: crownDy(hw - 0.1, hw, rib.kerbed) + TUNE.paintLift, c: [1, 1, 1, 1] },
+      ], {
+        uv: 'local',
+        tile,
+        lift: TUNE.surfaceLift,
+        nrm: 'up',
+        colourAt: (r) => {
+          // Green paint weathers hard and patchily, and fastest exactly where it
+          // matters, under the traffic turning across it.
+          const g = conflictAt(r.p.x, r.p.z);
+          if (g <= 0.004) return [0, 0, 0, 0];
+          const w = g * (0.52 + wave(seed, r.s * 0.09) * 0.40);
+          return [l[0] * (0.7 + w * 0.5), l[1] * (0.7 + w * 0.5), l[2] * (0.7 + w * 0.5), w];
+        },
+      });
+    }
+  }
+
   if (hw > 0.9) {
     solidLine(out, rib, hw - 0.06, 0.1, PAINT.white, tile, 3, 0.2);
     solidLine(out, rib, -(hw - 0.06), 0.1, PAINT.white, tile, 4, 0.2);
