@@ -51,11 +51,43 @@ Still rough, and worth knowing before you look:
   chain costs roughly half the frame, so `?post=off` or `?q=medium` are both
   worth trying on a laptop. Screen-space reflections and motion blur are
   reserved for `ultra`.
-- **A white band sits on the horizon** in distant views — the ocean mirroring
-  a bright sky at grazing incidence, not yet fully resolved into haze.
-- **Under a dense tree canopy the ground goes very dark.** The metering is
-  centre-weighted to compensate but does not fully recover it.
-- **The Charles reads lighter than it should** from high altitude.
+- **Boston's green cycle tracks** are painted for their whole length rather
+  than at the conflict zones where the paint actually goes, so the Esplanade
+  has a continuous emerald ribbon down it.
+- **Lit windows clip to white after dark.** The emissive facade textures are
+  authored display-referred and the night exposure lift pushes them past the
+  tonemapper's shoulder.
+- **The far-field heightfield is flat.** 407 m posts shaded by elevation and
+  slope is enough for a silhouette; at 15 km, where half the hill's own colour
+  still reaches the eye, it reads as a smear rather than as land.
+
+Three defects listed here through the last round are fixed, and each turned
+out to be a different thing than it looked like:
+
+- *The white band on the horizon* was not the sea mirroring the sky. It was
+  the far-field terrain, which mixed a hand-authored near-white haze colour in
+  at `dithering_fragment` — a chunk that runs *after* `tonemapping_fragment`,
+  so a display-referred constant went straight to the output, on top of the
+  physical aerial perspective the sky module had already applied correctly.
+  The far terrain and the water now both use that shared atmosphere, published
+  on `ctx.aerial`, so the sea, the hills and the dome converge on the same
+  radiance by construction rather than by three separately tuned constants.
+- *The dark ground under canopy* was not metering and not the canopy. The
+  park polygons are drawn `DoubleSide`, three maps `DoubleSide` to
+  `DoubleSide` for the shadow pass rather than to `BackSide`, and the surface
+  failed the depth comparison against its own front faces — Boston Common was
+  shadowing itself while the terrain a centimetre below it was correctly lit
+  and correctly dappled. Parks, roads, water and the far field had all set
+  `castShadow = false` and had it handed straight back by the sky module's
+  per-frame sweep. Foliage separately gained the indirect half of its leaf
+  transmission, which under a closed canopy is very nearly the only light
+  there is.
+- *The Charles reading light from altitude* was a missing `1/PI`. The water's
+  diffuse body was not divided by it the way every other Lambertian surface in
+  the city is, so for the same nominal albedo the water came out PI times
+  brighter than the land it runs through. At a grazing angle Fresnel hides
+  that; from the air, where the body is ninety-seven per cent of the pixel, it
+  does not.
 
 ## Controls
 
