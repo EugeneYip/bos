@@ -65,6 +65,9 @@ const SOIL = new THREE.Vector3(0.088, 0.068, 0.047);
  * chunks blend between levels; anything laid flatter than that pops in and
  * out. 0.22 m clears the morph without reading as a step at eye level.
  */
+/** Metres inside the waterline at which a lawn triangle is dropped. */
+const WATER_TRIM = 1.0;
+
 const LIFT = 0.22;
 /**
  * Longest triangle edge before it gets split, metres. Ear-clipping a park
@@ -143,6 +146,10 @@ export class Parks implements WorldModule {
       .map((r) => ({ rec: r, extent: extentOf(r.outline) }))
       .sort((a, b) => b.extent - a.extent);
 
+    // Published by the Water module, which initialises before this one.
+    const waterAt = ctx.waterDistAt;
+    let overWater = 0;
+
     for (const { rec } of green) {
       const spec = GREEN[rec.kind]!;
       const tri = this.triangulate(rec);
@@ -171,6 +178,24 @@ export class Parks implements WorldModule {
       const budget = Math.max(0, TRI_BUDGET - this.triCount);
       if (budget <= 0) continue;
       const emit = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number): void => {
+        // A land-use polygon is not clipped against the harbour, and OSM's
+        // 'Charlestown Navy Yard' park covers the whole wharf, basin included.
+        // So its lawn was laid straight across the water the USS Constitution
+        // is berthed in, coincident with the water surface and winning the
+        // depth fight at some angles: the frigate appeared to be moored on
+        // grass. The land-cover pass order already knows water beats park --
+        // water is pass 3, park is pass 1 -- but this geometry is built
+        // independently of that and knew nothing about it.
+        //
+        // `subdivide` has already cut these triangles down, so the centroid is
+        // a fair test. The threshold is a metre *inside* the waterline rather
+        // than zero, so a lawn still runs to the water's edge instead of
+        // pulling back from it.
+        if (waterAt) {
+          const mx = (ax + bx + cx) / 3;
+          const mz = (az + bz + cz) / 3;
+          if (waterAt(mx, mz) > WATER_TRIM) { overWater++; return; }
+        }
         const base = b!.pos.length / 3;
         for (const [x, z] of [[ax, az], [bx, bz], [cx, cz]] as const) {
           b!.pos.push(x, ctx.sampleHeight(x, z) + LIFT, z);
@@ -194,6 +219,8 @@ export class Parks implements WorldModule {
       drawn++;
       area += tri.area;
     }
+
+    ctx.stats.parksOverWater = overWater;
 
     for (const [surface, b] of buckets) {
       if (!b.idx.length) continue;
