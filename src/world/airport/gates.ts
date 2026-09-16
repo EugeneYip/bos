@@ -85,49 +85,17 @@ export function buildJetBridges(ctx: Ctx, stands: GateStand[]): { mesh: THREE.Me
   return { mesh, material: mat };
 }
 
-/**
- * The real control tower (`w197731405`, "Boston Air Traffic Control Tower",
- * 86.87 m, footprint centred (3878, -1151)) is already an OSM building and
- * already extruded by `Buildings` as a plain 24x33 m concrete shaft — reading
- * the actual shipped `buildings-*.json` is what gives the position and height
- * here, not memory. Loading the 61,000-building dataset at runtime just to
- * re-derive that one point was not worth it, so it is restated as a small,
- * clearly-provenanced constant instead.
+/*
+ * The control tower is no longer built here.
  *
- * This only *adds* a cab and mast on top of that existing shaft — it must
- * never duplicate or replace it, or the tower gets drawn twice (the exact
- * "Landmarks drawn twice" class of bug this codebase has hit before), and
- * suppressing the OSM footprint properly would mean editing `Buildings.ts`
- * and the landmark registry, which are outside this module's files.
+ * This module used to add a white cab and mast on top of the plain OSM
+ * extrusion of `w197731405` ("Boston Air Traffic Control Tower"), because
+ * reaching the top was all it could do from here: fixing the shaft itself
+ * meant suppressing that footprint, which is `Landmarks`' and `Buildings`'
+ * business, not the airport's.
+ *
+ * That suppression now exists, so the whole tower — base, slender battered
+ * shaft, flared cab, mast and obstruction lights — is one hand-authored mesh
+ * in `src/landmarks/buildings/atcTower.ts`, placed by `Landmarks` and skipped
+ * by `Buildings`. Adding a cab from here as well would draw it twice.
  */
-const TOWER_XZ: [number, number] = [3878, -1151];
-const TOWER_SHAFT_TOP = 86.87;
-
-export function buildControlTowerCab(ctx: Ctx): { mesh: THREE.Mesh; material: THREE.Material } {
-  const [x, z] = TOWER_XZ;
-  const groundY = ctx.sampleHeight(x, z);
-  const cabY = groundY + TOWER_SHAFT_TOP + 2.6;
-  const parts: THREE.BufferGeometry[] = [];
-
-  const cab = new THREE.CylinderGeometry(9.5, 8.2, 5.2, 12);
-  cab.translate(x, cabY, z);
-  parts.push(cab);
-  const roof = new THREE.ConeGeometry(9.8, 1.6, 12);
-  roof.translate(x, cabY + 3.4, z);
-  parts.push(roof);
-  const mast = new THREE.CylinderGeometry(0.35, 0.5, 6.5, 8);
-  mast.translate(x, cabY + 3.4 + 0.8 + 3.25, z);
-  parts.push(mast);
-
-  const merged = mergeGeometries(parts.map((g) => (g.index ? g.toNonIndexed() : g)), false);
-  for (const p of parts) p.dispose();
-  merged!.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({ name: 'airport:tower-cab', color: 0xe7eaee, roughness: 0.35, metalness: 0.2 });
-  if (ctx.envMap) mat.envMap = ctx.envMap;
-  const mesh = new THREE.Mesh(merged!, mat);
-  mesh.name = 'airport:tower-cab';
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.matrixAutoUpdate = false;
-  return { mesh, material: mat };
-}

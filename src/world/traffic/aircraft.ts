@@ -25,7 +25,7 @@ import { buildLoganLayout, type LoganLayout } from '../airport/layout';
 import { buildPavement } from '../airport/pavement';
 import { buildMarkings } from '../airport/markings';
 import { buildLights, type AirfieldLights } from '../airport/lights';
-import { buildControlTowerCab, buildJetBridges, computeGateStands, type GateStand } from '../airport/gates';
+import { buildJetBridges, computeGateStands, type GateStand } from '../airport/gates';
 import { GroundFleet } from '../airport/groundTraffic';
 
 export type AirPart = 'body' | 'glass' | 'light';
@@ -575,10 +575,8 @@ export class AirTraffic {
           if (bridges.material) this.airportMaterials.push(bridges.material);
         }
 
-        const tower = buildControlTowerCab(ctx);
-        root.add(tower.mesh);
-        this.airportMeshes.push(tower.mesh);
-        this.airportMaterials.push(tower.material);
+        // The control tower is a hand-authored landmark now; see
+        // `landmarks/buildings/atcTower.ts`. Nothing to add for it here.
 
         this.groundFleet = new GroundFleet(layout, this.gateStands, GROUND_COUNTS);
 

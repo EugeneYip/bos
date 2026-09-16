@@ -70,6 +70,12 @@ const RAW = [
   ['neu-richards-hall', ['richards hall'], 42.33987, -71.08884, 55],
   ['neu-matthews-arena', ['matthews arena'], 42.34111, -71.08444, 80],
   ['uss-constitution', ['uss constitution'], 42.3724, -71.0566, 120],
+  // Logan's control tower. Unlike Fenway's relation this way *is* named in
+  // OpenStreetMap ('Boston Air Traffic Control Tower', w197731405), so the
+  // ordinary name rule reaches it and no tag- or id-guarded special case is
+  // needed. The radius is tight because 'air traffic control tower' on its own
+  // is a generic string that any airfield in the extract could carry.
+  ['boston-atc-tower', ['boston air traffic control tower', 'boston atc tower', 'logan control tower', 'logan airport control tower', 'air traffic control tower'], 42.365753, -71.018422, 120],
 ];
 
 const TABLE = RAW.filter((e) => e[4] > 0).map(([slug, names, lat, lon, r, tag]) => {

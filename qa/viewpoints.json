@@ -462,5 +462,21 @@
     ],
     "hour": 10.4,
     "note": "The opening framing with the sun in the east instead of behind the camera, as a check that the composition does not depend on the hour."
+  },
+  {
+    "id": "logan-tower",
+    "title": "Boston Air Traffic Control Tower across the Logan airfield",
+    "pos": [
+      3694,
+      58,
+      -966
+    ],
+    "target": [
+      3878,
+      50,
+      -1150
+    ],
+    "hour": 15.8,
+    "note": "The tower must read as a low base, a long slender battered shaft and a glazed cab flaring out past it \u2014 not a full-width concrete slab. Cab and mast must appear exactly once."
   }
 ]

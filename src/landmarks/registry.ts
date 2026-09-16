@@ -32,6 +32,7 @@ import { buildCityHall } from './buildings/cityHall';
 import { buildMitDome } from './buildings/mitDome';
 import { buildLongfellow } from './buildings/longfellow';
 import { buildCitgo } from './buildings/citgo';
+import { buildAtcTower } from './buildings/atcTower';
 import {
   buildConstitution,
   CONSTITUTION_BEARING,
@@ -292,6 +293,21 @@ export const LANDMARKS: Landmark[] = [
     tier: 2,
     absorbs: ['charlestown-navy-yard', 'dry-dock-1'],
     build: buildConstitution,
+  },
+
+  {
+    slug: 'boston-atc-tower',
+    name: 'Boston Air Traffic Control Tower, Logan Airport',
+    // Centroid of OSM way w197731405, via `worldToLonLat(3878.67, -1150.01)`.
+    lon: -71.018422,
+    lat: 42.365753,
+    // The footprint is a 36.4 x 11.1 m capsule whose long axis bears 31 deg;
+    // that axis is the model's local +X.
+    rotation: bearingX(31),
+    height: 86.87,
+    radius: 22,
+    tier: 2,
+    build: buildAtcTower,
   },
 
   /* ------------------------------------------------------- Harvard & MIT */
