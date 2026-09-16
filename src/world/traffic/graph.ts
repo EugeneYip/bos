@@ -18,6 +18,18 @@ const SPEED: Record<string, number> = {
   tertiary: 11, residential: 8, service: 6,
 };
 
+/**
+ * Right-of-way rank by road class, for give-way at an unsignalised junction:
+ * a residential side street yields to the arterial it meets, not just to
+ * whoever happens to reach the corner first. Mirrors the relative ordering
+ * `roads/spec.ts` draws junction surfaces with, kept as its own small table
+ * here rather than imported, since Traffic does not own that file.
+ */
+const PRIORITY: Record<string, number> = {
+  motorway: 100, trunk: 90, primary: 80, secondary: 70,
+  tertiary: 60, residential: 50, service: 30,
+};
+
 /** Walking speed by class, m/s. A brisk pavement pace is about 1.4. */
 const WALK_SPEED: Record<string, number> = {
   footway: 1.4, pedestrian: 1.3, cycleway: 1.5, service: 1.3, residential: 1.35,
@@ -41,6 +53,8 @@ export interface Edge {
   to: number;
   /** Structural layer, so a viaduct never hands off to the street below. */
   layer: number;
+  /** Right-of-way rank; higher yields to no one at an uncontrolled junction. */
+  priority: number;
 }
 
 export interface LaneGraph {
@@ -99,7 +113,10 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
     }
     if (len < 3) return; // too short to be worth traversing
     outLists[from].push(edges.length);
-    edges.push({ pts, cum, length: len, lanes, cls, width, speed: table[cls] ?? 8, to, layer });
+    edges.push({
+      pts, cum, length: len, lanes, cls, width, speed: table[cls] ?? 8, to, layer,
+      priority: PRIORITY[cls] ?? 40,
+    });
   };
 
   let totalKm = 0;

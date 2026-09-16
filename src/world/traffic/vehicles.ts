@@ -76,10 +76,17 @@ function markWheel(g: THREE.BufferGeometry, kind: number, cx: number, cy: number
   return g;
 }
 
-/** Give a lamp cluster its end tag: 0 = headlamp, 1 = tail lamp. */
-function markLamp(g: THREE.BufferGeometry, tail: number): THREE.BufferGeometry {
+/**
+ * Give a lamp cluster its end tag (0 = headlamp, 1 = tail lamp) and which
+ * side of the vehicle it sits on (-1 left, 0 on the centreline, +1 right, in
+ * the same right-hand-side convention as the rest of this module). The side
+ * is what lets one shared material blink an indicator on the correct corner
+ * instead of both at once.
+ */
+function markLamp(g: THREE.BufferGeometry, tail: number, side = 0): THREE.BufferGeometry {
   const n = g.getAttribute('position').count;
   g.setAttribute('aTail', new THREE.Float32BufferAttribute(new Float32Array(n).fill(tail), 1));
+  g.setAttribute('aSide', new THREE.Float32BufferAttribute(new Float32Array(n).fill(side), 1));
   return g;
 }
 
@@ -208,6 +215,7 @@ function axles(axleF: number, axleR: number, track: number, r: number, steerFron
  */
 function car(
   len: number, wid: number, roofH: number, cabFrac: number, suv: boolean, bed = false,
+  lightbar = false,
 ): VehicleDef['parts'] {
   const wheelR = suv ? 0.37 : 0.32;
   const sill = wheelR * 1.16;
@@ -246,21 +254,33 @@ function car(
     box(0.15, 0.17, wid * 0.90, len * 0.475, sill + 0.06),   // bumpers
     box(0.15, 0.17, wid * 0.90, -len * 0.475, sill + 0.06),
   ];
-  const head: THREE.BufferGeometry[] = [];
-  const tail: THREE.BufferGeometry[] = [];
+  // Head and tail lamps carry both their end (0/1) and which side of the
+  // vehicle they sit on, so a shared material can blink an indicator on just
+  // the correct corner. The high-level brake lamp sits on the centreline —
+  // side 0 — so it never reads as an indicator.
+  const lamps: THREE.BufferGeometry[] = [];
   for (const z of [-wid * 0.34, wid * 0.34]) {
-    head.push(box(0.07, 0.15, wid * 0.22, len * 0.5, sill + 0.30, z));
-    tail.push(box(0.07, 0.13, wid * 0.20, -len * 0.5, sill + 0.34, z));
+    const side = Math.sign(z);
+    lamps.push(markLamp(box(0.07, 0.15, wid * 0.22, len * 0.5, sill + 0.30, z), 0, side));
+    lamps.push(markLamp(box(0.07, 0.13, wid * 0.20, -len * 0.5, sill + 0.34, z), 1, side));
   }
   // A high-level brake lamp, which is what you actually pick out of a queue.
   // On a pickup it sits on the back of the cab, not out over the load bay.
-  tail.push(bed
+  lamps.push(markLamp(bed
     ? box(0.05, 0.05, wid * 0.28, cabX - cabLen * 0.5, sill + bodyH + roofH * 0.80)
-    : box(0.05, 0.05, wid * 0.30, -len * 0.5 + 0.02, sill + bodyH + roofH * 0.55));
+    : box(0.05, 0.05, wid * 0.30, -len * 0.5 + 0.02, sill + bodyH + roofH * 0.55), 1, 0));
 
   const bodyParts = [
     ...body.map((g) => tint(g, 0xffffff)),
     ...dark.map((g) => tint(g, 0x24262a)),
+    // A roof light bar reads as a police car at any distance a badge would
+    // not. Painted, not emissive — it shares the shell's one draw call
+    // rather than costing the light material a special case.
+    ...(lightbar ? [
+      tint(box(0.30, 0.065, wid * 0.62, cabX, sill + bodyH + roofH + 0.01), 0x17181b),
+      tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, -wid * 0.16), 0xb0242a),
+      tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, wid * 0.16), 0x1c3f8f),
+    ] : []),
   ].map((g) => markWheel(g, 0, 0, 0, 0));
 
   // White bodywork takes the per-instance tint; everything else is baked dark
@@ -268,10 +288,7 @@ function car(
   return {
     shell: merge([...bodyParts, ...axles(len * 0.31, -len * 0.31, track, wheelR)]),
     glass: merge(glass),
-    light: merge([
-      ...head.map((g) => markLamp(g, 0)),
-      ...tail.map((g) => markLamp(g, 1)),
-    ]),
+    light: merge(lamps),
   };
 }
 
@@ -284,7 +301,7 @@ function car(
  */
 function boxVehicle(
   len: number, wid: number, h: number, cabLen: number, glazed = 0.86,
-  r = 0.46, tandem = true,
+  r = 0.46, tandem = true, transit = false,
 ): VehicleDef['parts'] {
   const sill = r * 1.12;
   const track = trackZ(wid, r) * 2;
@@ -306,16 +323,22 @@ function boxVehicle(
     box(len, 0.10, wid * 1.012, 0, sill + 0.01),                           // arch line
     box(0.18, 0.24, wid * 0.9, len * 0.5, sill + 0.10),                    // bumper
   ];
-  const head: THREE.BufferGeometry[] = [];
-  const tail: THREE.BufferGeometry[] = [];
+  // MBTA livery: a painted waist band between the skirt and the glazing.
+  // Cheap to add — one more vertex-tinted box merged into the shell that
+  // already exists — and it is the one cue that reads as "that's a T bus"
+  // rather than a generic white box at the distance buses are usually seen.
+  const accent = transit ? [box(len * 0.90, h * 0.14, wid * 1.014, 0, sill + h * 0.34)] : [];
+  const lamps: THREE.BufferGeometry[] = [];
   for (const z of [-wid * 0.36, wid * 0.36]) {
-    head.push(box(0.07, 0.18, wid * 0.2, len * 0.5, sill + 0.34, z));
-    tail.push(box(0.07, 0.20, wid * 0.18, -len * 0.5, sill + 0.48, z));
+    const side = Math.sign(z);
+    lamps.push(markLamp(box(0.07, 0.18, wid * 0.2, len * 0.5, sill + 0.34, z), 0, side));
+    lamps.push(markLamp(box(0.07, 0.20, wid * 0.18, -len * 0.5, sill + 0.48, z), 1, side));
   }
-  tail.push(box(0.05, 0.06, wid * 0.34, -len * 0.5 + 0.02, sill + h * 0.92));
+  lamps.push(markLamp(box(0.05, 0.06, wid * 0.34, -len * 0.5 + 0.02, sill + h * 0.92), 1, 0));
 
   const bodyParts = [
     ...body.map((g) => tint(g, 0xffffff)),
+    ...accent.map((g) => tint(g, 0xffc72c)),
     ...dark.map((g) => tint(g, 0x24262a)),
   ].map((g) => markWheel(g, 0, 0, 0, 0));
 
@@ -330,10 +353,7 @@ function boxVehicle(
       ] : []),
     ]),
     glass: merge(glass),
-    light: merge([
-      ...head.map((g) => markLamp(g, 0)),
-      ...tail.map((g) => markLamp(g, 1)),
-    ]),
+    light: merge(lamps),
   };
 }
 
@@ -356,9 +376,20 @@ export function vehicleTypes(): VehicleDef[] {
     { name: 'truck',    length: 8.2, width: 2.44, weight: 2,  color: 0xd8d6d0, wheelbase: 4.84, wheelR: 0.46,
       parts: boxVehicle(8.2, 2.44, 2.5, 2.0, 0.17, 0.46) },
     // MBTA buses are white above a yellow band with a black skirt; at the
-    // distance you normally see one, the pale body is the recognisable part.
+    // distance you normally see one, the pale body and the band are what's
+    // recognisable.
     { name: 'bus',      length: 12.2, width: 2.59, weight: 2, color: 0xf0eee8, wheelbase: 7.20, wheelR: 0.50,
-      parts: boxVehicle(12.2, 2.59, 2.85, 2.4, 0.82, 0.50) },
+      parts: boxVehicle(12.2, 2.59, 2.85, 2.4, 0.82, 0.50, true, true) },
+    // A marked cruiser: same shell as the SUV, plus a roof light bar. Common
+    // enough to notice, not so common it reads as a checkpoint.
+    { name: 'police',   length: 5.1, width: 1.98, weight: 1.3, color: 0xf5f4f0, wheelbase: 3.16, wheelR: 0.37,
+      parts: car(5.1, 1.98, 0.78, 0.60, true, false, true) },
+    // Boston Duck Tours' amphibious DUKWs: boxy, high-sided, mostly open
+    // rather than glazed, and a colour nothing else in the mix wears. Rare
+    // by design — the real fleet is a couple of dozen vehicles on a handful
+    // of routes, not a tenth of the traffic.
+    { name: 'duckboat', length: 10.7, width: 2.44, weight: 0.5, color: 0x5c6b3f, wheelbase: 5.6, wheelR: 0.52,
+      parts: boxVehicle(10.7, 2.44, 2.75, 2.1, 0.10, 0.52, true) },
   ];
 }
 

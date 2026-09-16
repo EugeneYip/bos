@@ -166,6 +166,7 @@ export class App {
   }
 
   private moduleMs = new Map<string, number>();
+  private moduleWorst = new Map<string, number>();
   private cpuUpdate = 0;
   private cpuRender = 0;
   private cpuWorstUpdate = 0;
@@ -206,6 +207,17 @@ export class App {
       this.moduleMs.set(m.name, ema);
       if (ema >= 0.3) this.ctx.stats[`cpu.${m.name}`] = Math.round(ema * 100) / 100;
       else delete this.ctx.stats[`cpu.${m.name}`];
+
+      // And the worst frame each has ever had. The mean is the wrong statistic
+      // for work that only happens when something streams: `fps.low` sits at
+      // 10 at every viewpoint in the project, day and night, parked or moving,
+      // which is a ~100 ms stall arriving regularly. An exponential average
+      // reads about zero through that, so a high-water mark is kept per
+      // module and only the ones that have actually stalled are reported.
+      if (el > (this.moduleWorst.get(m.name) ?? 0)) {
+        this.moduleWorst.set(m.name, el);
+        if (el >= 4) this.ctx.stats[`worst.${m.name}`] = Math.round(el * 10) / 10;
+      }
     }
     const tr = performance.now();
 

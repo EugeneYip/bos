@@ -60,9 +60,19 @@ const BOATS: Record<string, number> = { low: 10, medium: 22, high: 38, ultra: 58
 /** Boats are large and read from much further out than a car. */
 const BOAT_RADIUS = 1500;
 
-/** Intelligent-driver-model constants: comfortable accel/brake, gap, headway. */
-const ACC = 1.7;
-const DEC = 2.6;
+/**
+ * Intelligent-driver-model constants: comfortable accel/brake, gap, headway.
+ * A lone car pulling away on a clear road should be inside 30 mph in
+ * something like 3-5 seconds; the free-road term's own asymptote toward
+ * cruise speed eats a couple of those seconds no matter what ACC is, so this
+ * sits at the brisk end of "comfortable" rather than the gentle end that
+ * 1.7 was — that read as a car that could not be bothered to get going, and
+ * pulling away from a light was the single most repeated action in the city.
+ * DEC stays the harder of the two, same ratio as before: braking is easier
+ * to do quickly than accelerating is.
+ */
+const ACC = 2.4;
+const DEC = 3.3;
 const GAP0 = 2.4;
 const HEADWAY = 1.25;
 /** Signal cycle, seconds. Two phases with a short all-red between them. */
@@ -94,6 +104,19 @@ interface Car {
   pitch: number;
   /** Seconds spent stationary, so a gridlock eventually breaks itself. */
   stuck: number;
+  /**
+   * Current lateral offset from the lane centreline, metres, eased toward
+   * the target lane's offset rather than snapping to it. Without this a
+   * car's displayed position jumps the instant it crosses onto a new edge,
+   * because the offset direction is perpendicular to the road heading and
+   * that heading changes in one frame at a junction — most visibly at a
+   * turn, where the jump is largest exactly when it would be most obvious.
+   */
+  lat: number;
+  /** Turn indicator: -1 left, 0 off, +1 right. Driven by steer, with
+   * hysteresis, so it comes on for a manoeuvre and self-cancels like a real
+   * steering-column stalk rather than needing its own state machine. */
+  indicator: number;
 }
 
 interface Walker {
@@ -168,6 +191,7 @@ export class Traffic implements WorldModule {
   private carRoll: THREE.InstancedBufferAttribute[] = [];
   private carSteer: THREE.InstancedBufferAttribute[] = [];
   private carBrake: THREE.InstancedBufferAttribute[] = [];
+  private carIndicator: THREE.InstancedBufferAttribute[] = [];
 
   /** Edge start/end unit headings, [sx,sz,ex,ez] per edge; junction choice needs them. */
   private edgeDir: Float32Array = new Float32Array(0);
@@ -182,6 +206,10 @@ export class Traffic implements WorldModule {
   private claimCar = new Map<number, number>();
   private leaderOf = new Map<number, number>();
   private firstOn = new Map<number, number>();
+  /** Car indices parked on each edge this frame, rebuilt every frame in the
+   * same pass that already visits every active car — a spawn check against
+   * this is a handful of comparisons, not the whole pool. */
+  private edgeOccupants = new Map<number, number[]>();
 
   private vdefs: VesselDef[] = [];
   private boats: Boat[] = [];
@@ -204,6 +232,8 @@ export class Traffic implements WorldModule {
   private walkSpawn = 0;
   /** Metres from each walk edge's centreline to the footway beside it. */
   private walkKerb: Float32Array = new Float32Array(0);
+  /** 1 where a walk-graph node sits at a mapped, signalised junction. */
+  private walkSignal: Uint8Array = new Uint8Array(0);
   /** Scratch for the pedestrian queueing pass; allocated once. */
   private walkOrder: number[] = [];
   private walkKey: Float64Array = new Float64Array(0);
@@ -212,7 +242,9 @@ export class Traffic implements WorldModule {
 
   private flagMesh: THREE.InstancedMesh | null = null;
   private flagUniforms = { uTime: { value: 0 }, uWind: { value: new THREE.Vector2(0.72, -0.69) } };
-  private lampUniforms = { uNight: { value: 0 }, uBrake: { value: 0 } };
+  private lampUniforms = {
+    uNight: { value: 0 }, uBrake: { value: 0 }, uTime: { value: 0 }, uIndicator: { value: 0 },
+  };
 
   private materials: THREE.Material[] = [];
   private nightLit: THREE.MeshStandardMaterial[] = [];
@@ -344,9 +376,11 @@ export class Traffic implements WorldModule {
       const roll = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
       const steer = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
       const brake = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
+      const indicator = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
       this.carRoll.push(roll);
       this.carSteer.push(steer);
       this.carBrake.push(brake);
+      this.carIndicator.push(indicator);
       for (const [part, geo] of Object.entries(d.parts) as [Part, THREE.BufferGeometry | null][]) {
         if (!geo) continue;
         if (part === 'shell') {
@@ -354,6 +388,7 @@ export class Traffic implements WorldModule {
           geo.setAttribute('aSteer', steer);
         } else if (part === 'light') {
           geo.setAttribute('aBrake', brake);
+          geo.setAttribute('aIndicator', indicator);
         }
         const mesh = new THREE.InstancedMesh(geo, this.carMaterial(part, d.color), cap);
         mesh.name = `traffic:${d.name}:${part}`;
@@ -381,7 +416,7 @@ export class Traffic implements WorldModule {
       this.cars.push({
         type: this.typeOrder[i], edge: -1, s: 0, lane: 0, speed: 0, cruise: 0,
         colour: 0, active: false, next: -1, yaw: 0, roll: 0, steer: 0,
-        brake: 0, lean: 0, pitch: 0, stuck: 0,
+        brake: 0, lean: 0, pitch: 0, stuck: 0, lat: 0, indicator: 0,
       });
     }
     this.order = new Array(this.cars.length).fill(0).map((_, i) => i);
@@ -402,25 +437,46 @@ export class Traffic implements WorldModule {
         // One mesh for both ends. `aTail` splits them in the fragment stage so
         // headlamps read warm-white, tail lamps red, and the reds flare under
         // braking — which is most of what a queue of traffic looks like.
+        // `aSide` (-1 left, 0 centre, +1 right) plus the per-instance
+        // `aIndicator` state pick out just the one corner that should flash
+        // amber for a turn, day or night, on top of whichever of the above
+        // that corner is already showing.
         const m = mk({ name: 'car:light', color: 0x2a1c18, roughness: 0.24, metalness: 0.2,
           emissive: new THREE.Color(0xffffff), emissiveIntensity: 1 });
         m.onBeforeCompile = (sh) => {
           sh.uniforms.uNight = this.lampUniforms.uNight;
           sh.uniforms.uBrake = this.lampUniforms.uBrake;
+          sh.uniforms.uTime = this.lampUniforms.uTime;
+          sh.uniforms.uIndicator = this.lampUniforms.uIndicator;
           sh.vertexShader = sh.vertexShader
             .replace('#include <common>',
-              '#include <common>\nattribute float aTail;\nattribute float aBrake;\nvarying float vTail;\nvarying float vBrakeAmt;')
-            .replace('#include <begin_vertex>',
-              '#include <begin_vertex>\nvTail = aTail; vBrakeAmt = aBrake;');
+              '#include <common>\nattribute float aTail;\nattribute float aBrake;\n'
+              + 'attribute float aSide;\nattribute float aIndicator;\nuniform float uTime;\n'
+              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;')
+            .replace('#include <begin_vertex>', /* glsl */ `
+              #include <begin_vertex>
+              vTail = aTail; vBrakeAmt = aBrake;
+              // On the correct side only: aSide and aIndicator agree in sign
+              // (both +1 or both -1) exactly when this lamp is the one that
+              // should blink. A 1.6 Hz square wave, phase-offset per instance
+              // from its own world position so a street of turning cars does
+              // not flash in unison.
+              float bhOnSide = step(0.5, abs(aIndicator)) * (1.0 - step(0.5, abs(aSide + aIndicator)));
+              vec3 bhIo = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+              float bhBlink = step(0.5, fract(uTime * 1.6 + bhIo.x * 0.7 + bhIo.z * 0.53));
+              vBlinkOn = bhOnSide * bhBlink;
+            `);
           sh.fragmentShader = sh.fragmentShader
             .replace('#include <common>',
-              '#include <common>\nuniform float uNight;\nuniform float uBrake;\nvarying float vTail;\nvarying float vBrakeAmt;')
+              '#include <common>\nuniform float uNight;\nuniform float uBrake;\nuniform float uIndicator;\n'
+              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;')
             .replace('#include <emissivemap_fragment>', /* glsl */ `
               #include <emissivemap_fragment>
               vec3 bhHead = vec3(1.0, 0.80, 0.58) * uNight;
               vec3 bhTail = vec3(1.0, 0.055, 0.02)
                           * (uNight * 0.42 + vBrakeAmt * uBrake);
-              totalEmissiveRadiance = mix(bhHead, bhTail, vTail);
+              vec3 bhAmber = vec3(1.0, 0.56, 0.05) * (vBlinkOn * uIndicator);
+              totalEmissiveRadiance = mix(bhHead, bhTail, vTail) + bhAmber;
             `);
         };
         m.customProgramCacheKey = () => 'car-lamp';
@@ -454,10 +510,32 @@ export class Traffic implements WorldModule {
     return SIM_RADIUS + THREE.MathUtils.clamp(ctx.camera.position.y - 60, 0, 340) * SIM_ALTITUDE_GAIN;
   }
 
+  /**
+   * True when some other active car already occupies roughly this spot on
+   * this edge and lane. Spawns and respawns used to pick a distance along the
+   * edge with no regard for who else was already there, which was the one
+   * reliable way to see two cars occupying the same ground for a frame or
+   * two — rare over the whole city, but a recycle happens constantly, so it
+   * was always happening *somewhere*. The scan is over the whole pool rather
+   * than an indexed lookup because it only runs while a car has no edge to be
+   * on yet, which is a small fraction of the fleet in any one frame.
+   */
+  private occupied(edge: number, lane: number, s: number, len: number): boolean {
+    const bucket = this.edgeOccupants.get(edge);
+    if (!bucket) return false;
+    for (const idx of bucket) {
+      const other = this.cars[idx];
+      if (other.lane !== lane) continue;
+      if (Math.abs(other.s - s) < len) return true;
+    }
+    return false;
+  }
+
   /** Put a car on a road just outside the camera's view. */
   private spawn(car: Car, ctx: Ctx, radius: number): void {
     const g = this.graph!;
     const cam = ctx.camera.position;
+    const def = this.defs[car.type];
     // Rejection-sample a handful of edges rather than searching: the network
     // is dense enough that a few tries almost always lands one in range.
     for (let attempt = 0; attempt < 16; attempt++) {
@@ -467,9 +545,15 @@ export class Traffic implements WorldModule {
       const dx = e.pts[mid] - cam.x;
       const dz = e.pts[mid + 2] - cam.z;
       if (dx * dx + dz * dz > radius * radius) continue;
+      const lane = Math.floor(Math.random() * e.lanes);
+      const s = Math.random() * e.length;
+      // A car-length-and-a-bit of clearance: enough that the follow model
+      // sorts out the gap within a fraction of a second instead of the two
+      // bodies visibly sharing the road on the frame they first appear.
+      if (this.occupied(ei, lane, s, def.length * 1.2)) continue;
       car.edge = ei;
-      car.s = Math.random() * e.length;
-      car.lane = Math.floor(Math.random() * e.lanes);
+      car.s = s;
+      car.lane = lane;
       car.cruise = e.speed * (0.78 + Math.random() * 0.34);
       car.speed = car.cruise;
       car.colour = CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
@@ -481,6 +565,8 @@ export class Traffic implements WorldModule {
       car.lean = 0;
       car.pitch = 0;
       car.stuck = 0;
+      car.indicator = 0;
+      car.lat = Math.min((lane + 0.5) * LANE_W, Math.max(e.width * 0.5 - 0.4, LANE_W * 0.55));
       car.active = true;
       return;
     }
@@ -550,6 +636,7 @@ export class Traffic implements WorldModule {
     // ---- pass one: spawn, and index who is where ------------------------
     this.claimDist.clear();
     this.claimCar.clear();
+    this.edgeOccupants.clear();
     this.order.length = 0;
     for (let i = 0; i < this.cars.length; i++) {
       const car = this.cars[i];
@@ -559,6 +646,11 @@ export class Traffic implements WorldModule {
       // edge in the low ones, so a single sort puts every queue in order.
       this.sortKey[i] = (car.edge * 8 + car.lane) * 1e5 + Math.min(car.s, 99999);
       this.order.push(i);
+      // Register this car against its edge so a later spawn this same frame
+      // can check occupancy in a handful of comparisons instead of the whole
+      // pool — cleared and rebuilt every frame, same as the claim maps below.
+      const occ = this.edgeOccupants.get(car.edge);
+      if (occ) occ.push(i); else this.edgeOccupants.set(car.edge, [i]);
       // Claim the junction ahead for whichever car is closest to it.
       const d = e.length - car.s;
       if (d < 22) {
@@ -626,14 +718,20 @@ export class Traffic implements WorldModule {
         }
       }
 
-      // Red light, or give way to whoever claimed the junction first.
+      // Red light, or give way at an uncontrolled junction: to whoever got
+      // there first among equals, but to a busier cross street regardless of
+      // who is closer — a residential side street stopping for the avenue it
+      // meets, not just for whichever car happens to be nearer the corner.
       const dStop = Math.max(dNode - 2.6, 0.05);
       let hold = false;
       if (dNode < 55 && this.signal[e.to] && !this.green(e.to, this.edgeAxis[car.edge])) hold = true;
       else if (dNode < 20 && car.stuck < 7) {
         const owner = this.claimCar.get(e.to);
         const ownerD = this.claimDist.get(e.to);
-        if (owner !== undefined && owner !== i && ownerD !== undefined && ownerD < dNode - 1.5) hold = true;
+        if (owner !== undefined && owner !== i && ownerD !== undefined) {
+          const outranked = g.edges[this.cars[owner].edge].priority > e.priority;
+          if (outranked || ownerD < dNode - 1.5) hold = true;
+        }
       }
       if (hold) {
         accel = Math.min(accel, Traffic.follow(car.speed, v0, dStop, car.speed));
@@ -693,10 +791,28 @@ export class Traffic implements WorldModule {
                  * Math.min(1, dt * 6);
       car.roll = (car.roll + (car.speed * dt) / def.wheelR) % (Math.PI * 2);
 
-      // Right-hand traffic: offset to the right of the centreline, which in
-      // this frame is (-hz, hx).
-      const off = (car.lane + 0.5) * LANE_W;
-      pos.set(p.x - p.hz * off, p.y, p.z + p.hx * off);
+      // Turn indicator: comes on once the wheel is genuinely turned, stays on
+      // through the manoeuvre, and cancels itself near dead-ahead or on a
+      // reversal — the same feel a real self-cancelling stalk gives, with no
+      // separate state machine for "is it turning".
+      if (car.indicator === 0) {
+        if (car.steer > 0.17) car.indicator = 1;
+        else if (car.steer < -0.17) car.indicator = -1;
+      } else if (Math.abs(car.steer) < 0.05 || Math.sign(car.steer) === -car.indicator) {
+        car.indicator = 0;
+      }
+
+      // Right-hand traffic: offset to the right of the centreline. The
+      // direction of "right" comes from the car's own smoothed yaw rather
+      // than the road's raw heading at this sample point, and the distance
+      // eases toward the target lane rather than snapping to it — otherwise
+      // the offset direction flips the instant the car crosses onto a new
+      // edge, which is exactly at a turn, and the car visibly pops sideways
+      // by a lane width at the one moment a real car is tracing an arc.
+      const targetOff = Math.min((car.lane + 0.5) * LANE_W, Math.max(e.width * 0.5 - 0.4, LANE_W * 0.55));
+      car.lat += THREE.MathUtils.clamp(targetOff - car.lat, -2.6 * dt, 2.6 * dt);
+      const rHx = Math.cos(car.yaw), rHz = -Math.sin(car.yaw);
+      pos.set(p.x - rHz * car.lat, p.y, p.z + rHx * car.lat);
       q.setFromAxisAngle(up, car.yaw);
       // Road gradient plus the body's own pitch, applied in the car's frame.
       euler.set(car.lean, 0, car.pitch + Math.asin(THREE.MathUtils.clamp(p.hy, -1, 1)), 'XYZ');
@@ -716,6 +832,7 @@ export class Traffic implements WorldModule {
       this.carRoll[t].setX(slot, car.roll);
       this.carSteer[t].setX(slot, car.steer);
       this.carBrake[t].setX(slot, car.brake);
+      this.carIndicator[t].setX(slot, car.indicator);
     }
 
     for (let t = 0; t < this.carMeshes.length; t++) {
@@ -727,6 +844,7 @@ export class Traffic implements WorldModule {
       this.carRoll[t].needsUpdate = true;
       this.carSteer[t].needsUpdate = true;
       this.carBrake[t].needsUpdate = true;
+      this.carIndicator[t].needsUpdate = true;
     }
     ctx.stats.vehiclesDrawn = cursor.reduce((a, b) => a + b, 0);
   }
@@ -753,6 +871,42 @@ export class Traffic implements WorldModule {
       const e = wg.edges[i];
       const onFoot = e.cls === 'footway' || e.cls === 'pedestrian' || e.cls === 'cycleway';
       this.walkKerb[i] = onFoot ? 0 : Math.max(2.0, e.width * 0.5 + 0.85);
+    }
+
+    // Which walk-graph nodes sit at a signalised junction, so a pedestrian
+    // waits far more at a real crossing than at an arbitrary corner. The walk
+    // graph is built and numbered independently of the drive graph (its own
+    // call into buildLaneGraph, its own node ids), so a node has to be
+    // matched by position — the same coarse-hash snap indexNetwork uses to
+    // pin mapped signals onto the drive graph, run the other way around.
+    this.walkSignal = new Uint8Array(wg.out.length);
+    {
+      const CELL = 30;
+      const hash = new Map<number, number[]>();
+      for (let i = 0; i < wg.out.length; i++) {
+        const k = Math.floor(wg.nodes[i * 3] / CELL) * 65536 + Math.floor(wg.nodes[i * 3 + 2] / CELL);
+        const bucket = hash.get(k);
+        if (bucket) bucket.push(i); else hash.set(k, [i]);
+      }
+      const dg = this.graph!;
+      for (let ni = 0; ni < this.signal.length; ni++) {
+        if (!this.signal[ni]) continue;
+        const x = dg.nodes[ni * 3];
+        const z = dg.nodes[ni * 3 + 2];
+        const gx = Math.floor(x / CELL);
+        const gz = Math.floor(z / CELL);
+        for (let dxg = -1; dxg <= 1; dxg++) {
+          for (let dzg = -1; dzg <= 1; dzg++) {
+            const bucket = hash.get((gx + dxg) * 65536 + (gz + dzg));
+            if (!bucket) continue;
+            for (const wi of bucket) {
+              const dx = wg.nodes[wi * 3] - x;
+              const dz = wg.nodes[wi * 3 + 2] - z;
+              if (dx * dx + dz * dz < 625) this.walkSignal[wi] = 1;
+            }
+          }
+        }
+      }
     }
 
     const n = WALKERS[ctx.tier] ?? 400;
@@ -899,7 +1053,13 @@ export class Traffic implements WorldModule {
         w.s -= e.length;
         w.edge = outs[(Math.random() * outs.length) | 0];
         // Pause at a junction now and then: it reads as waiting to cross.
-        if (Math.random() < 0.13) w.idle = 1.5 + Math.random() * 7;
+        // Far likelier, and for longer, at a mapped signal — that is where
+        // people actually wait for a walk phase rather than just stepping
+        // off the kerb — than at an arbitrary corner.
+        const atSignal = this.walkSignal[e.to] === 1;
+        if (Math.random() < (atSignal ? 0.6 : 0.09)) {
+          w.idle = atSignal ? 3 + Math.random() * 9 : 1.2 + Math.random() * 5;
+        }
         continue;
       }
       // Step across to the footway rather than snapping to it: leaving a
@@ -1386,6 +1546,11 @@ export class Traffic implements WorldModule {
     const comp = 2.5 / Math.max(ctx.exposure || 2.5, 0.1);
     this.lampUniforms.uNight.value = t * t * (3 - 2 * t) * comp * 4.2;
     this.lampUniforms.uBrake.value = (1.9 + 3.4 * t) * comp;
+    this.lampUniforms.uTime.value = this.time;
+    // Indicators read day or night, so unlike the headlamp this does not
+    // scale with the twilight factor — only with the same exposure
+    // compensation everything display-referred on this city needs.
+    this.lampUniforms.uIndicator.value = 2.2 * comp;
     for (const m of this.nightLit) {
       m.emissiveIntensity = t * t * (3 - 2 * t) * comp * ((m.userData.nightPeak as number) ?? 1);
     }
