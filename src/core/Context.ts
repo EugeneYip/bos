@@ -57,6 +57,18 @@ export interface LampField {
  * and may publish capabilities onto it (e.g. the terrain module installs
  * `sampleHeight`). Keep additions additive so modules stay decoupled.
  */
+/** @see Ctx.farBathymetry */
+export interface FarBathymetry {
+  /** R8: 0 = land, 1..255 = depth. Linear-filtered, clamped at the edge. */
+  tex: THREE.DataTexture;
+  /** World-space north-west corner of the grid. */
+  origin: THREE.Vector2;
+  /** Reciprocal of the grid's world extent, for a 0..1 lookup. */
+  invSize: THREE.Vector2;
+  /** Depth in metres that a full-scale texel stands for. */
+  maxDepth: number;
+}
+
 export interface Ctx {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -125,6 +137,22 @@ export interface Ctx {
    * the wave troughs wash over the carriageway.
    */
   waterDistAt?: (x: number, z: number) => number;
+
+  /**
+   * Coarse USGS bathymetry for everything past the modelled city box, as a
+   * single-channel texture: 0 is dry land, and anything above that is depth
+   * below sea level, {@link FarBathymetry.maxDepth} metres at full scale.
+   *
+   * Published by FarTerrain, which loads the grid anyway, and consumed by
+   * Water. The ocean skirt reaches 45 km but the shoreline field it shades
+   * itself from only covers the city box, and that field's samplers clamp at
+   * their edge -- so past the box every compass direction inherited whatever
+   * the boundary texel happened to be, and the open bay came out as rays of
+   * ocean and rays of nothing fanning out from the city. This is the real
+   * answer to 'is there sea here, and how deep': 42% of the far grid is wet,
+   * down to -289 m.
+   */
+  farBathymetry?: FarBathymetry;
 
   /** Shared PBR texture/material library; installed by the Materials module. */
   materials: MaterialLibrary;

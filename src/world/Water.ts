@@ -156,7 +156,10 @@ export class Water implements WorldModule {
 
     for (const [g, mat] of pieces) {
       const mesh = new THREE.Mesh(g, mat);
-      mesh.name = 'water:chunk';
+      // The skirt is named apart from the chunks because `__debug.pick` is how
+      // anything out here gets attributed, and one shared name made the open
+      // ocean and a harbour chunk indistinguishable in its output.
+      mesh.name = mat === this.skirtMaterial ? 'water:skirt' : 'water:chunk';
       mesh.userData.noShadow = true;
       mesh.castShadow = false;
       mesh.receiveShadow = false; // shading is fully handled in the shader
@@ -259,6 +262,9 @@ export class Water implements WorldModule {
         CUBEUV_MAX_MIP: '8.0',
         WATER_PLANAR: this.reflectEnabled ? 1 : 0,
         ...(skirt ? { WATER_SKIRT: '' } : {}),
+        // Only the skirt reaches past the shoreline field, so only the skirt
+        // has any use for the coarse bathymetry out there.
+        ...(skirt && ctx.farBathymetry ? { WATER_FAR_BATHY: '' } : {}),
       },
       uniforms: share ?? {
         uTime: { value: 0 },
@@ -286,6 +292,11 @@ export class Water implements WorldModule {
         uFieldOrigin: { value: new THREE.Vector2(field.x0, field.z0) },
         uFieldInvSize: { value: new THREE.Vector2(1 / (field.w * field.ts), 1 / (field.h * field.ts)) },
         uFieldTexel: { value: field.ts },
+
+        uFarBathy: { value: ctx.farBathymetry?.tex ?? null },
+        uFarOrigin: { value: ctx.farBathymetry?.origin ?? new THREE.Vector2() },
+        uFarInvSize: { value: ctx.farBathymetry?.invSize ?? new THREE.Vector2() },
+        uFarMaxDepth: { value: ctx.farBathymetry?.maxDepth ?? 1 },
 
         uWaves: { value: tex.waves },
         uNoise: { value: tex.noise },

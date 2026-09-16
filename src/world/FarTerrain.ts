@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Ctx, WorldModule } from '../core/Context';
+import type { Ctx, FarBathymetry, WorldModule } from '../core/Context';
 import { loadBinary, loadJson } from '../core/data';
 import { BOUNDS } from '../core/config';
 import { lonLatToWorld } from '../core/geo';
@@ -17,6 +17,22 @@ import { lonLatToWorld } from '../core/geo';
  * This drapes a coarse heightfield (407 m posts, from the same USGS source)
  * around the city, with a hole cut for the detailed terrain, shaded by
  * elevation and slope and dissolved into the sky by distance.
+ *
+ * ## The sea is a hole too
+ *
+ * 42% of that grid is below sea level -- it is real bathymetry, down to
+ * -289 m (`seaFraction` in the header). It used to be flattened to y=0 and
+ * painted a flat matte grey-blue, which put a dead, unlit plate over the
+ * whole of Massachusetts Bay: no waves, no sun glitter, no sky in it. And
+ * `Water`'s ocean skirt is already the real surface out there, reaching 45 km
+ * against this mesh's 23 km, sitting at exactly the same y=0. Two meshes
+ * wanted that plane and this one won, because it is `transparent` and so
+ * draws after the water's `renderOrder` 6.
+ *
+ * So the wet part is simply not drawn. A raycast at the high aerial viewpoint
+ * used to name `far-terrain` in front of `water:chunk` on every sample over
+ * open sea; with the plate gone the same pixels go from [86,103,100] to
+ * [101,128,142], which is the difference between a wash and water.
  */
 
 interface FarHeader {
@@ -36,6 +52,21 @@ interface FarHeader {
 const RADIUS = 23000;
 /** Grid stride: every Nth post. Distant hills need shape, not detail. */
 const STRIDE = 2;
+/**
+ * At or under this elevation a post is sea, and the quads made only of sea
+ * posts are not drawn. Not exactly zero: the grid holds a few thousand posts
+ * sitting on 0.0 along the tide line, and they belong to the water.
+ */
+const SEA_EPS = 0.01;
+/** Where a surviving sea post sits, metres. Under the skirt, not on it. */
+const SHELF = -1.4;
+/**
+ * Full scale of the depth texture handed to the water, metres. The grid goes
+ * to -289 m, but the water only uses depth to pick a colour and it has
+ * saturated to open-ocean long before 100 m, so the byte is spent on the
+ * shelf where the gradient is actually visible.
+ */
+const MAX_DEPTH = 100;
 
 export class FarTerrain implements WorldModule {
   readonly name = 'FarTerrain';
@@ -58,6 +89,7 @@ export class FarTerrain implements WorldModule {
       return;
     }
     const el = new Float32Array(buf);
+    ctx.farBathymetry = publishBathymetry(el, hdr);
 
     // The hole: the detailed terrain's own footprint, shrunk slightly so the
     // two overlap by a post rather than leaving a visible seam of sky.
@@ -72,13 +104,22 @@ export class FarTerrain implements WorldModule {
     const index = new Map<number, number>();
     const c = new THREE.Color();
 
-    const sample = (i: number, j: number): number => {
+    /** Elevation as the USGS grid has it, clamped to the grid. Negative is sea. */
+    const raw = (i: number, j: number): number => {
       const ii = Math.min(Math.max(i, 0), hdr.width - 1);
       const jj = Math.min(Math.max(j, 0), hdr.height - 1);
-      // Below sea level is ocean: flatten it so the seabed never shows where
-      // the water module's surface does not reach.
-      return Math.max(el[jj * hdr.width + ii], 0);
+      return el[jj * hdr.width + ii];
     };
+
+    const isSea = (i: number, j: number): boolean => raw(i, j) <= SEA_EPS;
+
+    /**
+     * Elevation for shading and slope, with the seabed flattened. The depth
+     * itself is no use to this mesh: where it is wet there is nothing drawn,
+     * and a 407 m post spacing would turn the harbour floor into facets
+     * anyway.
+     */
+    const sample = (i: number, j: number): number => Math.max(raw(i, j), 0);
 
     const vertexAt = (i: number, j: number): number => {
       const key = j * hdr.width + i;
@@ -114,13 +155,18 @@ export class FarTerrain implements WorldModule {
       }
 
       const id = pos.length / 3;
-      pos.push(x, h, z);
+      // A sea post only survives as a corner of a quad that has some land in
+      // it. Leaving it at exactly y=0 would make that coastal quad coplanar
+      // with the skirt and z-fight it along every shoreline, so it sinks just
+      // under the surface -- which is also what a beach does.
+      pos.push(x, isSea(i, j) ? SHELF : h, z);
       col.push(c.r, c.g, c.b);
       index.set(key, id);
       return id;
     };
 
     let quads = 0;
+    let wet = 0;
     for (let j = 0; j + STRIDE < hdr.height; j += STRIDE) {
       for (let i = 0; i + STRIDE < hdr.width; i += STRIDE) {
         const x = hdr.originX + i * hdr.spacingX;
@@ -133,6 +179,9 @@ export class FarTerrain implements WorldModule {
         const cz = (z + z1) / 2;
         if (Math.hypot(cx, cz) > RADIUS) continue;
         if (x1 > hole.x0 && x < hole.x1 && z1 > hole.z0 && z < hole.z1) continue;
+        // Open water: leave it to the water module, which shades it properly.
+        if (isSea(i, j) && isSea(i + STRIDE, j)
+          && isSea(i, j + STRIDE) && isSea(i + STRIDE, j + STRIDE)) { wet++; continue; }
 
         const a = vertexAt(i, j);
         const b = vertexAt(i + STRIDE, j);
@@ -210,7 +259,8 @@ export class FarTerrain implements WorldModule {
     ctx.stats.farTris = idx.length / 3;
     console.info(
       `[FarTerrain] ${(RADIUS / 1000).toFixed(0)} km radius, ${quads} quads, ` +
-      `${(idx.length / 3 / 1000).toFixed(0)}k tris, elevation 0..${hdr.max.toFixed(0)} m`,
+      `${(idx.length / 3 / 1000).toFixed(0)}k tris, elevation 0..${hdr.max.toFixed(0)} m, ` +
+      `${wet} all-sea quads left to the water`,
     );
   }
 
@@ -227,6 +277,38 @@ export class FarTerrain implements WorldModule {
     if (this.mesh) { ctx.scene.remove(this.mesh); this.mesh.geometry.dispose(); }
     this.material?.dispose();
   }
+}
+
+/**
+ * Pack the wet half of the grid into a texture the water shader can read.
+ *
+ * Land is 0 so a single comparison rejects it, and the remaining 254 codes
+ * carry depth. Linear filtering is deliberate: it softens the 407 m posts into
+ * a shelving coast rather than a staircase, and the only place the blend is
+ * wrong -- the texel straddling the waterline -- is under the far terrain's
+ * own coastal quads, which are opaque and drawn above the water anyway.
+ */
+function publishBathymetry(el: Float32Array, hdr: FarHeader): FarBathymetry {
+  const data = new Uint8Array(hdr.width * hdr.height);
+  for (let k = 0; k < data.length; k++) {
+    const e = el[k];
+    if (!(e <= SEA_EPS)) continue; // land, and NaN-safe
+    const d = Math.min(-e, MAX_DEPTH) / MAX_DEPTH;
+    data[k] = 1 + Math.round(d * 254);
+  }
+  const tex = new THREE.DataTexture(data, hdr.width, hdr.height, THREE.RedFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return {
+    tex,
+    origin: new THREE.Vector2(hdr.originX, hdr.originZ),
+    invSize: new THREE.Vector2(1 / hdr.sizeX, 1 / hdr.sizeZ),
+    maxDepth: MAX_DEPTH,
+  };
 }
 
 function hash01(n: number): number {

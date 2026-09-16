@@ -51,6 +51,13 @@ uniform vec2 uFieldOrigin;
 uniform vec2 uFieldInvSize;
 uniform float uFieldTexel;
 
+#ifdef WATER_FAR_BATHY
+uniform sampler2D uFarBathy;
+uniform vec2 uFarOrigin;
+uniform vec2 uFarInvSize;
+uniform float uFarMaxDepth;
+#endif
+
 uniform sampler2D uWaves;
 
 uniform vec3  uSunDir;
@@ -155,6 +162,24 @@ void main() {
   // the river needs no masking; only the skirt — which spans the whole world
   // past the edge of the data — has to decide for itself what is ocean.
 #ifdef WATER_SKIRT
+#ifdef WATER_FAR_BATHY
+  // Past the field the four samplers above are all clamping to their boundary
+  // texel, so each compass direction inherits whatever the city box happened
+  // to end on: a ray of ocean where the edge was wet, a ray of nothing where
+  // it was dry, fanning out over the bay. Out here the coarse USGS soundings
+  // are the authority instead.
+  vec2 e = step(vec2(0.0), fuv) * step(fuv, vec2(1.0));
+  if (e.x * e.y < 0.5) {
+    float code = texture2D(uFarBathy, (vWorld.xz - uFarOrigin) * uFarInvSize).r;
+    if (code < 0.002) discard; // dry land
+    geoDepth = (code * 255.0 - 1.0) / 254.0 * uFarMaxDepth;
+    // Open ocean, which the clamped field cannot say: full fetch, no shore,
+    // and the clear-water end of the absorption ramp rather than the harbour's.
+    fetch = 1.0;
+    shoreD = max(shoreD, 600.0);
+    murk = min(murk, 0.12);
+  } else
+#endif
   if (geoDepth < 0.15) discard;
 #endif
 
