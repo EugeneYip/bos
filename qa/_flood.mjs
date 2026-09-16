@@ -11,6 +11,7 @@ const PORT = 4563, ROOT = '/Volumes/Projects/bos';
 const vp = JSON.parse(fs.readFileSync(`${ROOT}/qa/viewpoints.json`, 'utf8'));
 const MATCH = process.argv[2] || 'far-terrain';
 const IDS = (process.argv[3] || 'high-street,downtown-traffic').split(',');
+const POSE = process.env.POSE ? JSON.parse(process.env.POSE) : null;
 const srv = spawn('npx',['vite','preview','--port',String(PORT),'--strictPort','--outDir','dist-qa'],
   {cwd:ROOT,stdio:'ignore',env:{...process.env,VITE_BASE:'/'}});
 for(let i=0;i<160;i++){try{if((await fetch(`http://localhost:${PORT}/`)).ok)break;}catch{}await new Promise(r=>setTimeout(r,250));}
@@ -43,7 +44,7 @@ const n = await pg.evaluate((m) => {
 }, MATCH);
 console.log(`flooded ${n} material(s) matching "${MATCH}"`);
 for (const id of IDS) {
-  const v = Object.values(vp).find((x) => x.id === id);
+  const v = POSE ? Object.assign({ id }, POSE) : Object.values(vp).find((x) => x.id === id);
   await pg.evaluate((h)=>window.__debug.setTime(h), v.hour ?? 13);
   await pg.evaluate((p,t)=>window.__debug.setView(p,t), v.pos, v.target);
   await new Promise(r=>setTimeout(r,7000));

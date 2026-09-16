@@ -20,8 +20,20 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Ctx } from '../../core/Context';
+import { loadAreas } from '../../core/data';
+import { buildLoganLayout, type LoganLayout } from '../airport/layout';
+import { buildPavement } from '../airport/pavement';
+import { buildMarkings } from '../airport/markings';
+import { buildLights, type AirfieldLights } from '../airport/lights';
+import { buildControlTowerCab, buildJetBridges, computeGateStands, type GateStand } from '../airport/gates';
+import { GroundFleet } from '../airport/groundTraffic';
 
 export type AirPart = 'body' | 'glass' | 'light';
+
+/** Static parked aircraft at Logan's gates, all narrowbody for simplicity. */
+const PARKED_COUNT = 10;
+/** The featured ground-cycle fleet: [narrowbody, widebody]. */
+const GROUND_COUNTS: readonly [number, number] = [2, 1];
 
 export interface AirDef {
   name: string;
@@ -449,14 +461,32 @@ export class AirTraffic {
   };
   private time = 0;
 
+  /** Logan's real runway/taxiway/apron layout, resolved once the area data loads. */
+  private loganLayout: LoganLayout | null = null;
+  private airportMeshes: THREE.Mesh[] = [];
+  private airportMaterials: THREE.Material[] = [];
+  private airfieldLights: AirfieldLights | null = null;
+  private gateStands: GateStand[] = [];
+  private parkedAircraft: { type: number; matrix: THREE.Matrix4 }[] = [];
+  private groundFleet: GroundFleet | null = null;
+  private rootRef: THREE.Object3D | null = null;
+
   get count(): number { return this.planes.length; }
 
   build(ctx: Ctx, root: THREE.Object3D): void {
+    this.rootRef = root;
     this.defs = airTypes();
     this.tracks = tracks();
 
     const cap = new Array(this.defs.length).fill(0);
     for (const t of this.tracks) cap[t.type] += t.count;
+    // Reserved for Logan's ground layer: static parked aircraft at gates
+    // (type 0 only, to keep this simple) plus the small featured fleet that
+    // pushes back, taxis, takes off, loops around and lands (2 narrowbody +
+    // 1 widebody). Reserved unconditionally so pool sizing stays synchronous
+    // even though the layout itself resolves later, asynchronously.
+    cap[0] += PARKED_COUNT + GROUND_COUNTS[0];
+    cap[1] += GROUND_COUNTS[1];
 
     for (let i = 0; i < this.defs.length; i++) {
       const d = this.defs[i];
@@ -498,7 +528,86 @@ export class AirTraffic {
         slot++;
       }
     }
-    void ctx;
+
+    this.buildAirport(ctx, root);
+  }
+
+  /**
+   * Logan's ground infrastructure: real runway/taxiway/apron pavement,
+   * markings, lights and gates. Kicked off here (fire-and-forget) rather than
+   * making `build` itself `async`: `Traffic.init` calls `this.air.build(ctx,
+   * this.root)` without awaiting it and reads `this.air.count` immediately
+   * after for a stat, so `build` has to stay synchronous for the flight
+   * tracks. `loadAreas()` is already in flight from `Traffic.init`'s own
+   * `Promise.all`, and the shared loader in `core/data.ts` caches by URL, so
+   * this resolves for free rather than triggering a second fetch.
+   */
+  private buildAirport(ctx: Ctx, root: THREE.Object3D): void {
+    loadAreas()
+      .then((areas) => {
+        const layout = buildLoganLayout(areas);
+        if (!layout) {
+          console.warn('[AirTraffic] no Logan-area runway polygons in the area data; skipping ground infrastructure');
+          return;
+        }
+        this.loganLayout = layout;
+
+        const pavement = buildPavement(ctx, layout);
+        for (const m of pavement.meshes) root.add(m);
+        this.airportMeshes.push(...pavement.meshes);
+        this.airportMaterials.push(...pavement.materials);
+
+        const markings = buildMarkings(ctx, layout);
+        for (const m of markings.meshes) root.add(m);
+        this.airportMeshes.push(...markings.meshes);
+        this.airportMaterials.push(...markings.materials);
+
+        this.airfieldLights = buildLights(ctx, layout);
+        for (const m of this.airfieldLights.meshes) root.add(m);
+
+        this.gateStands = computeGateStands(layout, PARKED_COUNT + 2);
+        this.placeParkedAircraft(ctx);
+
+        const bridges = buildJetBridges(ctx, this.gateStands);
+        if (bridges.mesh) {
+          root.add(bridges.mesh);
+          this.airportMeshes.push(bridges.mesh);
+          if (bridges.material) this.airportMaterials.push(bridges.material);
+        }
+
+        const tower = buildControlTowerCab(ctx);
+        root.add(tower.mesh);
+        this.airportMeshes.push(tower.mesh);
+        this.airportMaterials.push(tower.material);
+
+        this.groundFleet = new GroundFleet(layout, this.gateStands, GROUND_COUNTS);
+
+        console.info(
+          `[AirTraffic] Logan: ${layout.runways.length} runways ` +
+          `(${layout.runways.map((r) => r.id).join(', ')}), ` +
+          `${layout.taxiways.length} taxiways, ${layout.aprons.length} aprons, ` +
+          `${this.gateStands.length} gate stands, ground fleet ${GROUND_COUNTS[0]}+${GROUND_COUNTS[1]}`,
+        );
+      })
+      .catch((err) => console.warn('[AirTraffic] failed to build Logan ground infrastructure', err));
+  }
+
+  /** Static instances reusing the flying fleet's own narrowbody geometry — no new draw calls. */
+  private placeParkedAircraft(ctx: Ctx): void {
+    const q = new THREE.Quaternion();
+    const e = new THREE.Euler();
+    const one = new THREE.Vector3(1, 1, 1);
+    const pos = new THREE.Vector3();
+    const n = Math.min(PARKED_COUNT, this.gateStands.length);
+    for (let i = 0; i < n; i++) {
+      const stand = this.gateStands[i];
+      const heading = Math.atan2(stand.heading[0], -stand.heading[1]);
+      pos.set(stand.position[0], ctx.sampleHeight(stand.position[0], stand.position[1]) + 0.05, stand.position[1]);
+      e.set(0, heading, 0, 'YXZ');
+      q.setFromEuler(e);
+      const mat = new THREE.Matrix4().compose(pos, q, one);
+      this.parkedAircraft.push({ type: 0, matrix: mat });
+    }
   }
 
   private legLength(t: Track): number {
@@ -549,7 +658,6 @@ export class AirTraffic {
   }
 
   step(dt: number, ctx: Ctx): void {
-    if (!this.planes.length) return;
     this.time += dt;
     this.uniforms.uRotor.value = (this.uniforms.uRotor.value + dt * 26) % (Math.PI * 2);
     this.uniforms.uAirTime.value = this.time;
@@ -560,6 +668,12 @@ export class AirTraffic {
     const night = THREE.MathUtils.clamp((0.20 - elev) / 0.26, 0, 1);
     const comp = 2.5 / Math.max(ctx.exposure || 2.5, 0.1);
     this.uniforms.uAirLamp.value = (0.55 + 2.1 * night * night * (3 - 2 * night)) * comp;
+    // Ground and approach lights share the same night curve but stay fully
+    // off by day rather than merely dim, the way the aircraft's own nav
+    // lights do — a lit runway at noon reads as a bug, not a light.
+    this.airfieldLights?.setNightGain(night * night * (3 - 2 * night) * comp * 1.4);
+
+    this.groundFleet?.step(dt, ctx);
 
     const cursor = new Array(this.defs.length).fill(0);
     const m = new THREE.Matrix4();
@@ -617,6 +731,47 @@ export class AirTraffic {
       }
     }
 
+    // Parked aircraft at Logan's gates: static, but written every frame into
+    // whatever slot the cursor is at (cheap — there are at most a dozen),
+    // rather than trying to freeze part of an InstancedMesh's live range.
+    for (const parked of this.parkedAircraft) {
+      const buckets = this.meshes[parked.type];
+      if (!buckets?.length) continue;
+      const slot = cursor[parked.type];
+      if (slot >= buckets[0].mesh.instanceMatrix.count) continue;
+      cursor[parked.type] = slot + 1;
+      for (let bi = 0; bi < buckets.length; bi++) {
+        buckets[bi].mesh.setMatrixAt(slot, parked.matrix);
+        this.gearAttr[parked.type][bi]?.setX(slot, 1);
+        this.blinkAttr[parked.type][bi]?.setX(slot, 0);
+      }
+    }
+
+    // The featured ground-cycle fleet: gate -> pushback -> taxi -> hold short
+    // -> line up -> takeoff roll -> airborne loop -> flare -> rollout -> taxi
+    // in -> gate. See `airport/groundTraffic.ts`.
+    if (this.groundFleet) {
+      for (const a of this.groundFleet.list) {
+        const buckets = this.meshes[a.type];
+        if (!buckets?.length) continue;
+        const slot = cursor[a.type];
+        if (slot >= buckets[0].mesh.instanceMatrix.count) continue;
+        cursor[a.type] = slot + 1;
+        const p2 = a.pose;
+        pos.set(p2.x, p2.y, p2.z);
+        e.set(0, p2.heading, 0, 'YXZ');
+        q.setFromEuler(e);
+        const tilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(p2.bank, 0, p2.pitch, 'XYZ'));
+        q.multiply(tilt);
+        m.compose(pos, q, one);
+        for (let bi = 0; bi < buckets.length; bi++) {
+          buckets[bi].mesh.setMatrixAt(slot, m);
+          this.gearAttr[a.type][bi]?.setX(slot, p2.gear);
+          this.blinkAttr[a.type][bi]?.setX(slot, 0.15);
+        }
+      }
+    }
+
     for (let t = 0; t < this.meshes.length; t++) {
       for (let bi = 0; bi < this.meshes[t].length; bi++) {
         const b = this.meshes[t][bi];
@@ -634,5 +789,13 @@ export class AirTraffic {
   dispose(): void {
     for (const m of this.materials) m.dispose();
     this.materials.length = 0;
+    for (const m of this.airportMeshes) m.geometry.dispose();
+    this.airportMeshes.length = 0;
+    for (const m of this.airportMaterials) m.dispose();
+    this.airportMaterials.length = 0;
+    this.airfieldLights?.dispose();
+    this.airfieldLights = null;
+    this.parkedAircraft.length = 0;
+    this.groundFleet = null;
   }
 }
