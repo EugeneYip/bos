@@ -37,6 +37,15 @@ import * as THREE from 'three';
 const PI = '3.141592653589793';
 
 /**
+ * Asymmetry of the Mie lobe the 256x144 sky-view table can actually resolve,
+ * as a fraction of the true one. Scattering past this is present in the table
+ * but smeared across its azimuth bins, so the aureole is restored analytically
+ * as the difference between the two lobes. Raising it dims the glare around a
+ * low sun; lowering it puts the milky sheet back over the whole city.
+ */
+const LUT_PHASE_G = '0.35';
+
+/**
  * The aerial-perspective evaluation itself, with its own include guard so it
  * can be pasted into a hand-written `ShaderMaterial` as well as spliced into
  * the stock fog chunk. Published on `ctx.aerial` alongside the shared uniform
@@ -58,6 +67,7 @@ export const AERIAL_GLSL = /* glsl */ `
   uniform float uApStrength;
   uniform float uApMieG;
   uniform float uApInscatterGain;
+  uniform float uApForwardGain;
   uniform mat3  uApViewToWorld;
   uniform sampler2D uApCloudShadow;
   uniform vec3  uApCloudShadowParams;  // centre.x, centre.z, extent
@@ -163,10 +173,21 @@ export const AERIAL_GLSL = /* glsl */ `
     vec3 inscatter = sky * ( 1.0 - tr ) * uApInscatterGain;
 
     // Forward-scattered sunlight: the glare that eats a skyline when you look
-    // toward a low sun. Without it, haze reads as a flat grey film.
+    // toward a low sun.
+    //
+    // The sky-view table already carries Mie single scattering, so this cannot
+    // simply add another copy of it -- at long range '1 - exp(-tauM)' goes to
+    // one and the copy arrives at full strength everywhere, which reads as a
+    // milky sheet over the whole city on a 49 km-visibility day. What the table
+    // actually misses is the forward peak: 256x144 bins average the aureole
+    // away. So add only the deficit, the true phase function minus the blunt
+    // lobe the table can resolve. It peaks on the sun's axis and reaches zero
+    // by ~35 degrees off it, which is where the real aureole ends too.
     float cosT = dot( rd, uApSunDir );
     float ph = skyApMiePhase( cosT, uApMieG );
-    inscatter += uApSunColor * ph * ( 1.0 - exp( -tauM ) ) * 2.2;
+    float phLut = skyApMiePhase( cosT, uApMieG * ${LUT_PHASE_G} );
+    inscatter += uApSunColor * max( ph - phLut, 0.0 )
+       * ( 1.0 - exp( -tauM ) ) * uApForwardGain;
 
     return color * tr + inscatter;
   }
@@ -380,6 +401,7 @@ export interface AerialUniforms {
   uApStrength: THREE.IUniform<number>;
   uApMieG: THREE.IUniform<number>;
   uApInscatterGain: THREE.IUniform<number>;
+  uApForwardGain: THREE.IUniform<number>;
   uApViewToWorld: THREE.IUniform<THREE.Matrix3>;
   uApCloudShadow: THREE.IUniform<THREE.Texture | null>;
   uApCloudShadowParams: THREE.IUniform<THREE.Vector3>;
@@ -410,6 +432,7 @@ export class SceneShading {
     uApStrength: { value: 1 },
     uApMieG: { value: 0.72 },
     uApInscatterGain: { value: 1 },
+    uApForwardGain: { value: 1 },
     uApViewToWorld: { value: new THREE.Matrix3() },
     uApCloudShadow: { value: null },
     uApCloudShadowParams: { value: new THREE.Vector3(0, 0, 8000) },

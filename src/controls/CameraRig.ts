@@ -145,10 +145,20 @@ export class CameraRig implements WorldModule {
     };
 
     // --- opening framing --------------------------------------------------
-    // A high oblique from the south-east: harbour in the foreground, the
-    // Financial District and Back Bay stacked behind it.
-    ctx.camera.position.set(1620, 660, 1880);
-    ctx.camera.lookAt(-420, 60, -60);
+    // A high oblique from the north-west, over Somerville, looking south-east
+    // down the Charles: the Zakim on the left, the Financial District front-lit
+    // in the middle, Back Bay and the Prudential on the right, the harbour and
+    // the islands behind.
+    //
+    // The direction matters more than the position. The default hour is 5:06 pm
+    // in late September, when the sun sits about 18 degrees up in the
+    // west-south-west, so this looks *with* the light: every facade in frame is
+    // a lit one. The previous framing looked north-west, which put the sun just
+    // outside the left edge and the whole city behind its aureole -- the model
+    // read as fogbound on first sight when the air was actually set to 49 km
+    // visibility.
+    ctx.camera.position.set(-1900, 560, -2100);
+    ctx.camera.lookAt(500, 30, 100);
     ctx.camera.updateMatrixWorld(true);
     this.orbit.enter(ctx);
 
