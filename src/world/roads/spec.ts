@@ -164,7 +164,26 @@ export function surfaceOf(r: RoadRecord, midX: number, midZ: number): SurfaceKey
   }
   if (r.class === 'rail') return 'gravel';
   const zn = zoneAt(midX, midZ);
-  if (zn && zn.cobbleChance > 0 && (r.class === 'residential' || r.class === 'service' || r.class === 'pedestrian')) {
+
+  // A pavement is not a road surface. This fell through to asphalt, and
+  // `footway` is the largest class in the extract by a wide margin -- 35,232 of
+  // 56,655 ways -- so every surviving path in the city was being paved in
+  // blacktop. On Boston Common that made the paths vanish into the lawn
+  // entirely: at street level the only thing distinguishing them was the
+  // grass texture's own slab pattern showing through.
+  //
+  // The sidewalk footways that run alongside a carriageway are already thrown
+  // away by `markSidewalkDuplicates`, because we rebuild those attached to the
+  // kerb ourselves. What survives is park paths, plaza links and footbridges,
+  // which are concrete in this city -- and brick where Boston is brick. The
+  // clay-paver texture in `textures.ts` was authored for exactly this and
+  // carries the comment 'Beacon Hill and Back Bay footways'.
+  if (r.class === 'footway' || r.class === 'pedestrian') {
+    return zn && zn.cobbleChance > 0 ? 'brick' : 'concrete';
+  }
+
+  // `pedestrian` is handled above, so it is deliberately absent here.
+  if (zn && zn.cobbleChance > 0 && (r.class === 'residential' || r.class === 'service')) {
     // Stable per-way decision, so the same street is always cobbled.
     let h = 2166136261;
     for (let i = 0; i < r.id.length; i++) {
