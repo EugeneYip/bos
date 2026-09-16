@@ -415,8 +415,9 @@ export class Roads implements WorldModule {
     const stats = bk.stats();
     // Ground-level road surface, kerbs and walks lie on the terrain: there is
     // nothing beneath them to shade, and self-shadowing a flat decal only buys
-    // acne. Only the structural passes (bridges, portals, below) cast.
-    const meshes = bk.flush(this.mats, `road-t${tier}`, false);
+    // acne. Only the structural bucket -- bridge decks with their soffits and
+    // piers, tunnel portals, sleepers -- has anything under it to shade.
+    const meshes = bk.flush(this.mats, `road-t${tier}`, (key) => key === 'structure');
     this.worstFlush = Math.max(this.worstFlush, performance.now() - f0);
     if (!meshes.length) {
       tile.group = new THREE.Group();
@@ -426,10 +427,6 @@ export class Roads implements WorldModule {
     group.matrixAutoUpdate = false;
     let radius = 0;
     for (const m of meshes) {
-      // Paint is a decal: it must not write depth or cast shadows. Say so with
-      // the flag as well, or the sky module's sweep hands the casting straight
-      // back and the markings shadow the tarmac a millimetre beneath them.
-      if (m.name.endsWith(':paint')) { m.userData.noShadow = true; m.castShadow = false; }
       group.add(m);
       const bs = m.geometry.boundingSphere;
       if (bs) {

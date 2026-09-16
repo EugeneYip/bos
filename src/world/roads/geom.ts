@@ -27,14 +27,32 @@ export class Buckets {
   }
 
   /** Builds one `Mesh` per non-empty material. */
-  flush(mats: RoadMaterials, namePrefix: string, castShadow = false): THREE.Mesh[] {
+  /**
+   * @param castShadow `true`, `false`, or a per-material-key predicate.
+   *
+   * Writes `userData.noShadow` as well as `castShadow`, because that flag is
+   * the only channel the scene-shading sweep can hear. `castShadow` defaults
+   * to false on a fresh mesh, so a module setting it false says exactly as
+   * much as a module that never considered the question, and the sweep --
+   * which has to turn casting *on* for everything that arrives without an
+   * opinion -- handed it straight back. Every road surface in the city was
+   * casting a shadow onto the terrain one centimetre beneath it as a result:
+   * 494 of 1108 casters, times three cascades.
+   */
+  flush(
+    mats: RoadMaterials,
+    namePrefix: string,
+    castShadow: boolean | ((key: string) => boolean) = false,
+  ): THREE.Mesh[] {
     const out: THREE.Mesh[] = [];
     for (const [key, b] of this.map) {
       const g = b.build();
       if (!g) continue;
       const mesh = new THREE.Mesh(g, mats.get(key));
       mesh.name = `${namePrefix}:${key}`;
-      mesh.castShadow = castShadow;
+      const casts = typeof castShadow === 'function' ? castShadow(key) : castShadow;
+      mesh.castShadow = casts;
+      if (!casts) mesh.userData.noShadow = true;
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
