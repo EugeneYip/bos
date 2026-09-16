@@ -501,7 +501,7 @@ void main() {
   // few hundred. With only the streaks the glitter path came out as blobs of
   // cotton wool the size of a gust cell.
   float sparkle = (0.26 + 1.85 * streak * streak)
-                * (0.42 + 1.16 * rA.b)
+                * mix(1.0, 0.42 + 1.16 * rA.b, clamp(fA, 0.0, 1.0))
                 * mix(1.0, 0.52 + 0.96 * rB.b, clamp(fB, 0.0, 1.0) * 0.8)
                 * mix(1.0, 0.40 + 1.30 * bC, clamp(fC, 0.0, 1.0) * 0.85)
                 * mix(1.0, 0.55 + 0.95 * bD, clamp(fD, 0.0, 1.0) * 0.7);
@@ -539,7 +539,11 @@ void main() {
 
     float wash = (1.0 - smoothstep(0.0, band, edge)) * smoothstep(-2.2, 0.35, edge);
     float lace = (1.0 - smoothstep(band * 0.8, band * 3.4, edge)) * smoothstep(-1.0, 1.5, edge);
-    cov = (wash * 1.15 + lace * 0.36 * churn) * churn * windward * uFoamGain;
+    // 'band' already narrows the wash on a short-fetch shore, but that alone
+    // left a sheltered pond or lagoon breaking white at full opacity, just in
+    // a thinner ribbon — a duck pond does not surf. Fetch has to cut the
+    // *strength* as well as the width, or a dead-calm bank reads like a beach.
+    cov = (wash * 1.15 + lace * 0.36 * churn) * churn * windward * uFoamGain * mix(0.28, 1.0, fetch);
 
     // Just inside the waterline the sheet is thin and glossy over wet sand.
     float wet = (1.0 - smoothstep(0.0, 2.6, edge)) * 0.55;

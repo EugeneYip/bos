@@ -1,0 +1,4 @@
+[
+  { "id": "prod-harbor-water", "pos": [2600, 70, -200], "target": [700, 40, -150], "hour": 8.6, "settle": 45 },
+  { "id": "prod-water-detail", "pos": [-1500, 7, -420], "target": [-1180, 4, -300], "hour": 17.2, "settle": 45 }
+]

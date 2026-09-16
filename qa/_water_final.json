@@ -1,0 +1,14 @@
+[
+  { "id": "fresnel-close-10", "pos": [-1300, 10, -350], "target": [-1296, 0.4, -347], "hour": 10.0, "settle": 50 },
+  { "id": "fresnel-close-17", "pos": [-1300, 10, -350], "target": [-1296, 0.4, -347], "hour": 17.1, "settle": 50 },
+  { "id": "toward-sun-10", "pos": [-1300, 6, -350], "target": [-908, 7, -39], "hour": 10.0, "settle": 50 },
+  { "id": "away-sun-10", "pos": [-1300, 6, -350], "target": [-1692, 7, -661], "hour": 10.0, "settle": 50 },
+  { "id": "toward-sun-17", "pos": [-1300, 6, -350], "target": [-1783, 7, -220], "hour": 17.1, "settle": 50 },
+  { "id": "away-sun-17", "pos": [-1300, 6, -350], "target": [-817, 7, -480], "hour": 17.1, "settle": 50 },
+  { "id": "harbor-eyelevel-10", "pos": [2600, 70, -200], "target": [700, 40, -150], "hour": 10.0, "settle": 50 },
+  { "id": "harbor-eyelevel-17", "pos": [2600, 70, -200], "target": [700, 40, -150], "hour": 17.1, "settle": 50 },
+  { "id": "boat-wake-eyelevel-10", "pos": [-1350, 35, -380], "target": [-1260, 8, -300], "hour": 10.0, "settle": 60, "postSettle": 90 },
+  { "id": "boat-wake-eyelevel-17", "pos": [-1350, 35, -380], "target": [-1260, 8, -300], "hour": 17.1, "settle": 60, "postSettle": 90 },
+  { "id": "boat-wake-top-10", "pos": [-1300, 220, -350], "target": [-1298, 0, -351], "hour": 10.0, "settle": 60, "postSettle": 90 },
+  { "id": "boat-wake-harbor-17", "pos": [1200, 260, 200], "target": [1198, 0, 199], "hour": 17.1, "settle": 60, "postSettle": 90 }
+]

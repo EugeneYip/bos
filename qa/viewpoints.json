@@ -430,5 +430,37 @@
     ],
     "hour": 11.4,
     "note": "Landmark facade detail at conversational distance: does the brick have windows in it, or is it a blank mass with invisible recessed reveals?"
+  },
+  {
+    "id": "boot-default",
+    "title": "The view a visitor lands on",
+    "pos": [
+      -1900,
+      560,
+      -2100
+    ],
+    "target": [
+      500,
+      30,
+      100
+    ],
+    "hour": 17.1,
+    "note": "The application's own opening framing and hour, the first thing a visitor sees. Looks south-east down the Charles with the sun behind: shoot it with qa/boot-shot.mjs to photograph the real default, since __debug.setView replaces it."
+  },
+  {
+    "id": "boot-morning",
+    "title": "The opening framing at mid-morning",
+    "pos": [
+      -1900,
+      560,
+      -2100
+    ],
+    "target": [
+      500,
+      30,
+      100
+    ],
+    "hour": 10.4,
+    "note": "The opening framing with the sun in the east instead of behind the camera, as a check that the composition does not depend on the hour."
   }
 ]

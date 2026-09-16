@@ -128,13 +128,35 @@ export class WaterField {
 
     this.insideToSigned(inside);
 
-    // Aux channels at quarter resolution.
+    // Aux channels at quarter resolution. Vote across the whole 4x4 block
+    // rather than trusting a single representative texel: a pier, a line of
+    // piles or the edge of a hole can sit exactly on that one sample and hand
+    // the block to whatever the neighbour-search finds next — which is how
+    // one dock could paint a harbour-sized fetch value across a reach of the
+    // Charles that is visibly, entirely river. The other fifteen texels are
+    // nearly always still inside the real body.
     const { sw, sh } = this;
+    const voteCount = new Int32Array(bodies.length);
+    const touched: number[] = [];
     for (let j = 0; j < sh; j++) {
       for (let i = 0; i < sw; i++) {
         const si = j * sw + i;
-        const fi = Math.min(h - 1, j * 4 + 1) * w + Math.min(w - 1, i * 4 + 1);
-        const bi = bodyAt[fi];
+        for (let t = 0; t < touched.length; t++) voteCount[touched[t]] = 0;
+        touched.length = 0;
+        let bi = -1, bestVotes = 0;
+        const j0 = j * 4, i0 = i * 4;
+        for (let sdj = 0; sdj < 4; sdj++) {
+          const jj = Math.min(h - 1, j0 + sdj);
+          const row = jj * w;
+          for (let sdi = 0; sdi < 4; sdi++) {
+            const ii = Math.min(w - 1, i0 + sdi);
+            const k = bodyAt[row + ii];
+            if (k < 0) continue;
+            if (voteCount[k] === 0) touched.push(k);
+            const c = ++voteCount[k];
+            if (c > bestVotes) { bestVotes = c; bi = k; }
+          }
+        }
         if (bi >= 0) {
           const b = bodies[bi];
           this.fetch[si] = b.fetch;
