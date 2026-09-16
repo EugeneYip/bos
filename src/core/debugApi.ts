@@ -29,6 +29,20 @@ export interface DebugApi {
    * being shadowed, it is receiving no ambient.
    */
   probe(opts?: { shadows?: boolean }): Record<string, number | boolean>;
+  /**
+   * What is under this screen pixel?
+   *
+   * `toggle` is the wrong tool for attributing a pixel and has misled me three
+   * times: it is silently defeated by any module that writes `visible` in its
+   * own update (CDLOD's terrain patches, and the water module's reflection
+   * pass, which keeps running with every water mesh hidden). Diffing two
+   * screenshots is worse -- the city animates and the post chain is
+   * stochastic, so two frames differ everywhere.
+   *
+   * This raycasts instead, and reports the names of what it hits, nearest
+   * first, with distances. `x` and `y` are CSS pixels from the top-left.
+   */
+  pick(x: number, y: number, max?: number): Array<{ name: string; dist: number; material: string }>;
 }
 
 export function installDebugApi(app: App): void {
@@ -68,6 +82,36 @@ export function installDebugApi(app: App): void {
         if (o.name.includes(match)) { o.visible = visible; n++; }
       });
       return n;
+    },
+    pick(x, y, max = 6) {
+      const el = ctx.renderer.domElement;
+      const ndc = new THREE.Vector2(
+        (x / el.clientWidth) * 2 - 1,
+        -(y / el.clientHeight) * 2 + 1,
+      );
+      const ray = new THREE.Raycaster();
+      // The city spans tens of kilometres, so the default 0..Infinity is fine
+      // but the precision is not: nudge the near plane off the camera.
+      ray.near = 0.1;
+      ray.far = 40000;
+      ray.setFromCamera(ndc, ctx.camera);
+      ctx.camera.updateMatrixWorld(true);
+      const hits = ray.intersectObject(ctx.scene, true);
+      const out: Array<{ name: string; dist: number; material: string }> = [];
+      for (const h of hits) {
+        const o = h.object as THREE.Mesh;
+        let name = o.name;
+        if (!name) {
+          for (let p: THREE.Object3D | null = o.parent; p; p = p.parent) {
+            if (p.name) { name = `${p.name} (child)`; break; }
+          }
+        }
+        const m = Array.isArray(o.material) ? o.material[0] : o.material;
+        out.push({ name: name || '(unnamed)', dist: Math.round(h.distance),
+          material: (m as THREE.Material | undefined)?.name ?? '(none)' });
+        if (out.length >= max) break;
+      }
+      return out;
     },
     probe(opts) {
       if (opts?.shadows !== undefined) {

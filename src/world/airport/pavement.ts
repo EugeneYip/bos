@@ -40,6 +40,24 @@ const ASPHALT_TILE = 3.4;
 const CONCRETE_TILE = 4.0;
 const WHITE: RGB = [1, 1, 1];
 
+/**
+ * Albedo tints for the two pavement families, as vertex colours over the
+ * shared surface maps.
+ *
+ * Both were 1.0, which is how the aprons came out at 120-157 mean luma against
+ * a city road at 58 -- a near-white sheet rather than pavement, and the thing
+ * that reads as "pale patches at Logan" from the air. The shared `concrete`
+ * set is authored for sidewalks, so an apron inheriting it unmodified is a
+ * clean footway the size of a terminal.
+ *
+ * Real airport concrete weathers grey under rubber, fuel and de-icer: about a
+ * 0.25 albedo, still clearly lighter than the asphalt beside it, which is the
+ * contrast that makes an airfield legible from altitude. The taxiway tint is
+ * lighter than 1.0 by less, because it already sits on the road asphalt map.
+ */
+const APRON_TINT = 0.58;
+const TAXIWAY_TINT: RGB = [0.78, 0.78, 0.78];
+
 /** How far from a threshold rubber accumulates, and how dark at its core. */
 const RUBBER_REACH = 420;
 const RUBBER_DARKEN = 0.6;
@@ -68,7 +86,7 @@ export function buildPavement(ctx: Ctx, layout: LoganLayout): PavementResult {
 
   const asphaltMb = new MeshBuilder();
   for (const rw of layout.runways) emitRunwayStrip(asphaltMb, rw, yAtRunway);
-  for (const tw of layout.taxiways) asphaltMb.polygon(tw.outline, yAt, ASPHALT_TILE, WHITE);
+  for (const tw of layout.taxiways) asphaltMb.polygon(tw.outline, yAt, ASPHALT_TILE, TAXIWAY_TINT);
   const asphaltGeo = asphaltMb.build();
   if (asphaltGeo) meshes.push(finishMesh(asphaltGeo, asphalt, 'airport:pavement:asphalt'));
 
@@ -76,7 +94,7 @@ export function buildPavement(ctx: Ctx, layout: LoganLayout): PavementResult {
   for (const ap of layout.aprons) {
     // Slab-to-slab weathering variety, deterministic per polygon so it is
     // stable across reloads rather than a new roll every frame.
-    const j = 1 + (hash01(ap.id) - 0.5) * 0.10;
+    const j = APRON_TINT + (hash01(ap.id) - 0.5) * 0.11;
     concreteMb.polygon(ap.outline, yAt, CONCRETE_TILE, [j, j, j]);
   }
   const concreteGeo = concreteMb.build();
