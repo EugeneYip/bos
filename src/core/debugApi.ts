@@ -43,6 +43,14 @@ export interface DebugApi {
    * first, with distances. `x` and `y` are CSS pixels from the top-left.
    */
   pick(x: number, y: number, max?: number): Array<{ name: string; dist: number; material: string }>;
+  /**
+   * One-shot report of everything that could differ between two machines.
+   *
+   * Exists because a render can be correct here and wrong on someone else's
+   * GPU, and the fastest way through that is their numbers rather than my
+   * guesses. Auto-runs and prints when the page is loaded with `?diag=1`.
+   */
+  diag(): Record<string, unknown>;
 }
 
 export function installDebugApi(app: App): void {
@@ -137,6 +145,62 @@ export function installDebugApi(app: App): void {
       }
       return out;
     },
+    diag() {
+      const r = ctx.renderer;
+      const gl = r.getContext() as WebGL2RenderingContext;
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const ext = (n: string): boolean => !!gl.getExtension(n);
+      const mat = (() => {
+        let m: THREE.ShaderMaterial | null = null;
+        ctx.scene.traverse((o) => {
+          const mm = (o as THREE.Mesh).material as THREE.ShaderMaterial | undefined;
+          if (!m && (o.name || '').startsWith('water:chunk') && mm?.isShaderMaterial) m = mm;
+        });
+        return m;
+      })();
+      const envTex = ctx.envMap as THREE.Texture | null;
+      const out: Record<string, unknown> = {
+        gpu: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown',
+        tier: ctx.tier,
+        pixelRatio: r.getPixelRatio(),
+        drawingBuffer: [r.domElement.width, r.domElement.height],
+        // The float formats the post chain depends on. RGBA32F in particular is
+        // renderable on some drivers and not others, and the luminance history
+        // that auto-exposure carries across frames is the one target that asks
+        // for it.
+        colorBufferFloat: ext('EXT_color_buffer_float'),
+        colorBufferHalfFloat: ext('EXT_color_buffer_half_float'),
+        textureFloatLinear: ext('OES_texture_float_linear'),
+        textureHalfFloatLinear: ext('OES_texture_half_float_linear'),
+        floatBlend: ext('EXT_float_blend'),
+        timerQuery: ext('EXT_disjoint_timer_query_webgl2'),
+        maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        // Presentation. If these look sane and the image does not, the fault is
+        // upstream of the grade.
+        exposure: +ctx.exposure.toFixed(4),
+        toneMappingExposure: +r.toneMappingExposure.toFixed(4),
+        toneMapping: r.toneMapping,
+        environmentIntensity: ctx.scene.environmentIntensity,
+        envBound: !!envTex,
+        envType: envTex?.type ?? null,
+        envMapping: envTex?.mapping ?? null,
+        envSize: envTex?.image ? [envTex.image.width, envTex.image.height] : null,
+        sunIntensity: +ctx.sun.intensity.toFixed(4),
+        sunElevation: +ctx.sun.elevation.toFixed(4),
+        // The water's own inputs, since that is what looks wrong.
+        water: mat ? {
+          envIntensity: (mat as THREE.ShaderMaterial).uniforms.uEnvIntensity?.value,
+          reflStrength: (mat as THREE.ShaderMaterial).uniforms.uReflStrength?.value,
+          reflMaxLod: (mat as THREE.ShaderMaterial).uniforms.uReflMaxLod?.value,
+          reflBound: !!(mat as THREE.ShaderMaterial).uniforms.uReflMap?.value,
+          skyViewBound: !!(mat as THREE.ShaderMaterial).uniforms.uApSkyView?.value,
+          defines: Object.keys((mat as THREE.ShaderMaterial).defines ?? {}),
+        } : null,
+        stats: { ...ctx.stats },
+      };
+      console.info('[diag]', JSON.stringify(out));
+      return out;
+    },
     probe(opts) {
       if (opts?.shadows !== undefined) {
         ctx.renderer.shadowMap.enabled = opts.shadows;
@@ -163,4 +227,14 @@ export function installDebugApi(app: App): void {
   };
 
   (window as unknown as Record<string, unknown>).__debug = api;
+
+  // `?diag=1` prints the report once the city is up, so a bug that only
+  // reproduces on someone else's GPU can be reported with numbers.
+  if (new URLSearchParams(location.search).get('diag') === '1') {
+    const waitReady = (): void => {
+      if ((window as unknown as { __ready?: boolean }).__ready) api.diag();
+      else setTimeout(waitReady, 500);
+    };
+    waitReady();
+  }
 }

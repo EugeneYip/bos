@@ -274,7 +274,20 @@ export class Post implements WorldModule {
     this.aoHistory?.dispose();
     this.aoHistory = new PingPong(this.rw * aoScale, this.rh * aoScale, { name: 'post.ao' });
     this.lumHistory?.dispose();
-    this.lumHistory = new PingPong(1, 1, { type: THREE.FloatType, filter: THREE.NearestFilter, name: 'post.lum' });
+    // Half float, not full float.
+    //
+    // This 1x1 target carries the adapted exposure across frames, and it was
+    // the only RGBA32F render target in the chain -- everything else is
+    // RGBA16F. `EXT_color_buffer_float` is supposed to make RGBA32F
+    // colour-renderable, but it is the one format that is routinely fine on one
+    // driver and not on another, and if writing to it fails the value the grade
+    // reads back is whatever was in the memory. Half float holds a log2
+    // exposure over a range of +/-15 to about a hundredth of a stop, which is
+    // far more than this needs, and is renderable anywhere the rest of the
+    // chain already is.
+    this.lumHistory = new PingPong(1, 1, {
+      type: THREE.HalfFloatType, filter: THREE.NearestFilter, name: 'post.lum',
+    });
 
     for (const rt of this.bloomChain) disposeRT(rt);
     this.bloomChain = [];
