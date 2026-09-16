@@ -43,6 +43,7 @@ ${SKYVIEW_PARAM}
 ${NOISE_GLSL}
 
 uniform sampler2D uSkyViewLut;
+uniform float     uHorizonHold;
 uniform sampler2D uCloudBuffer;
 uniform vec2  uResolution;
 uniform float uFrame;
@@ -139,6 +140,22 @@ vec3 skyRadiance( vec3 rayDir ) {
 
   // ---- atmosphere -------------------------------------------------------
   vec2 lutUv = skyViewUv( rayDir, up, uSunDir, uViewHeight );
+  // Below the tangent, the table describes the planet: those rows are the air
+  // over a path that ends on the ground at h / sin(depression), and that
+  // distance collapses from the horizon's eighty-odd kilometres to twenty
+  // within a single degree. So the rows darken fast, and correctly -- for a
+  // planet whose surface is modelled all the way out. This one stops at a
+  // 23 km radius, and the degree of sky between that rim and the true horizon
+  // showed those rows through as a hard dark-blue stripe under a warm sunset,
+  // brighter terrain on one side of it and brighter sky on the other.
+  //
+  // So hold the sample at the tangent row. Continuous in value at the
+  // crossing, and what it holds is the asymptotic haze that the ground out
+  // there would be buried in at any visibility this model offers.
+  //
+  // Only on screen: the probe wants the real lower hemisphere, because the
+  // ambient arriving at a wall from below is ground, not horizon.
+  lutUv.y = mix( lutUv.y, max( lutUv.y, 0.5 ), uHorizonHold );
   vec3 col = texture2D( uSkyViewLut, lutUv ).rgb;
 
   vec3 pos = vec3( 0.0, uViewHeight, 0.0 );

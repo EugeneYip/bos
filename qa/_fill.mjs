@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import puppeteer from 'puppeteer';
 const PORT = 4553, ROOT = '/Volumes/Projects/bos';
 const vp = JSON.parse(fs.readFileSync(`${ROOT}/qa/viewpoints.json`, 'utf8'));
-const v = Object.values(vp).find((x) => x.id === (process.argv[2] || 'high-street'));
+const IDS = (process.argv[2] || 'high-street').split(',');
 const TIER = process.argv[3] || 'high';
 const srv = spawn('npx',['vite','preview','--port',String(PORT),'--strictPort','--outDir','dist-qa'],
   {cwd:ROOT,stdio:'ignore',env:{...process.env,VITE_BASE:'/'}});
@@ -16,10 +16,14 @@ await pg.evaluateOnNewDocument(()=>{try{localStorage.removeItem('bh-tier');local
 await pg.goto(`http://localhost:${PORT}/?q=${TIER}`,{waitUntil:'networkidle2',timeout:180000});
 await pg.waitForFunction('window.__ready === true',{timeout:300000});
 await new Promise(r=>setTimeout(r,8000));
+for (const id of IDS) {
+const v = Object.values(vp).find((x) => x.id === id);
 await pg.evaluate((h)=>window.__debug.setTime(h), v.hour ?? 13);
 await pg.evaluate((p,t)=>window.__debug.setView(p,t), v.pos, v.target);
 await new Promise(r=>setTimeout(r,9000));
-await pg.evaluate(()=>window.__debug.settle(90));
+await pg.evaluate(()=>window.__debug.settle(120));
+await new Promise(r=>setTimeout(r,2500));
+console.log('== ' + id);
 
 console.log(JSON.stringify(await pg.evaluate(() => {
   const { renderer, stats, tier } = window.__boston.ctx;
@@ -27,16 +31,12 @@ console.log(JSON.stringify(await pg.evaluate(() => {
   const timings = {};
   for (const [k, v] of Object.entries(stats)) {
     const n = typeof v === 'number' ? v : (typeof v === 'string' && /ms$/.test(v) ? parseFloat(v) : null);
-    if (n !== null && /(ms|Ms)$/.test(k)) timings[k] = n;
+    if (n !== null && (/(ms|Ms|total)$/i.test(k) || k.startsWith('cpu.'))) timings[k] = n;
   }
   return { tier, pixelRatio: renderer.getPixelRatio(), drawingBuffer: [dw, dh],
     megapixels: +(dw * dh / 1e6).toFixed(3), fps: stats.fps, fpsLow: stats['fps.low'],
     programs: renderer.info.programs.length, timings };
 }), null, 1));
 
-// Every live WebGL texture/renderbuffer, by size, via the GL context.
-console.log(await pg.evaluate(() => {
-  const r = window.__boston.ctx.renderer;
-  return `programs ${r.info.programs.length}  geometries ${r.info.memory.geometries}  textures ${r.info.memory.textures}`;
-}));
+}
 await b.close(); srv.kill();

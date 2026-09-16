@@ -165,6 +165,11 @@ export class App {
     cancelAnimationFrame(this.frameHandle);
   }
 
+  private moduleMs = new Map<string, number>();
+  private cpuUpdate = 0;
+  private cpuRender = 0;
+  private cpuWorstUpdate = 0;
+
   private tick = (now: number): void => {
     if (!this.running) return;
     this.frameHandle = requestAnimationFrame(this.tick);
@@ -177,17 +182,43 @@ export class App {
     const { renderer } = this.ctx;
     renderer.info.reset();
 
+    // Two wall-clock spans, which is the one kind of timing this project can
+    // still trust. Every per-pass GPU timer here reports a number larger than
+    // the frame containing it -- three modules each run their own
+    // TIME_ELAPSED query and WebGL2 allows exactly one in flight -- so the
+    // split that matters is measured on the CPU, where the clock is honest:
+    // how long the modules take to think, and how long the driver takes to
+    // accept the frame. Anything left over is the GPU actually working.
+    const tu = performance.now();
     for (const m of this.modules) {
+      const t0 = performance.now();
       try {
         m.update?.(dt, this.ctx);
       } catch (err) {
         console.error(`[${m.name}] update failed`, err);
         m.update = undefined; // don't spam every frame
       }
+      // Per-module, so 'the modules are slow' can name one. Reported only
+      // above a third of a millisecond, or fifteen names drown the stats.
+      const el = performance.now() - t0;
+      const prev = this.moduleMs.get(m.name) ?? 0;
+      const ema = prev * 0.9 + el * 0.1;
+      this.moduleMs.set(m.name, ema);
+      if (ema >= 0.3) this.ctx.stats[`cpu.${m.name}`] = Math.round(ema * 100) / 100;
+      else delete this.ctx.stats[`cpu.${m.name}`];
     }
+    const tr = performance.now();
 
     if (this.renderOverride) this.renderOverride(dt);
     else renderer.render(this.ctx.scene, this.ctx.camera);
+    const te = performance.now();
+
+    this.cpuUpdate = this.cpuUpdate * 0.9 + (tr - tu) * 0.1;
+    this.cpuRender = this.cpuRender * 0.9 + (te - tr) * 0.1;
+    this.cpuWorstUpdate = Math.max(this.cpuWorstUpdate, tr - tu);
+    this.ctx.stats['cpu.update'] = Math.round(this.cpuUpdate * 100) / 100;
+    this.ctx.stats['cpu.submit'] = Math.round(this.cpuRender * 100) / 100;
+    this.ctx.stats['cpu.update.worst'] = Math.round(this.cpuWorstUpdate * 10) / 10;
 
     // A single frame's reciprocal is not a frame rate. Reported raw, this stat
     // gave 10 and 60 for the same viewpoint on consecutive runs and sent me

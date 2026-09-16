@@ -253,12 +253,26 @@ vec3 atmosphereRaymarch( vec3 pos, vec3 rayDir, vec3 sunDir, float tMax, int ste
   vec3 lum = vec3( 0.0 );
   vec3 transmittance = vec3( 1.0 );
   float t = 0.0;
+  float inv = 1.0 / float( steps );
   for ( int i = 0; i < 64; i ++ ) {
     if ( i >= steps ) break;
-    float newT = ( ( float( i ) + 0.3 ) / float( steps ) ) * tMax;
+    // Samples crowd toward the observer, quadratically.
+    //
+    // A ray at the horizon has a 'tMax' of several hundred kilometres, of
+    // which the first thirty carry nearly all the scattering. Spaced evenly,
+    // 32 samples put the first one twenty kilometres out and collapse the
+    // entire near field into one segment, so the same physical path came out
+    // brighter when integrated as a 700 km miss than as a 92 km ground hit --
+    // which is precisely where those two cases meet, and drew a hard dark
+    // stripe across the horizon in every distant view.
+    float u = float( i + 1 ) * inv;
+    float newT = tMax * u * u;
     float dt = newT - t;
+    // Midpoint, not the far end: once the segments are graded, a late one is
+    // tens of kilometres long and its far end is measurably thinner air than
+    // its near end.
+    vec3 p = pos + ( t + 0.5 * dt ) * rayDir;
     t = newT;
-    vec3 p = pos + t * rayDir;
 
     vec3 rs, ms, ext;
     atmosphereMedium( p, rs, ms, ext );

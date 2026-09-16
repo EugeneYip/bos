@@ -237,6 +237,7 @@ export class Sky implements WorldModule {
 
         uViewHeight: { value: PLANET_RADIUS_MM },
         uNightFactor: { value: 0 },
+        uHorizonHold: { value: 1 },
 
         uSkyglowColor: { value: new THREE.Color().setRGB(1.0, 0.58, 0.3, THREE.LinearSRGBColorSpace) },
         uSkyglowStrength: { value: 0 },

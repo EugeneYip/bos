@@ -111,6 +111,9 @@ export class EnvProbe {
       value: (domeUniforms.uSunAngularRadius.value as number) * spread,
     };
     shared.uCloudsEnabled = { value: 0 };
+    // The probe lights the city from every direction, and from below that is
+    // ground, not the horizon haze the dome holds there.
+    shared.uHorizonHold = { value: 0 };
     shared.uCloudBuffer = { value: null };
     this.discSpread = spread;
     this.probeDisc = discRadiance;

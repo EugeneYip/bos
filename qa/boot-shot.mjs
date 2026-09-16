@@ -68,9 +68,11 @@ const skyB = band(180, 205, 100, 1180);  // sky just above the horizon
 const grdB = band(232, 258, 100, 1180);  // ground just below it
 const cam = await pg.evaluate(() => {
   const c = window.__boston.ctx.camera;
-  return { p: [c.position.x | 0, c.position.y | 0, c.position.z | 0], exp: +window.__boston.ctx.exposure.toFixed(3) };
+  return { p: [c.position.x | 0, c.position.y | 0, c.position.z | 0],
+    exp: +window.__boston.ctx.exposure.toFixed(3), probe: window.__debug.probe() };
 });
 console.log(`${label}  cam ${cam.p.join(',')}  exp ${cam.exp}`);
+console.log('  probe ' + JSON.stringify(cam.probe));
 console.log(`  far    contrast ${far.c.toFixed(2)}  luma ${far.l.toFixed(1)}`);
 console.log(`  sunlit contrast ${sun.c.toFixed(2)}  luma ${sun.l.toFixed(1)}`);
 console.log(`  near   contrast ${near.c.toFixed(2)}  luma ${near.l.toFixed(1)}`);
