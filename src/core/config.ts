@@ -43,6 +43,23 @@ export interface QualitySettings {
   waterReflections: boolean;
 }
 
+/**
+ * Quality tiers.
+ *
+ * `maxPixelRatio` is the one number here that costs quadratically, and it used
+ * to be the least considered. A 2.0 cap on `ultra` means a Retina panel renders
+ * four times the pixels of a 1.0 cap — and this renderer is measurably
+ * fill-bound: quartering the pixel count at `high` took 16 fps to 28 on the same
+ * frame. So `ultra` at 2.0 was not a quality setting, it was a way to guarantee
+ * single digits, and that is what "the whole scene keeps blinking at ultra"
+ * turned out to be: a frame rate low enough to read as flicker.
+ *
+ * The caps are now 1.25 and 1.5. Supersampling is no longer the default on a
+ * HiDPI display, which is ordinary practice for a renderer this heavy — TAA and
+ * the FSR upscale exist to recover the edge quality. Anyone who wants their
+ * screen's real resolution can still ask for it outright: the settings panel has
+ * a Resolution control, and it overrides these.
+ */
 export const QUALITY: Record<QualityTier, QualitySettings> = {
   low: {
     shadowMapSize: 1024, cascadeCount: 2, shadowDistance: 600, maxPixelRatio: 1,
@@ -60,13 +77,13 @@ export const QUALITY: Record<QualityTier, QualitySettings> = {
     // Three cascades rather than four: every shadow-casting mesh in the city
     // is submitted once per cascade, and the fourth buys very little on a
     // 2048 map at this distance.
-    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 2200, maxPixelRatio: 1.5,
+    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 2200, maxPixelRatio: 1.25,
     ssao: true, ssaoSamples: 20, ssr: true, bloom: true, motionBlur: true, taa: true,
     volumetricClouds: true, cloudSteps: 48, detailDistance: 1400, treeBudget: 16000,
     anisotropy: 8, waterReflections: true,
   },
   ultra: {
-    shadowMapSize: 4096, cascadeCount: 4, shadowDistance: 3500, maxPixelRatio: 2,
+    shadowMapSize: 4096, cascadeCount: 4, shadowDistance: 3500, maxPixelRatio: 1.5,
     ssao: true, ssaoSamples: 32, ssr: true, bloom: true, motionBlur: true, taa: true,
     volumetricClouds: true, cloudSteps: 80, detailDistance: 2600, treeBudget: 30000,
     anisotropy: 16, waterReflections: true,

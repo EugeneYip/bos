@@ -105,6 +105,7 @@ export class Roads implements WorldModule {
 
   private net: Network | null = null;
   private lampField: LampField | null = null;
+  private worstTile = 0;
   /** Junction centres bucketed for the cycle-lane conflict probe. */
   private conflictCells = new Map<string, Array<{ x: number; z: number; r: number }>>();
   private conflictProbe: ConflictProbe | undefined;
@@ -528,7 +529,12 @@ export class Roads implements WorldModule {
       const tile = this.queue.shift()!;
       const tier = this.queueTier.shift()!;
       if (tile.group) continue;
+      // The budget is checked *before* a build, so one heavy tile overshoots it
+      // by however long it takes. Record the worst, or the overshoot is
+      // invisible behind the average.
+      const b0 = performance.now();
       this.buildTile(tile, tier);
+      this.worstTile = Math.max(this.worstTile, performance.now() - b0);
     }
 
     let draws = 0;
@@ -542,6 +548,7 @@ export class Roads implements WorldModule {
     ctx.stats.roadMeshes = draws;
     ctx.stats.roadTris = this.tris;
     ctx.stats.roadQueue = this.queue.length;
+    ctx.stats['roadWorstTileMs'] = Math.round(this.worstTile * 10) / 10;
   }
 
   /** Queues tiles in range, newest-nearest first, and hides the rest. */

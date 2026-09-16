@@ -42,6 +42,12 @@ import { GroundCover } from './vegetation/groundcover';
  */
 
 const REBUILD_MOVE = 28;
+/**
+ * Milliseconds per frame the tier refill may spend. At 4 ms a 200 ms pass takes
+ * fifty frames — a couple of seconds of trees resolving in the middle distance,
+ * which is far less noticeable than a fifth of a second of frozen picture.
+ */
+const REBUILD_BUDGET_MS = 4;
 
 interface Tier {
   mesh: THREE.InstancedMesh;
@@ -85,8 +91,20 @@ export class Vegetation implements WorldModule {
   private cellOrder = new Int32Array(0);
 
   private lastRebuild = new THREE.Vector3(1e9, 1e9, 1e9);
+  private lastCamPos = new THREE.Vector3(1e9, 1e9, 1e9);
   private nearTotal = 0;
   private midTotal = 0;
+  /** Worst single-frame refill, in ms. A *max*, not an average: see `rebuild`. */
+  private worstRebuild = 0;
+  private worstGround = 0;
+  /** Resumable state for the amortised refill; null when no pass is running. */
+  private rb: {
+    k: number; ci: number; cj: number;
+    nearN: Int32Array; midN: Int32Array;
+    nearLeft: number; midLeft: number;
+    stageNear: Float32Array[]; stageMid: Float32Array[];
+    at: THREE.Vector3;
+  } | null = null;
   private drawnNear = 0;
   private drawnMid = 0;
   private buildMs = 0;
@@ -161,7 +179,10 @@ export class Vegetation implements WorldModule {
     this.ground.build(ctx, this.shared, tex.grass, tex.shrub, tex.mean.grass, tex.mean.shrub);
 
     this.shared.season.value = autumnFactor(ctx.dayOfYear);
-    this.rebuild(ctx);
+    // The first fill runs to completion: this is still inside `init`, behind the
+    // loading screen, where a long frame costs nothing and an empty city costs
+    // the first impression.
+    this.rebuild(ctx, Infinity);
     this.ground.rebuild(ctx);
 
     this.buildMs = performance.now() - t0;
@@ -395,6 +416,24 @@ export class Vegetation implements WorldModule {
    * geometry. Yaw alone does not hide that — but a tree leans, and a few
    * degrees of lean about a random axis, different for every individual, does.
    */
+  /** Compose one instance matrix into a staging array rather than a live mesh. */
+  private writeTo(field: TreeField, stage: Float32Array, slot: number, i: number): void {
+    const h = field.height[i];
+    const w = field.width[i] * h;
+    Vegetation._p.set(field.px[i], field.py[i], field.pz[i]);
+    Vegetation._q.setFromAxisAngle(Vegetation._up, field.rot[i]);
+    const tilt = field.tilt[i];
+    if (tilt !== 0) {
+      const a = field.tiltAz[i];
+      Vegetation._ax.set(Math.cos(a), 0, Math.sin(a));
+      Vegetation._qt.setFromAxisAngle(Vegetation._ax, tilt);
+      Vegetation._q.premultiply(Vegetation._qt);
+    }
+    Vegetation._s.set(w, h, w);
+    Vegetation._m.compose(Vegetation._p, Vegetation._q, Vegetation._s);
+    Vegetation._m.toArray(stage, slot * 16);
+  }
+
   private write(field: TreeField, mesh: THREE.InstancedMesh, slot: number, i: number): void {
     const h = field.height[i];
     const w = field.width[i] * h;
@@ -412,24 +451,55 @@ export class Vegetation implements WorldModule {
     mesh.setMatrixAt(slot, Vegetation._m);
   }
 
-  /** Refill the near and mid tiers with the trees closest to the camera. */
-  private rebuild(ctx: Ctx): void {
+  /**
+   * Refill the near and mid tiers with the trees closest to the camera, spread
+   * over as many frames as it takes.
+   *
+   * This used to run to completion in one frame. Measured over a kilometre
+   * fly-through it cost **203 ms in a single frame**, every 28 m of travel,
+   * forever — and its own timing was an exponential average, which reads about
+   * zero from a parked camera and hid the whole thing. That, plus the
+   * groundcover's equivalent, is what "the whole scene keeps blinking" is:
+   * nothing to do with the renderer or the quality tier, which is exactly why
+   * changing the resolution never moved `fps.low` off 10.
+   *
+   * The cost is not the matrix writes, it is the scan: up to 89,000 trees get a
+   * distance test to find the nearest 11,600. So the walk is resumable, with the
+   * cursor and counters held across frames and matrices composed into staging
+   * arrays. Partial work is never visible — buffers and instance counts are
+   * swapped in together when the pass finishes. The clock is read once per cell
+   * rather than per tree, so the overshoot is one cell's worth of work.
+   */
+  private rebuild(ctx: Ctx, budgetMs: number): void {
     const field = this.field;
     if (!field) return;
-    const cam = ctx.camera.position;
-    const ci = Math.floor((cam.x - this.gMinX) / GRID_CELL);
-    const cj = Math.floor((cam.z - this.gMinZ) / GRID_CELL);
+    const t0 = performance.now();
 
-    const nearN = new Int32Array(SPECIES.length);
-    const midN = new Int32Array(SPECIES.length);
-    let nearLeft = this.nearTotal;
-    let midLeft = this.midTotal;
+    if (!this.rb) {
+      const c = ctx.camera.position;
+      this.rb = {
+        k: 0,
+        ci: Math.floor((c.x - this.gMinX) / GRID_CELL),
+        cj: Math.floor((c.z - this.gMinZ) / GRID_CELL),
+        nearN: new Int32Array(SPECIES.length),
+        midN: new Int32Array(SPECIES.length),
+        nearLeft: this.nearTotal,
+        midLeft: this.midTotal,
+        stageNear: this.tiers.map((t) => new Float32Array(t.near.mesh.instanceMatrix.array.length)),
+        stageMid: this.tiers.map((t) => new Float32Array(t.mid.mesh.instanceMatrix.array.length)),
+        at: c.clone(),
+      };
+    }
+    const rb = this.rb;
+    const cam = rb.at;
     const nearR2 = NEAR_RADIUS * NEAR_RADIUS;
     const midR2 = MID_RADIUS * MID_RADIUS;
 
-    for (let k = 0; k < this.cellOrder.length && (nearLeft > 0 || midLeft > 0); k += 2) {
-      const i = ci + this.cellOrder[k];
-      const j = cj + this.cellOrder[k + 1];
+    while (rb.k < this.cellOrder.length && (rb.nearLeft > 0 || rb.midLeft > 0)) {
+      if (performance.now() - t0 > budgetMs) return;
+      const i = rb.ci + this.cellOrder[rb.k];
+      const j = rb.cj + this.cellOrder[rb.k + 1];
+      rb.k += 2;
       if (i < 0 || j < 0 || i >= this.gx || j >= this.gz) continue;
       const c = j * this.gx + i;
       const end = this.cellStart[c + 1];
@@ -439,30 +509,33 @@ export class Vegetation implements WorldModule {
         const dz = field.pz[t] - cam.z;
         const d2 = dx * dx + dz * dz;
         if (d2 > midR2) continue;
-        const s = field.species[t];
-        const tier = this.tiers[s];
-        if (d2 < nearR2 && nearLeft > 0 && nearN[s] < tier.nearCap) {
-          this.write(field, tier.near.mesh, nearN[s]++, t);
-          nearLeft--;
-        } else if (midLeft > 0 && midN[s] < tier.midCap) {
-          this.write(field, tier.mid.mesh, midN[s]++, t);
-          midLeft--;
+        const sp = field.species[t];
+        const tier = this.tiers[sp];
+        if (d2 < nearR2 && rb.nearLeft > 0 && rb.nearN[sp] < tier.nearCap) {
+          this.writeTo(field, rb.stageNear[sp], rb.nearN[sp]++, t);
+          rb.nearLeft--;
+        } else if (rb.midLeft > 0 && rb.midN[sp] < tier.midCap) {
+          this.writeTo(field, rb.stageMid[sp], rb.midN[sp]++, t);
+          rb.midLeft--;
         }
       }
     }
 
     this.drawnNear = 0;
     this.drawnMid = 0;
-    for (let s = 0; s < SPECIES.length; s++) {
-      const tier = this.tiers[s];
-      tier.near.mesh.count = nearN[s];
-      tier.mid.mesh.count = midN[s];
+    for (let sp = 0; sp < SPECIES.length; sp++) {
+      const tier = this.tiers[sp];
+      (tier.near.mesh.instanceMatrix.array as Float32Array).set(rb.stageNear[sp]);
+      (tier.mid.mesh.instanceMatrix.array as Float32Array).set(rb.stageMid[sp]);
+      tier.near.mesh.count = rb.nearN[sp];
+      tier.mid.mesh.count = rb.midN[sp];
       tier.near.mesh.instanceMatrix.needsUpdate = true;
       tier.mid.mesh.instanceMatrix.needsUpdate = true;
-      this.drawnNear += nearN[s];
-      this.drawnMid += midN[s];
+      this.drawnNear += rb.nearN[sp];
+      this.drawnMid += rb.midN[sp];
     }
     this.lastRebuild.copy(cam);
+    this.rb = null;
   }
 
   update(dt: number, ctx: Ctx): void {
@@ -476,10 +549,28 @@ export class Vegetation implements WorldModule {
     const gustiness = 0.75 + 0.35 * Math.sin(this.shared.time.value * 0.11 + 1.3);
     this.shared.wind.value.set(Math.cos(a), Math.sin(a), gustiness);
 
-    if (ctx.camera.position.distanceToSquared(this.lastRebuild) > REBUILD_MOVE * REBUILD_MOVE) {
-      this.rebuild(ctx);
+    // A pass in flight finishes before another starts, unless the camera has run
+    // a long way past where it began — otherwise, at flying speed, every 28 m
+    // would restart it and the trees would never update at all.
+    const r0 = performance.now();
+    if (this.rb) {
+      if (ctx.camera.position.distanceToSquared(this.rb.at) > (REBUILD_MOVE * 4) ** 2) this.rb = null;
+      this.rebuild(ctx, REBUILD_BUDGET_MS);
+    } else if (ctx.camera.position.distanceToSquared(this.lastRebuild) > REBUILD_MOVE * REBUILD_MOVE) {
+      this.rebuild(ctx, REBUILD_BUDGET_MS);
     }
-    if (this.ground?.needsRebuild(ctx.camera.position)) this.ground.rebuild(ctx);
+    this.worstRebuild = Math.max(this.worstRebuild, performance.now() - r0);
+
+    // Grass is a near-camera effect. Rebuilding it costs a third of a second of
+    // terrain sampling, and none of it is visible from a camera moving at forty
+    // metres a second — so it waits until the view settles.
+    const speed = Math.sqrt(ctx.camera.position.distanceToSquared(this.lastCamPos)) / Math.max(dt, 1e-3);
+    this.lastCamPos.copy(ctx.camera.position);
+    if (speed < 14 && this.ground?.needsRebuild(ctx.camera.position)) {
+      const g0 = performance.now();
+      this.ground.rebuild(ctx);
+      this.worstGround = Math.max(this.worstGround, performance.now() - g0);
+    }
 
     this.updateMs = this.updateMs * 0.9 + (performance.now() - t0) * 0.1;
     ctx.stats['veg.near'] = this.drawnNear;
@@ -488,6 +579,8 @@ export class Vegetation implements WorldModule {
     ctx.stats['veg.shrubs'] = this.ground?.drawnBush ?? 0;
     ctx.stats['veg.ms'] = Math.round(this.updateMs * 100) / 100;
     ctx.stats['veg.buildMs'] = Math.round(this.buildMs);
+    ctx.stats['veg.worstRebuildMs'] = Math.round(this.worstRebuild * 10) / 10;
+    ctx.stats['veg.worstGroundMs'] = Math.round(this.worstGround * 10) / 10;
   }
 
   dispose(ctx: Ctx): void {
