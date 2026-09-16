@@ -163,9 +163,20 @@ void main() {
   graded = graded * uGain + uLift;
   graded = pow(max(graded, vec3(0.0)), max(uGamma, vec3(0.02)));
 
-  // Contrast about a pivot.
-  graded = (graded - uContrastPivot) * uContrast + uContrastPivot;
-  graded = max(graded, vec3(0.0));
+  // Contrast about a pivot, as a power rather than as a straight line.
+  //
+  // '(g - pivot) * contrast + pivot' is a line, and with pivot 0.42 and
+  // contrast 1.04 it crosses zero at g = 0.0162 -- so everything that should
+  // present below about 34/255 was clamped to pure black. Over half the paving
+  // under the Commonwealth Avenue Mall's elms came out at exactly 0,0,0: not
+  // dark, nothing, with no gradation left in it. Rendered without the post
+  // chain the same pixels sit around 11/255 against a sunlit road at 44, which
+  // is what open shade under a closed canopy should look like, so the light was
+  // right and the curve was throwing it away.
+  //
+  // A power about the same pivot has the same slope there, so the look through
+  // the midtones is unchanged, but it only reaches zero at zero.
+  graded = uContrastPivot * pow(max(graded, vec3(1e-6)) / uContrastPivot, vec3(uContrast));
 
   // Split toning.
   float lum = luma(graded);
