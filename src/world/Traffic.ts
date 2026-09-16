@@ -1,8 +1,9 @@
 import * as THREE from 'three';
+import { SEA_LEVEL } from '../core/config';
 import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord, PropSet, RoadRecord } from '../core/types';
 import { loadAreas, loadProps, loadRoads } from '../core/data';
-import { buildLaneGraph, sampleEdge, LANE_W, type LaneGraph } from './traffic/graph';
+import { buildLaneGraph, sampleEdge, LANE_W, type LaneGraph, type NoDrive } from './traffic/graph';
 import {
   vehicleTypes, pedestrianGeometry, CAR_COLORS, CLOTHES,
   WHEEL_VERT_PARS, WHEEL_VERT_POS, WHEEL_VERT_NRM, WALK_VERT_PARS, WALK_VERT_POS,
@@ -181,6 +182,7 @@ export class Traffic implements WorldModule {
 
   private root = new THREE.Group();
   private graph: LaneGraph | null = null;
+  private noDrive: NoDrive | null = null;
 
   private defs: VehicleDef[] = [];
   private cars: Car[] = [];
@@ -265,7 +267,8 @@ export class Traffic implements WorldModule {
       return;
     }
 
-    this.graph = buildLaneGraph(roads);
+    this.buildNoDriveZones(areas, ctx);
+    this.graph = buildLaneGraph(roads, 'drive', this.noDrive ?? undefined);
     if (!this.graph.edges.length) {
       console.warn('[Traffic] no driveable edges');
       return;
@@ -280,6 +283,7 @@ export class Traffic implements WorldModule {
     this.buildFlags(ctx, props);
 
     ctx.stats.trafficEdges = this.graph.edges.length;
+    ctx.stats.trafficBanned = this.graph.banned;
     ctx.stats.vehicles = this.cars.length;
     ctx.stats.boats = this.boats.length;
     ctx.stats.pedestrians = this.walkers.length;
@@ -857,7 +861,10 @@ export class Traffic implements WorldModule {
    * nothing about the animation touches the CPU.
    */
   private buildWalkers(ctx: Ctx, roads: RoadRecord[]): void {
-    this.walkGraph = buildLaneGraph(roads, 'walk');
+    // Pedestrians are kept off the airfield and off open water too, but not
+    // off the wharves, which is where people actually walk out over the
+    // harbour. The predicate exempts them already.
+    this.walkGraph = buildLaneGraph(roads, 'walk', this.noDrive ?? undefined);
     if (!this.walkGraph.edges.length) return;
 
     // Where the footway is, relative to each way's centreline. A mapped
@@ -1105,6 +1112,82 @@ export class Traffic implements WorldModule {
    * to be, tagged river or harbour so a rowing eight never appears in the
    * shipping channel.
    */
+  /**
+   * Where traffic must not go.
+   *
+   * Two zones, for two different reasons.
+   *
+   * **Airside.** Logan's apron and taxiway service roads are ordinary
+   * `highway=service` ways in the extract, and `service` is in the speed
+   * table at 6 m/s, so the airfield filled up with cars driving across the
+   * taxiways.
+   *
+   * **Open water.** OSM's wharf and park polygons reach right across the
+   * harbour -- 'Charlestown Navy Yard' is a 12.3 ha park covering the basin
+   * the USS Constitution is berthed in -- so roads draped on them put vans out
+   * on the water. Once the lawn was clipped off the harbour they were plainly
+   * floating.
+   *
+   * A bridge is exempt, or every crossing would be cut. A real wharf is exempt
+   * too, because Boston's piers carry real roads out over the harbour -- but
+   * *not* by testing the `pier` polygons, which was the first attempt and let
+   * every van straight back onto the basin: OSM's pier polygons here cover far
+   * more than the deck. The test that works is the terrain the roads are
+   * actually draped on. The land-cover raster lifts a pier to its deck
+   * elevation and carves open water to the bed, so ground above the water line
+   * *is* a deck and ground at or below it is not.
+   *
+   * The airside zone gets a union bounding box so the overwhelming majority of
+   * the city's 56,655 ways are rejected on two comparisons.
+   */
+  private buildNoDriveZones(areas: AreaRecord[], ctx: Ctx): void {
+    const box = (list: AreaRecord[]): [number, number, number, number] => {
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (const a of list) {
+        for (let i = 0; i < a.outline.length; i += 2) {
+          if (a.outline[i] < x0) x0 = a.outline[i];
+          if (a.outline[i] > x1) x1 = a.outline[i];
+          if (a.outline[i + 1] < z0) z0 = a.outline[i + 1];
+          if (a.outline[i + 1] > z1) z1 = a.outline[i + 1];
+        }
+      }
+      return [x0, x1, z0, z1];
+    };
+    const usable = (a: AreaRecord): boolean => !!a.outline && a.outline.length >= 6;
+    const airside = areas.filter((a) => a.kind === 'runway' && usable(a));
+    const aBox = airside.length ? box(airside) : null;
+    const waterAt = ctx.waterDistAt;
+    const groundAt = ctx.sampleHeight;
+
+    if (!aBox && !waterAt) { this.noDrive = null; return; }
+
+    const inAny = (list: AreaRecord[], x: number, z: number): boolean => {
+      for (const a of list) {
+        if (pointInRing(a.outline, x, z)) {
+          if (a.holes?.some((h) => pointInRing(h, x, z))) continue;
+          return true;
+        }
+      }
+      return false;
+    };
+
+    this.noDrive = (x, z, bridge) => {
+      if (aBox && x >= aBox[0] && x <= aBox[1] && z >= aBox[2] && z <= aBox[3]
+          && inAny(airside, x, z)) return true;
+      if (bridge || !waterAt) return false;
+      // Well inside the water, not merely near the line: the shoreline field
+      // is a raster and a road legitimately runs along a quay edge.
+      if (waterAt(x, z) <= 6) return false;
+      // Standing on something: a wharf deck, a causeway, a made-land finger.
+      if (groundAt) {
+        const g = groundAt(x, z);
+        if (Number.isFinite(g) && g > SEA_LEVEL + 0.6) return false;
+      }
+      return true;
+    };
+    ctx.stats.noDriveAirside = airside.length;
+  }
+
   private buildWaterCells(areas: AreaRecord[]): void {
     const cells: number[] = [];
     for (const a of areas) {

@@ -65,6 +65,16 @@ const SOIL = new THREE.Vector3(0.088, 0.068, 0.047);
  * chunks blend between levels; anything laid flatter than that pops in and
  * out. 0.22 m clears the morph without reading as a step at eye level.
  */
+/** Even-odd point-in-ring on a flat [x,z,...] outline. */
+function pointInRing(r: readonly number[], px: number, pz: number): boolean {
+  let hit = false;
+  for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) {
+    const xi = r[i], zi = r[i + 1], xj = r[j], zj = r[j + 1];
+    if ((zi > pz) !== (zj > pz) && px < ((xj - xi) * (pz - zi)) / (zj - zi) + xi) hit = !hit;
+  }
+  return hit;
+}
+
 /** Metres inside the waterline at which a lawn triangle is dropped. */
 const WATER_TRIM = 1.0;
 
@@ -150,6 +160,36 @@ export class Parks implements WorldModule {
     const waterAt = ctx.waterDistAt;
     let overWater = 0;
 
+    // Wharf decks are not lawns. OSM's 'Charlestown Navy Yard' park covers
+    // Pier 1, which is paved, so once the pier was cut out of the harbour as a
+    // hole -- making it land, and so exempt from the water test above -- the
+    // grass came back on top of it. Cheap because the piers get one union
+    // bounding box and there are only a couple of hundred of them.
+    const piers = areas.filter((a) => a.kind === 'pier' && a.outline && a.outline.length >= 6);
+    let pBox: [number, number, number, number] | null = null;
+    for (const a of piers) {
+      for (let i = 0; i < a.outline.length; i += 2) {
+        const x = a.outline[i], z = a.outline[i + 1];
+        if (!pBox) pBox = [x, x, z, z];
+        else {
+          if (x < pBox[0]) pBox[0] = x;
+          if (x > pBox[1]) pBox[1] = x;
+          if (z < pBox[2]) pBox[2] = z;
+          if (z > pBox[3]) pBox[3] = z;
+        }
+      }
+    }
+    const onWharf = (x: number, z: number): boolean => {
+      if (!pBox || x < pBox[0] || x > pBox[1] || z < pBox[2] || z > pBox[3]) return false;
+      for (const a of piers) {
+        if (!pointInRing(a.outline, x, z)) continue;
+        if (a.holes?.some((h) => pointInRing(h, x, z))) continue;
+        return true;
+      }
+      return false;
+    };
+    let onDeck = 0;
+
     for (const { rec } of green) {
       const spec = GREEN[rec.kind]!;
       const tri = this.triangulate(rec);
@@ -191,11 +231,10 @@ export class Parks implements WorldModule {
         // a fair test. The threshold is a metre *inside* the waterline rather
         // than zero, so a lawn still runs to the water's edge instead of
         // pulling back from it.
-        if (waterAt) {
-          const mx = (ax + bx + cx) / 3;
-          const mz = (az + bz + cz) / 3;
-          if (waterAt(mx, mz) > WATER_TRIM) { overWater++; return; }
-        }
+        const mx = (ax + bx + cx) / 3;
+        const mz = (az + bz + cz) / 3;
+        if (waterAt && waterAt(mx, mz) > WATER_TRIM) { overWater++; return; }
+        if (onWharf(mx, mz)) { onDeck++; return; }
         const base = b!.pos.length / 3;
         for (const [x, z] of [[ax, az], [bx, bz], [cx, cz]] as const) {
           b!.pos.push(x, ctx.sampleHeight(x, z) + LIFT, z);
@@ -221,6 +260,7 @@ export class Parks implements WorldModule {
     }
 
     ctx.stats.parksOverWater = overWater;
+    ctx.stats.parksOnWharf = onDeck;
 
     for (const [surface, b] of buckets) {
       if (!b.idx.length) continue;

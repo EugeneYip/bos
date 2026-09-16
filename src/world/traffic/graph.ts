@@ -64,6 +64,8 @@ export interface LaneGraph {
   /** Node positions, [x,y,z,...]. */
   nodes: Float32Array;
   totalKm: number;
+  /** Ways dropped by the no-drive predicate. */
+  banned: number;
 }
 
 const key = (x: number, z: number): number =>
@@ -78,7 +80,17 @@ const key = (x: number, z: number): number =>
  * 'walk' gives footways and shared surfaces, always two-way because nobody
  * obeys a oneway tag on foot.
  */
-export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'drive'): LaneGraph {
+/**
+ * Whether a point is somewhere general traffic must not go. `bridge` is the
+ * road's own flag, so a crossing is not mistaken for driving on the water.
+ */
+export type NoDrive = (x: number, z: number, bridge: boolean) => boolean;
+
+export function buildLaneGraph(
+  roads: RoadRecord[],
+  mode: 'drive' | 'walk' = 'drive',
+  noDrive?: NoDrive,
+): LaneGraph {
   const table = mode === 'walk' ? WALK_SPEED : SPEED;
   const nodeIds = new Map<number, number>();
   const nodeXYZ: number[] = [];
@@ -121,11 +133,28 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
 
   let totalKm = 0;
 
+  let banned = 0;
+
   for (const r of roads) {
     if (r.tunnel) continue; // nothing to see underground
     if (!table[r.class]) continue;
     const n = r.path.length / 2;
     if (n < 2) continue;
+
+    // Keep traffic out of the places it has no business in. Logan's apron and
+    // taxiway service roads are ordinary `highway=service` ways in the
+    // extract, so without this the airfield fills with cars; and OSM's wharf
+    // and park polygons reach across the harbour, so roads draped on them put
+    // vans out on open water. Sampled at both ends and the middle, and a road
+    // has to be banned at two of the three before it is dropped, so a street
+    // that merely passes a boundary is left alone.
+    if (noDrive) {
+      let hits = 0;
+      for (const k of [0, (n >> 1) * 2, (n - 1) * 2] as const) {
+        if (noDrive(r.path[k], r.path[k + 1], r.bridge)) hits++;
+      }
+      if (hits >= 2) { banned++; continue; }
+    }
 
     // Interleave the polyline with its per-vertex elevation, lifted slightly
     // so wheels sit on the carriageway rather than in it.
@@ -161,6 +190,7 @@ export function buildLaneGraph(roads: RoadRecord[], mode: 'drive' | 'walk' = 'dr
     out: outLists.map((l) => Int32Array.from(l)),
     nodes: Float32Array.from(nodeXYZ),
     totalKm: totalKm / 1000,
+    banned,
   };
 }
 

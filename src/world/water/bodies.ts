@@ -107,11 +107,39 @@ function classify(rec: AreaRecord, area: number): { murk: number; fetchCap: numb
   return { murk: 0.12, fetchCap: 1.0 };
 }
 
+/** Even-odd point-in-ring on a flat [x,z,...] ring. */
+function inRing(r: Ring, px: number, pz: number): boolean {
+  let hit = false;
+  for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) {
+    const xi = r[i], zi = r[i + 1], xj = r[j], zj = r[j + 1];
+    if ((zi > pz) !== (zj > pz) && px < ((xj - xi) * (pz - zi)) / (zj - zi) + xi) hit = !hit;
+  }
+  return hit;
+}
+
 export function buildBodies(
   records: AreaRecord[],
   rect: { minX: number; minZ: number; maxX: number; maxZ: number },
 ): WaterBody[] {
   const out: WaterBody[] = [];
+
+  // Wharf decks, cleaned once so each water body can test them cheaply. Small
+  // floats and finger docks are left out: they would fragment the surface for
+  // a few square metres each.
+  const piers: Array<{ ring: Ring; bounds: number[]; mid: [number, number] }> = [];
+  for (const rec of records) {
+    if (rec.kind !== 'pier' || !rec.outline || rec.outline.length < 8) continue;
+    const ring = cleanRing(rec.outline);
+    if (ring.length < 8) continue;
+    if (Math.abs(ringArea2(ring)) * 0.5 < 200) continue;
+    const pb: number[] = [0, 0, 0, 0];
+    ringBounds(ring, pb);
+    let mx = 0, mz = 0;
+    for (let i = 0; i < ring.length; i += 2) { mx += ring[i]; mz += ring[i + 1]; }
+    const n = ring.length / 2;
+    piers.push({ ring, bounds: pb, mid: [mx / n, mz / n] });
+  }
+
   for (const rec of records) {
     if (rec.kind !== 'water' && rec.kind !== 'river') continue;
     if (!rec.outline || rec.outline.length < 8) continue;
@@ -139,6 +167,28 @@ export function buildBodies(
       if (hr.length < 8) continue;
       if (Math.abs(ringArea2(hr)) * 0.5 < 12) continue;
       holes.push(hr);
+    }
+
+    // Wharves are holes in the harbour.
+    //
+    // OSM's water polygons run straight across them: Boston Harbor covers the
+    // whole Charlestown Navy Yard, Pier 1 included, and the pier is mapped as
+    // its own `pier` area rather than as a hole in the water. So the harbour
+    // was drawn on top of a deck the land-cover raster had correctly lifted to
+    // about a metre, and the cars parked on that deck appeared to be floating.
+    //
+    // Cutting them out here rather than in the surface builder matters. A test
+    // on terrain height in the builder works, but it can only drop whole grid
+    // cells, so the waterline came out as a sawtooth one cell high -- worse to
+    // look at than the bug. As holes they go through the same shoreline
+    // clipper as every other edge and get the pier's own outline. It also
+    // fixes `WaterField`, and so `ctx.waterDistAt`, which was calling every
+    // wharf in the city water.
+    for (const p of piers) {
+      if (p.bounds[0] > b[2] || p.bounds[2] < b[0]
+          || p.bounds[1] > b[3] || p.bounds[3] < b[1]) continue;
+      if (!inRing(outer, p.mid[0], p.mid[1])) continue;
+      holes.push(p.ring);
     }
 
     const { murk, fetchCap } = classify(rec, area);

@@ -134,6 +134,7 @@ export function buildSurfaces(
 
         const x = lx0 + i * cell;
         const z = lz0 + j * cell;
+
         const acc = chunkOf(x + cell * 0.5, z + cell * 0.5);
         const share = (li: number, lj: number): number => {
           const key = lj * pw + li;

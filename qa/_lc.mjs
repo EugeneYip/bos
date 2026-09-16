@@ -8,9 +8,15 @@ const b=await puppeteer.launch({headless:true,protocolTimeout:900000,
   args:['--no-sandbox','--enable-gpu','--use-angle=metal','--enable-unsafe-swiftshader','--ignore-gpu-blocklist','--enable-webgl','--window-size=800,600']});
 const pg=await b.newPage();
 const lines=[];
-pg.on('console',(m)=>{const t=m.text(); if(/LandCover|Terrain\]|cover /.test(t)) lines.push(t.slice(0,220));});
+pg.on('console',(m)=>{const t=m.text(); if(/LandCover|Terrain\]|Water\]|Roads\]|Parks\]|Traffic\]|Transit\]/.test(t)) lines.push(t.slice(0,240));});
 await pg.evaluateOnNewDocument(()=>{try{localStorage.removeItem('bh-tier');localStorage.setItem('bh-onboarded','1')}catch{}});
 await pg.goto(`http://localhost:${PORT}/?q=medium`,{waitUntil:'networkidle2',timeout:180000});
 await pg.waitForFunction('window.__ready === true',{timeout:300000});
 for(const l of lines) console.log(l);
+const want = (process.env.STATS||'').split(',').filter(Boolean);
+if (want.length) console.log(JSON.stringify(await pg.evaluate((k)=>{
+  const s = window.__boston.ctx.stats; const o = {};
+  for (const n of k) o[n] = s[n];
+  return o;
+}, want)));
 await b.close(); srv.kill();
