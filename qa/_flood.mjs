@@ -27,8 +27,16 @@ const n = await pg.evaluate((m) => {
     if (!(o.isMesh || o.isInstancedMesh) || !(o.name || '').includes(m)) return;
     for (const mat of (Array.isArray(o.material) ? o.material : [o.material])) {
       if (!mat) continue;
-      mat.color?.setRGB(1, 0, 1); mat.emissive?.setRGB(1, 0, 1);
-      mat.vertexColors = false; mat.map = null; mat.needsUpdate = true; k++;
+      if (mat.isShaderMaterial) {
+        // A hand-written material has no `color`. Replace the whole fragment
+        // stage: varyings the vertex stage declares but this never reads are
+        // legal, so nothing else has to change.
+        mat.fragmentShader = 'void main() { gl_FragColor = vec4( 1.0, 0.0, 1.0, 1.0 ); }';
+      } else {
+        mat.color?.setRGB(1, 0, 1); mat.emissive?.setRGB(1, 0, 1);
+        mat.vertexColors = false; mat.map = null;
+      }
+      mat.needsUpdate = true; k++;
     }
   });
   return k;
@@ -49,6 +57,8 @@ for (const id of IDS) {
     const i = (y * p.width + x) * 4; tot++;
     if (p.data[i] > 110 && p.data[i+2] > 110 && p.data[i+1] < p.data[i] * 0.6) hits++;
   }
-  console.log(`  ${id.padEnd(18)} magenta on ${(100*hits/tot).toFixed(2)}% of the frame`);
+  const est = await pg.evaluate(() => window.__boston.ctx.stats['water.cover']);
+  console.log(`  ${id.padEnd(18)} true ${(100*hits/tot).toFixed(2)}% of the frame`
+    + `   module estimate ${est ?? '-'}%`);
 }
 await b.close(); srv.kill();

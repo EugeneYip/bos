@@ -49,6 +49,7 @@ export class PlanarReflection {
   private camera = new THREE.PerspectiveCamera();
   private opts: ReflectionOptions;
   private frame = 0;
+  private forceNext = false;
   private width = 2;
   private height = 2;
 
@@ -105,6 +106,17 @@ export class PlanarReflection {
   private skyLookedUp = false;
   private skyWasVisible: boolean[] = [];
 
+  /**
+   * Render on the next call whatever the interval says.
+   *
+   * For a caller that stops asking -- the surface has gone off screen -- and
+   * later starts again: without this the first frame back shows whatever was
+   * in the target when it left, which may be a different part of the city.
+   */
+  invalidate(): void {
+    this.forceNext = true;
+  }
+
   /** @returns true when the target was refreshed this frame. */
   render(
     renderer: THREE.WebGLRenderer,
@@ -114,7 +126,10 @@ export class PlanarReflection {
     hide: THREE.Object3D,
   ): boolean {
     this.frame++;
-    if (this.opts.interval > 1 && this.frame % this.opts.interval !== 0) return false;
+    if (!this.forceNext && this.opts.interval > 1 && this.frame % this.opts.interval !== 0) {
+      return false;
+    }
+    this.forceNext = false;
 
     const virt = this.camera;
     this.reflectorPos.set(0, planeY, 0);

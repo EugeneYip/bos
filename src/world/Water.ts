@@ -3,6 +3,40 @@ import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord } from '../core/types';
 import { loadAreas } from '../core/data';
 import { BOUNDS, SEA_LEVEL } from '../core/config';
+
+/**
+ * Estimated screen fraction of water below which the planar reflection is not
+ * drawn.
+ *
+ * Deliberately far above the fraction that would actually be invisible,
+ * because {@link Water.surfaceCoverage} cannot see occlusion and so
+ * over-reports by a wide and variable margin. Measured against the truth --
+ * obtained by flooding the water shader magenta and counting pixels --
+ * across ten viewpoints:
+ *
+ *   viewpoint          true    estimate
+ *   water-detail      49.8%       71.6%
+ *   harbor-water      44.3%       72.1%
+ *   high-street       16.0%       65.9%
+ *   copley             2.7%       62.9%
+ *   charles-water      2.7%       71.6%
+ *   zakim              0.5%       53.7%
+ *   comm-ave           0.0%       52.1%   <- the Charles, behind Back Bay
+ *   common-street      0.0%      100.0%   <- camera inside the Frog Pond's box
+ *   statehouse-face    0.0%        6.8%
+ *   downtown-traffic   0.0%        7.4%
+ *
+ * Nothing with water genuinely on screen estimates below 52%, so 15% never
+ * skips a frame that needed the pass -- a 3.5x margin. What it does catch is
+ * the case where the surface is geometrically out of frame, which is worth
+ * 6.1 ms at `downtown-traffic` and 2.7 ms at `statehouse-face`.
+ *
+ * It cannot catch `comm-ave` or `common-street`, where the water is in the
+ * frustum and hidden behind the city. Getting those needs a real pixel count:
+ * a WebGL2 `ANY_SAMPLES_PASSED_CONSERVATIVE` query around the water draws,
+ * read back a frame late. That is the way to finish this.
+ */
+const REFLECT_MIN_COVER = 0.15;
 import { lonLatToWorld } from '../core/geo';
 import { buildBodies, type WaterBody } from './water/bodies';
 import { WaterField } from './water/field';
@@ -45,6 +79,10 @@ export class Water implements WorldModule {
   private bodies: WaterBody[] = [];
   private time = 0;
   private reflectEnabled = false;
+
+  // Scratch — allocating per frame is how you get GC hitches.
+  private static _v3 = new THREE.Vector3();
+  private static _m4 = new THREE.Matrix4();
   private timer: GpuTimer | null = null;
 
   async init(ctx: Ctx): Promise<void> {
@@ -372,10 +410,27 @@ export class Water implements WorldModule {
     }
 
     if (this.reflection && this.reflectEnabled) {
-      m.uniforms.uReflMaxLod.value = this.reflection.maxLod;
-      this.timer?.begin();
-      this.reflection.render(ctx.renderer, ctx.scene, ctx.camera, SEA_LEVEL, this.root);
-      this.timer?.end();
+      // A second pass over the city is the single most expensive thing in the
+      // frame -- 6.3 ms of 24.7 at `high-street`, a quarter of it, 87% of that
+      // being the building tiles. It was running unconditionally, so a street
+      // between two towers in the Financial District paid 6.1 ms to mirror
+      // water that is not on screen at all. Measured at every inland street
+      // viewpoint in the project, it was costing 10-25% of the frame for
+      // nothing.
+      const cover = this.surfaceCoverage(ctx);
+      ctx.stats['water.cover'] = Math.round(cover * 1000) / 10;
+      if (cover >= REFLECT_MIN_COVER) {
+        m.uniforms.uReflMaxLod.value = this.reflection.maxLod;
+        this.timer?.begin();
+        this.reflection.render(ctx.renderer, ctx.scene, ctx.camera, SEA_LEVEL, this.root);
+        this.timer?.end();
+        ctx.stats['water.reflect'] = 1;
+      } else {
+        // So the frame the surface comes back is not mirroring wherever the
+        // camera was standing when it left.
+        this.reflection.invalidate();
+        ctx.stats['water.reflect'] = 0;
+      }
     }
 
     if (this.timer?.supported) ctx.stats['water.ms'] = Number(this.timer.ms.toFixed(2));
@@ -383,6 +438,75 @@ export class Water implements WorldModule {
 
   resize(width: number, height: number): void {
     this.reflection?.resize(width, height);
+  }
+
+  /**
+   * Roughly how much of the screen the water *surface* covers, 0..1.
+   *
+   * A bounding *sphere* is the wrong primitive here and the first version of
+   * this used one: water is flat, so its sphere is as fat as the chunk is
+   * wide, and a single chunk six hundred metres away came out at 6% of the
+   * frame when the truth was zero. Projecting the box instead -- which for
+   * water is a slab a metre or two thick -- gives a sliver near the horizon,
+   * which is what it actually is.
+   *
+   * Still an over-estimate, because it ignores the city standing in front of
+   * it, and over-estimating means drawing the reflection, which is the safe
+   * direction. The skirt is excluded on purpose: it is one mesh reaching the
+   * horizon and it would report water on screen from anywhere. Every view
+   * that can see open sea can also see a harbour chunk, and the skirt is
+   * always the last mesh built.
+   */
+  private surfaceCoverage(ctx: Ctx): number {
+    const cam = ctx.camera;
+    if (this.meshes.length < 2) return 1;
+    cam.updateMatrixWorld();
+    Water._m4.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+
+    let area = 0;
+    for (let i = 0; i < this.meshes.length - 1; i++) {
+      const mesh = this.meshes[i];
+      if (!mesh.visible) continue;
+      const g = mesh.geometry;
+      if (!g.boundingBox) g.computeBoundingBox();
+      const bb = g.boundingBox;
+      if (!bb) continue;
+
+      // Clip space by hand, keeping w. `Vector3.applyMatrix4` divides through
+      // by it, which silently mirrors every corner behind the eye into
+      // plausible-looking coordinates -- the first version of this read 100%
+      // at every viewpoint in the project for exactly that reason.
+      let minX = 1, maxX = -1, minY = 1, maxY = -1, front = 0;
+      const near = cam.near;
+      for (let c = 0; c < 8; c++) {
+        Water._v3.set(
+          c & 1 ? bb.max.x : bb.min.x,
+          c & 2 ? bb.max.y : bb.min.y,
+          c & 4 ? bb.max.z : bb.min.z,
+        ).applyMatrix4(mesh.matrixWorld);
+        const e = Water._m4.elements;
+        const px = e[0] * Water._v3.x + e[4] * Water._v3.y + e[8] * Water._v3.z + e[12];
+        const py = e[1] * Water._v3.x + e[5] * Water._v3.y + e[9] * Water._v3.z + e[13];
+        const pw = e[3] * Water._v3.x + e[7] * Water._v3.y + e[11] * Water._v3.z + e[15];
+        if (pw > near) front++;
+        // A corner at or behind the eye has no screen position. Projecting it
+        // at the near plane throws it far outside the viewport, which the clip
+        // below bounds to the screen -- so a chunk the camera is standing in
+        // reads as most of the frame, which is correct.
+        const iw = 1 / Math.max(pw, near);
+        const x = px * iw, y = py * iw;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      if (front === 0) continue;          // wholly behind the camera
+
+      const w = Math.min(maxX, 1) - Math.max(minX, -1);
+      const h = Math.min(maxY, 1) - Math.max(minY, -1);
+      if (w <= 0 || h <= 0) continue;
+      area += (w * h) / 4;
+      if (area >= 1) return 1;
+    }
+    return area;
   }
 
   dispose(ctx: Ctx): void {
