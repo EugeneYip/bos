@@ -155,6 +155,13 @@ export class Parks implements WorldModule {
       // identical. The vertex colour *is* the albedo now — the shader hands it
       // a mean-1 modulation rather than a dark map to fight with.
       const jitter = hash01(rec.id) * 0.22 - 0.11;
+      // NOTE: this converts sRGB to linear *twice* — `new THREE.Color(hex)`
+      // already does it under three's `ColorManagement`, which is on. That
+      // makes this roughly six times darker than the hex asks for, and it is
+      // left in place deliberately: `MAP_MEAN` below was measured off the baked
+      // textures *with* this in the chain, so removing one without re-deriving
+      // the other turns every lawn in Boston six times brighter. Fix the pair
+      // together or not at all.
       const c = new THREE.Color(spec.color).convertSRGBToLinear();
       c.offsetHSL(jitter * 0.05, jitter * 0.14, jitter * 0.10);
 

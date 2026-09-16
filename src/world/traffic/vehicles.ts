@@ -48,7 +48,13 @@ export interface VehicleDef {
 
 /** Tag a geometry with a flat vertex colour so it can merge into the shell. */
 function tint(g: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
-  const c = new THREE.Color(hex).convertSRGBToLinear();
+// `new THREE.Color(hex)` and `setHex(hex)` already convert sRGB to the working
+// linear space: three's `ColorManagement` is enabled by default in r169 and this
+// project never turns it off. A second `convertSRGBToLinear()` applies the
+// transform twice, which takes a mid-saturation colour about six times darker
+// and a dark one thirteen times — which is why this vehicle's trim and wheel
+// rims read as pure black rather than as dark grey.
+  const c = new THREE.Color(hex);
   const n = g.getAttribute('position').count;
   const a = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { a[i * 3] = c.r; a[i * 3 + 1] = c.g; a[i * 3 + 2] = c.b; }
@@ -422,7 +428,8 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
     a.fill(stride);
     g.setAttribute('stride', new THREE.Float32BufferAttribute(a, 1));
     g.setAttribute('aBob', new THREE.Float32BufferAttribute(new Float32Array(n).fill(bob), 1));
-    const c = new THREE.Color(hue).convertSRGBToLinear();
+    // Converted once, not twice; see `tint` above.
+    const c = new THREE.Color(hue);
     const col = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
     g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));

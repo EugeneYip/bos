@@ -41,7 +41,9 @@ const merge = (gs: THREE.BufferGeometry[]): THREE.BufferGeometry | null =>
   gs.length ? mergeGeometries(gs.map(flat), false) : null;
 
 function paint(g: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
-  const c = new THREE.Color(hex).convertSRGBToLinear();
+  // Converted once: `new THREE.Color(hex)` already does it. See
+  // `traffic/vehicles.ts#tint` for what doing it twice costs.
+  const c = new THREE.Color(hex);
   const n = g.getAttribute('position').count;
   const a = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { a[i * 3] = c.r; a[i * 3 + 1] = c.g; a[i * 3 + 2] = c.b; }

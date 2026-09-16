@@ -707,7 +707,9 @@ export class Traffic implements WorldModule {
       for (const b of buckets) {
         b.mesh.setMatrixAt(slot, m);
         if (b.part === 'shell' && b.mesh.instanceColor) {
-          col.setHex(car.colour).convertSRGBToLinear();
+          // `setHex` converts already; doing it again crushed every car's
+          // paint about six times darker. See `traffic/vehicles.ts#tint`.
+          col.setHex(car.colour);
           b.mesh.instanceColor.setXYZ(slot, col.r, col.g, col.b);
         }
       }
@@ -919,7 +921,7 @@ export class Traffic implements WorldModule {
       scale.set(w.build, w.tall, w.build);
       m.compose(pos, q, scale);
       mesh.setMatrixAt(slot, m);
-      col.setHex(w.colour).convertSRGBToLinear();
+      col.setHex(w.colour);
       mesh.instanceColor!.setXYZ(slot, col.r, col.g, col.b);
       phaseArr[slot] = w.phase;
       // Arms and legs swing in proportion to the pace; a standing figure only

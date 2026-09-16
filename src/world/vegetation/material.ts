@@ -285,6 +285,12 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
   const fadeOut: THREE.IUniform<number> = { value: o.fadeOut };
   const fadeBand: THREE.IUniform<number> = { value: o.fadeBand };
 
+  // These four convert sRGB to linear twice over — `new THREE.Color(hex)` has
+  // already done it, since three's `ColorManagement` is enabled. The species
+  // palette in `species.ts` was picked by eye against the doubled result, and
+  // these tints multiply an albedo map rather than standing alone, so undoing
+  // it means re-choosing every colour in that table against the map. Recorded
+  // rather than changed.
   const summer = new THREE.Color(sp.summerColor).convertSRGBToLinear();
   const autumn = new THREE.Color(sp.autumnColor).convertSRGBToLinear();
   const senescent = new THREE.Color(SENESCENT).convertSRGBToLinear();
