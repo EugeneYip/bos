@@ -53,6 +53,39 @@ const SKIP_RAILWAY = new Set([
   'station', 'halt', 'switch', 'signal', 'level_crossing', 'buffer_stop', 'crossing',
 ]);
 
+/**
+ * How much general motor traffic a way should carry, from OSM's access tags.
+ *
+ * `undefined` is the ordinary public street. 'none' means no general traffic
+ * at all -- the Navy Yard's service roads, Harvard Yard, the paths across the
+ * Common that are tagged driveable because a maintenance truck uses them.
+ * 'local' is somewhere a car belongs but a *stream* of cars does not: a
+ * private drive, a parking aisle, a customers-only lot.
+ *
+ * `motor_vehicle` is checked first and on its own, because it is the specific
+ * tag: `access=private` + `motor_vehicle=yes` is a public road with a private
+ * right of way, and reading only `access` would empty it.
+ */
+const MOTOR_NONE = new Set(['no', 'permit']);
+const MOTOR_LOCAL = new Set(['private', 'customers', 'destination', 'delivery']);
+const SERVICE_LOCAL = new Set(['driveway', 'parking_aisle', 'drive-through', 'emergency_access']);
+
+function motorAccess(t, cls) {
+  const mv = t.motor_vehicle ?? t.vehicle;
+  if (mv) {
+    if (MOTOR_NONE.has(mv)) return 'none';
+    if (MOTOR_LOCAL.has(mv)) return 'local';
+    return undefined; // yes / designated / permissive: explicitly allowed
+  }
+  const ac = t.access;
+  if (ac) {
+    if (MOTOR_NONE.has(ac)) return 'none';
+    if (MOTOR_LOCAL.has(ac)) return 'local';
+  }
+  if (cls === 'service' && SERVICE_LOCAL.has(t.service)) return 'local';
+  return undefined;
+}
+
 export function buildRoads(elements, sampleGround, log = console.log) {
   const stats = { skipped: 0, tooShort: 0, byClass: {}, bridges: 0, tunnels: 0, cobble: 0, km: 0 };
   const out = [];
@@ -132,6 +165,7 @@ export function buildRoads(elements, sampleGround, log = console.log) {
       oneway,
       name: t.name || undefined,
       surface,
+      motor: motorAccess(t, cls),
       _len: len,
     });
   }
@@ -139,5 +173,8 @@ export function buildRoads(elements, sampleGround, log = console.log) {
   log(`  roads: ${out.length} ways, ${stats.km.toFixed(0)} km (${stats.skipped} skipped, ${stats.tooShort} too short)`);
   log(`    ${Object.entries(stats.byClass).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' ')}`);
   log(`    ${stats.bridges} bridges, ${stats.tunnels} tunnels, ${stats.cobble} cobbled ways`);
+  const noMotor = out.filter((r) => r.motor === 'none').length;
+  const locMotor = out.filter((r) => r.motor === 'local').length;
+  log(`    ${noMotor} closed to general traffic, ${locMotor} local access only`);
   return { roads: out, stats };
 }

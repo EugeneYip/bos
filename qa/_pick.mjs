@@ -4,7 +4,7 @@ import puppeteer from 'puppeteer';
 const PORT = 4600, ROOT = '/Volumes/Projects/bos';
 const POSE = JSON.parse(process.env.POSE);
 const PTS = JSON.parse(process.env.PTS);
-const srv = spawn('npx',['vite','preview','--port',String(PORT),'--strictPort','--outDir','dist-qa'],
+const srv = spawn('npx',['vite','preview','--port',String(PORT),'--strictPort','--outDir',process.env.QA_OUTDIR||'dist-qa'],
   {cwd:ROOT,stdio:'ignore',env:{...process.env,VITE_BASE:'/'}});
 for(let i=0;i<160;i++){try{if((await fetch(`http://localhost:${PORT}/`)).ok)break;}catch{}await new Promise(r=>setTimeout(r,250));}
 const b=await puppeteer.launch({headless:true,protocolTimeout:900000,

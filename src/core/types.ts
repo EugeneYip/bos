@@ -66,6 +66,16 @@ export interface RoadRecord {
   oneway: boolean;
   name?: string;
   surface: 'asphalt' | 'concrete' | 'cobblestone' | 'brick' | 'gravel' | 'ground';
+  /**
+   * How much general motor traffic belongs here, from OSM's access tags.
+   * Absent is an ordinary public street.
+   *
+   * 'none' is closed to general traffic -- the Navy Yard's service roads, the
+   * paths across the Common that carry a maintenance truck, an airside
+   * service road. 'local' is somewhere a car belongs but a *stream* of cars
+   * does not: a private drive, a parking aisle, a customers-only lot.
+   */
+  motor?: 'none' | 'local';
 }
 
 export type AreaKind =

@@ -48,6 +48,33 @@ import { AirTraffic } from './traffic/aircraft';
 
 /** Vehicles are simulated within this radius of the camera; beyond it they recycle. */
 const SIM_RADIUS = 420;
+/**
+ * Relative traffic demand by road class, 0..1.
+ *
+ * Used for two things that have to agree: how many vehicles the area in front
+ * of the camera can hold, and which edges they are placed on. An expressway
+ * carries a stream and a back alley carries almost nothing, and treating a
+ * metre of each as the same amount of road is what left Commonwealth Avenue
+ * empty while the service roads behind it were full.
+ */
+const DEMAND: Record<string, number> = {
+  motorway: 1.0, trunk: 0.9, primary: 0.75, secondary: 0.55,
+  tertiary: 0.4, residential: 0.18, service: 0.1,
+};
+
+/**
+ * One car per this many metres of demand-weighted lane. So a primary lane
+ * carries one every ~35 m and a service road one every ~260 m.
+ *
+ * The fleet used to be a fixed pool that simply filled: 1,000 vehicles went
+ * into whatever road happened to be within the sim radius, which is 21 lane-km
+ * downtown and 5.2 at the Navy Yard. That is how Charlestown ended up with
+ * 700 cars on a handful of streets -- roughly seven times jam density, 29% of
+ * neighbouring pairs interpenetrating, 60% of the fleet stationary and the
+ * mean speed down at 1.3 m/s. Sizing the fleet to the road instead took that
+ * to 3.8% overlap, 18% stopped and 5.0 m/s.
+ */
+const LANE_M_PER_CAR = 26;
 /** …widened when the camera climbs, so a rooftop view is not an empty grid. */
 const SIM_ALTITUDE_GAIN = 0.9;
 const RECYCLE_MARGIN = 100;
@@ -78,6 +105,12 @@ const GAP0 = 2.4;
 const HEADWAY = 1.25;
 /** Signal cycle, seconds. Two phases with a short all-red between them. */
 const SIGNAL_CYCLE = 20;
+/**
+ * Share of spawn attempts a local-access edge is allowed to keep. A driveway
+ * is real road and should not be empty forever, but it carries a car now and
+ * then, not a queue.
+ */
+const LOCAL_SPAWN = 0.1;
 
 interface Car {
   type: number;
@@ -252,6 +285,9 @@ export class Traffic implements WorldModule {
   private nightLit: THREE.MeshStandardMaterial[] = [];
   private time = 0;
   private spawnCursor = 0;
+  /** Lane-metres of driveable road inside the sim radius; see LANE_M_PER_CAR. */
+  private laneMetres = 0;
+  private laneMetresAge = 1e9;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'traffic';
@@ -529,8 +565,18 @@ export class Traffic implements WorldModule {
     if (!bucket) return false;
     for (const idx of bucket) {
       const other = this.cars[idx];
+      if (!other.active) continue; // recycled earlier in this same frame
       if (other.lane !== lane) continue;
-      if (Math.abs(other.s - s) < len) return true;
+      // Both bodies, not just the arriving one. This compared a single
+      // scalar -- the placed car's own length -- against the centre-to-centre
+      // distance, so a hatchback could be dropped 5 m from the *centre* of an
+      // 18 m articulated truck and the check would call it clear. The follow
+      // model then measured the same pair by the correct rule, found a
+      // negative gap, and braked both to a permanent standstill inside one
+      // another. Spawning runs constantly as cars recycle at the sim radius,
+      // so the city accumulated these all day.
+      const need = (len + this.defs[other.type].length) * 0.5 + GAP0;
+      if (Math.abs(other.s - s) < need) return true;
     }
     return false;
   }
@@ -549,12 +595,18 @@ export class Traffic implements WorldModule {
       const dx = e.pts[mid] - cam.x;
       const dz = e.pts[mid + 2] - cam.z;
       if (dx * dx + dz * dz > radius * radius) continue;
+      // Place vehicles in proportion to how much traffic the class carries,
+      // not to how many edges OSM happens to split it into -- the city has
+      // far more service-road edges than arterial ones.
+      if (Math.random() > (DEMAND[e.cls] ?? 0.3)) continue;
+      // A parking aisle or a private drive gets the occasional car, not a
+      // share of the traffic proportional to how much tarmac OSM gives it --
+      // and OSM gives it a lot: 6,292 of the city's ways are local-access.
+      if (e.local && Math.random() > LOCAL_SPAWN) continue;
       const lane = Math.floor(Math.random() * e.lanes);
       const s = Math.random() * e.length;
-      // A car-length-and-a-bit of clearance: enough that the follow model
-      // sorts out the gap within a fraction of a second instead of the two
-      // bodies visibly sharing the road on the frame they first appear.
-      if (this.occupied(ei, lane, s, def.length * 1.2)) continue;
+      // Clearance for both bodies plus a standstill gap; see `occupied`.
+      if (this.occupied(ei, lane, s, def.length)) continue;
       car.edge = ei;
       car.s = s;
       car.lane = lane;
@@ -599,6 +651,9 @@ export class Traffic implements WorldModule {
       if (g.edges[o].layer === e.layer) score += 0.8;
       if (dot < -0.72) score -= 4;                       // a U-turn
       if (g.edges[o].cls === e.cls) score += 0.25;
+      // Through traffic does not turn down someone's drive. Leaving one is
+      // free, so a car that did spawn on it can still get out.
+      if (g.edges[o].local && !e.local) score -= 2.4;
       if (score > bestScore) { bestScore = score; best = o; }
     }
     return best;
@@ -637,6 +692,28 @@ export class Traffic implements WorldModule {
     const one = new THREE.Vector3(1, 1, 1);
     const col = new THREE.Color();
 
+    // How much road is actually out there. Recomputed a few times a second
+    // rather than every frame: it is a scan of the whole edge list, and it
+    // only changes as fast as the camera moves.
+    this.laneMetresAge += dt;
+    if (this.laneMetresAge > 0.5) {
+      this.laneMetresAge = 0;
+      let lm = 0;
+      const r2 = radius * radius;
+      for (let k = 0; k < g.edges.length; k++) {
+        const e = g.edges[k];
+        const mid = Math.floor(e.cum.length / 2) * 3;
+        const dx = e.pts[mid] - cam.x;
+        const dz = e.pts[mid + 2] - cam.z;
+        if (dx * dx + dz * dz > r2) continue;
+        lm += e.length * e.lanes * (e.local ? 0.25 : 1) * (DEMAND[e.cls] ?? 0.3);
+      }
+      this.laneMetres = lm;
+    }
+    const fleetCap = Math.max(12, Math.round(this.laneMetres / LANE_M_PER_CAR));
+    let live = 0;
+    for (const c of this.cars) if (c.active) live++;
+
     // ---- pass one: spawn, and index who is where ------------------------
     this.claimDist.clear();
     this.claimCar.clear();
@@ -644,7 +721,12 @@ export class Traffic implements WorldModule {
     this.order.length = 0;
     for (let i = 0; i < this.cars.length; i++) {
       const car = this.cars[i];
-      if (!car.active) { this.spawn(car, ctx, radius); if (!car.active) continue; }
+      if (!car.active) {
+        if (live >= fleetCap) continue;
+        this.spawn(car, ctx, radius);
+        if (!car.active) continue;
+        live++;
+      }
       const e = g.edges[car.edge];
       // One key per car: lane identity in the high digits, distance along the
       // edge in the low ones, so a single sort puts every queue in order.
@@ -753,13 +835,45 @@ export class Traffic implements WorldModule {
 
       if (car.s >= e.length) {
         if (car.next < 0) { car.active = false; continue; }
-        car.s -= e.length;
-        car.edge = car.next;
-        const ne = g.edges[car.edge];
-        car.lane = Math.min(car.lane, ne.lanes - 1);
-        car.cruise = ne.speed * (0.78 + Math.random() * 0.34);
-        car.next = this.pickNext(car.edge);
-        continue;
+        const ne = g.edges[car.next];
+        const nLane = Math.min(car.lane, ne.lanes - 1);
+        const nS = car.s - e.length;
+
+        // Do not enter a box that is full.
+        //
+        // Nothing used to check this, and two separate things then drove cars
+        // straight into each other. Several edges feed one junction, and the
+        // cross-junction lookahead in pass two reads positions from the start
+        // of the frame, so two cars arriving from different approaches both
+        // saw a clear road and both landed on the same metre. Worse, the lane
+        // clamp above merges lanes: two cars side by side on a two-lane
+        // street both become lane 0 on a one-lane continuation, at the same
+        // distance along it. Measured over the fleet, 39% of same-lane
+        // neighbours at the Navy Yard were interpenetrating, the worst by
+        // 7 m -- one car wholly inside another.
+        //
+        // The index is updated as each car crosses, so the second car of a
+        // frame sees the first one's new position rather than its old one.
+        if (this.occupied(car.next, nLane, nS, def.length)) {
+          car.s = Math.min(car.s, e.length - 0.01);
+          car.speed = 0;
+          car.brake = 1;
+        } else {
+          const from = this.edgeOccupants.get(car.edge);
+          if (from) {
+            const at = from.indexOf(i);
+            if (at >= 0) from.splice(at, 1);
+          }
+          const to = this.edgeOccupants.get(car.next);
+          if (to) to.push(i); else this.edgeOccupants.set(car.next, [i]);
+
+          car.s = nS;
+          car.edge = car.next;
+          car.lane = nLane;
+          car.cruise = ne.speed * (0.78 + Math.random() * 0.34);
+          car.next = this.pickNext(car.edge);
+          continue;
+        }
       }
 
       sampleEdge(e, car.s, p);
@@ -1140,6 +1254,84 @@ export class Traffic implements WorldModule {
    * The airside zone gets a union bounding box so the overwhelming majority of
    * the city's 56,655 ways are rejected on two comparisons.
    */
+  /**
+   * What the traffic is actually doing, for `__debug.traffic()`.
+   *
+   * 'Full of traffic' and 'the cars are jammed' are the two commonest reports
+   * about this module and they need different fixes -- too many vehicles
+   * placed somewhere they do not belong, versus the right vehicles unable to
+   * move. Eyeballing a screenshot cannot tell them apart: a queue at a red
+   * light and a permanent deadlock look identical in a still.
+   */
+  report(): Record<string, number | string> {
+    const g = this.graph;
+    if (!g) return { error: 'no graph' };
+    let active = 0, stopped = 0, crawling = 0, speedSum = 0;
+    const byCls: Record<string, number> = {};
+    const onEdge = new Map<number, number>();
+    for (const c of this.cars) {
+      if (!c.active) continue;
+      active++;
+      speedSum += c.speed;
+      if (c.speed < 0.45) stopped++;
+      else if (c.speed < 2) crawling++;
+      const cls = g.edges[c.edge].cls;
+      byCls[cls] = (byCls[cls] ?? 0) + 1;
+      onEdge.set(c.edge, (onEdge.get(c.edge) ?? 0) + 1);
+    }
+    // Overlap is the measurement that matters, and it has to be per lane:
+    // cars share an edge legitimately by sitting in different lanes, so an
+    // edge-wide density says nothing. Group by (edge, lane), sort along the
+    // edge, and look at the centre-to-centre spacing of neighbours against
+    // the two bodies' own lengths.
+    const byLane = new Map<number, Array<{ s: number; len: number }>>();
+    for (const c of this.cars) {
+      if (!c.active) continue;
+      const k = c.edge * 8 + c.lane;
+      const arr = byLane.get(k);
+      const rec = { s: c.s, len: this.defs[c.type].length };
+      if (arr) arr.push(rec); else byLane.set(k, [rec]);
+    }
+    let pairs = 0, overlapping = 0, worstPen = 0;
+    for (const arr of byLane.values()) {
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => a.s - b.s);
+      for (let i = 1; i < arr.length; i++) {
+        pairs++;
+        const need = (arr[i].len + arr[i - 1].len) * 0.5;
+        const pen = need - (arr[i].s - arr[i - 1].s);
+        if (pen > 0) { overlapping++; worstPen = Math.max(worstPen, pen); }
+      }
+    }
+
+    // Densest edges, as cars per 100 m -- an edge over about 12 is nose to
+    // tail, which no real street is for its whole length.
+    const worst = [...onEdge.entries()]
+      .map(([ei, n]) => ({ ei, n, per100: (n / g.edges[ei].length) * 100, cls: g.edges[ei].cls,
+        local: g.edges[ei].local }))
+      .sort((a, b) => b.per100 - a.per100)
+      .slice(0, 6)
+      .map((e) => `${e.cls}${e.local ? '(local)' : ''} #${e.ei} ${e.n}car ${e.per100.toFixed(1)}/100m`);
+    return {
+      active,
+      stopped,
+      crawling,
+      stoppedPct: +((stopped / Math.max(active, 1)) * 100).toFixed(1),
+      meanSpeed: +(speedSum / Math.max(active, 1)).toFixed(2),
+      demandKm: +(this.laneMetres / 1000).toFixed(1),
+      carsPerDemandKm: +((active / Math.max(this.laneMetres / 1000, 1e-3))).toFixed(1),
+      edges: g.edges.length,
+      banned: g.banned,
+      localEdges: g.edges.filter((e) => e.local).length,
+      byClass: JSON.stringify(byCls),
+      pairs,
+      overlapping,
+      overlapPct: +((overlapping / Math.max(pairs, 1)) * 100).toFixed(1),
+      worstOverlapM: +worstPen.toFixed(2),
+      densest: worst.join(' | '),
+    };
+  }
+
   private buildNoDriveZones(areas: AreaRecord[], ctx: Ctx): void {
     const box = (list: AreaRecord[]): [number, number, number, number] => {
       let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;

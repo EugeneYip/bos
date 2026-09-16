@@ -82,6 +82,7 @@ function cleanRoad(r) {
     bridge: r.bridge, tunnel: r.tunnel, oneway: r.oneway,
     ...(r.name ? { name: r.name } : {}),
     surface: r.surface,
+    ...(r.motor ? { motor: r.motor } : {}),
   };
 }
 function cleanArea(a) {

@@ -51,6 +51,13 @@ export interface DebugApi {
    * guesses. Auto-runs and prints when the page is loaded with `?diag=1`.
    */
   diag(): Record<string, unknown>;
+  /**
+   * What the vehicles are doing: how many, how fast, and which edges are
+   * carrying an implausible number of them. 'Full of traffic' is a report
+   * this project keeps getting and a still frame cannot distinguish a queue
+   * at a light from a permanent deadlock.
+   */
+  traffic(): Record<string, number | string>;
 }
 
 export function installDebugApi(app: App): void {
@@ -144,6 +151,11 @@ export function installDebugApi(app: App): void {
         if (out.length >= max) break;
       }
       return out;
+    },
+    traffic() {
+      const m = app.get('Traffic') as unknown as
+        { report?: () => Record<string, number | string> } | undefined;
+      return m?.report?.() ?? { error: 'Traffic module has no report()' };
     },
     diag() {
       const r = ctx.renderer;

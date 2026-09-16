@@ -53,6 +53,13 @@ export interface Edge {
   to: number;
   /** Structural layer, so a viaduct never hands off to the street below. */
   layer: number;
+  /**
+   * Somewhere a car belongs but a *stream* of cars does not: a private drive,
+   * a parking aisle, a customers-only lot. Kept in the graph so the network
+   * stays connected and a car can still reach a door, but traffic is not
+   * seeded here and through-traffic is steered away from it.
+   */
+  local: boolean;
   /** Right-of-way rank; higher yields to no one at an uncontrolled junction. */
   priority: number;
 }
@@ -110,7 +117,7 @@ export function buildLaneGraph(
 
   const addEdge = (
     pts: Float32Array, from: number, to: number,
-    lanes: number, cls: RoadClass, layer: number, width: number,
+    lanes: number, cls: RoadClass, layer: number, width: number, local: boolean,
   ): void => {
     const n = pts.length / 3;
     if (n < 2) return;
@@ -127,7 +134,7 @@ export function buildLaneGraph(
     outLists[from].push(edges.length);
     edges.push({
       pts, cum, length: len, lanes, cls, width, speed: table[cls] ?? 8, to, layer,
-      priority: PRIORITY[cls] ?? 40,
+      local, priority: PRIORITY[cls] ?? 40,
     });
   };
 
@@ -138,6 +145,11 @@ export function buildLaneGraph(
   for (const r of roads) {
     if (r.tunnel) continue; // nothing to see underground
     if (!table[r.class]) continue;
+    // Closed to general traffic in the extract: the Navy Yard's service
+    // roads, Beacon Hill's pedestrian courts, Boston's several abandoned
+    // Central Artery ramps. Walking mode ignores this -- `motor_vehicle=no`
+    // is exactly where a pedestrian does belong.
+    if (mode === 'drive' && r.motor === 'none') { banned++; continue; }
     const n = r.path.length / 2;
     if (n < 2) continue;
 
@@ -165,12 +177,13 @@ export function buildLaneGraph(
       fwd[i * 3 + 2] = r.path[i * 2 + 1];
     }
 
+    const local = mode === 'drive' && r.motor === 'local';
     const lanes = Math.max(1, r.oneway ? r.lanes || 1 : Math.floor((r.lanes || 2) / 2) || 1);
     const a = nodeAt(fwd[0], fwd[1], fwd[2]);
     const b = nodeAt(fwd[(n - 1) * 3], fwd[(n - 1) * 3 + 1], fwd[(n - 1) * 3 + 2]);
     if (a === b) continue; // a closed loop has no useful direction
 
-    addEdge(fwd, a, b, lanes, r.class, r.layer, r.width);
+    addEdge(fwd, a, b, lanes, r.class, r.layer, r.width, local);
 
     if (!r.oneway || mode === 'walk') {
       const rev = new Float32Array(n * 3);
@@ -179,7 +192,7 @@ export function buildLaneGraph(
         rev[i * 3 + 1] = fwd[(n - 1 - i) * 3 + 1];
         rev[i * 3 + 2] = fwd[(n - 1 - i) * 3 + 2];
       }
-      addEdge(rev, b, a, lanes, r.class, r.layer, r.width);
+      addEdge(rev, b, a, lanes, r.class, r.layer, r.width, local);
     }
   }
 
