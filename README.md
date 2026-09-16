@@ -53,22 +53,35 @@ Still rough, and worth knowing before you look:
   rebuilding and comparing two builds on this machine gives 38 fps and 15 fps
   for the *same* commit:
 
-  | | ms of a 32 ms frame |
+  | | ms of a 25 ms frame |
   |---|---|
+  | **the planar water reflection** | **6.3** |
   | buildings | 4.2 |
   | roads | 3.9 |
   | trees | 2.8 |
   | traffic | 2.8 |
   | landmarks, parks | 1.0 each |
   | shadows — all three cascades, 655 draw calls | 0.9 |
-  | water, props, terrain, far terrain, pedestrians, the T | at or below a ±2 ms noise floor |
+  | the sky-view table, rebuilt every frame | 0.0 |
+  | props, terrain, far terrain, pedestrians, the T | at or below a ±2 ms noise floor |
 
-  Sixteen of the thirty-two milliseconds are scene geometry, spread thin. The
-  rest is the sky, the post chain, the module updates (`cpu.update`) and the
-  cost of handing the frame to the driver (`cpu.submit`, about 13 µs per draw
-  call at 1500–2500 calls a frame). So the lever that matters is draw-call
-  count — roads alone submit 894, eleven materials per tile — not any one
-  layer.
+  The reflection is a quarter of the frame and 5.5 of its 6.3 ms is the
+  building tiles. It is missing from the layer-hiding measurement entirely,
+  and that is the trap worth knowing about this codebase:
+  `__debug.toggle('water', false)` hides the water *meshes*, but `Water.update`
+  still renders the reflection, so water measured as noise. Anything driven
+  from a module's `update` rather than from a mesh's visibility is invisible to
+  that whole method.
+
+  Parked, frame times are bimodal — p50 12.8 ms, p90 67.7 ms, autocorrelation
+  0.70 at lag 4 — and the slow frame does identical CPU work to the fast ones
+  (`cpu.update` 3.17 vs 3.05, `cpu.submit` 5.41 vs 5.19, no compiles, no
+  uploads, no correlation with draw count). So the frame is GPU-bound with the
+  CPU using 8 of 25 ms, and since pixels barely matter the cost is vertex and
+  per-draw work, not fill. `Water` now skips the reflection when the surface is
+  off screen, which is worth 6.1 ms on a street with no water in frame; the
+  case where water is in the frustum but behind the city still pays, and
+  finishing it needs a real pixel count.
 
   What this section claimed before: that the renderer is fill-bound (it is not
   — quartering the pixel count buys 16%, doubling it costs 17%), that the post
