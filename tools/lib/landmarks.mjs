@@ -51,6 +51,24 @@ const RAW = [
   // OpenStreetMap traces the ship herself as `building=yes` + `historic=ship`
   // (w166151194), so without this she extrudes as a 62 x 11 m, 9.6 m tall
   // plaster slab in the middle of the hand-authored frigate.
+  // Campus landmarks. Each hand-authored mesh needs its OSM footprint claimed,
+  // or both are drawn — the mistake that had every landmark in the city doubled
+  // until `main.ts` was reordered. Radii are tight: 'Richards Hall' and
+  // 'Memorial Church' are not unique names in greater Boston.
+  ['harvard-widener', ['widener library', 'harry elkins widener memorial library', 'widener'], 42.373476, -71.116471, 90],
+  ['harvard-memorial-church', ['memorial church', 'the memorial church'], 42.374904, -71.116060, 80],
+  ['harvard-sever-hall', ['sever hall'], 42.374333, -71.115446, 80],
+  ['mit-kresge', ['kresge auditorium', 'w16 kresge auditorium'], 42.358145, -71.095050, 90],
+  ['mit-stata-center', ['stata center', 'ray and maria stata center', '32 stata center'], 42.361671, -71.090597, 110],
+  // OpenStreetMap has no building named 'Snell Library' or 'Matthews Arena'
+  // anywhere in the extract; the nearest footprint to this anchor is Ell Hall,
+  // six metres away. These two therefore claim nothing and suppress nothing,
+  // which is the safe failure: a mesh drawn beside a building that is also
+  // drawn, rather than a hole where a building used to be.
+  ['neu-snell-library', ['snell library'], 42.339799, -71.088003, 70],
+  ['neu-churchill-hall', ['churchill hall'], 42.33877, -71.08890, 50],
+  ['neu-richards-hall', ['richards hall'], 42.33987, -71.08884, 55],
+  ['neu-matthews-arena', ['matthews arena'], 42.34111, -71.08444, 80],
   ['uss-constitution', ['uss constitution'], 42.3724, -71.0566, 120],
 ];
 

@@ -9,9 +9,11 @@
  *     `Landmarks` lift it to `sampleHeight` at the anchor. A ship floats: her
  *     load line has to land on the water plane (`SEA_LEVEL`, y = 0 world) no
  *     matter what the harbour bed underneath is carved to. So this builder
- *     samples the terrain at its own anchor and offsets the whole assembly by
- *     `-that`, cancelling the lift the placer is about to apply. The net result
- *     is a model positioned in absolute world Y, with y = 0 local = mean water.
+ *     samples the terrain at its own anchor and cancels that lift by the same
+ *     amount, one level *inside* the group `Landmarks` actually places — it
+ *     sets that outer group's position with `.set()`, not `+=`, so the offset
+ *     has to live on a child to survive. The net result is a model positioned
+ *     in absolute world Y, with y = 0 local = mean water.
  *
  *  2. **The yard comes with her.** Pier 1's quay face and her fenders have to
  *     agree to a few centimetres, so the wharf and Dry Dock 1 are authored in
@@ -50,6 +52,11 @@ function level(ctx: Ctx, detail: boolean, ground: GroundAt): THREE.Group {
  * and that rotation sends local +X to the compass bearing and local +Z ninety
  * degrees to starboard of it. Invert that here so the yard can ask "how high is
  * the ground 130 m off her starboard beam" without knowing any of it.
+ *
+ * Returns raw `sampleHeight`, i.e. absolute world Y — which is exactly what the
+ * yard wants, *because* of how the cancellation below actually lands (see
+ * `buildConstitution`): local Y ends up equal to world Y, so a course built to
+ * `ground(x, z) + clearance` is `clearance` above the terrain there, full stop.
  */
 function groundSampler(ctx: Ctx, ax: number, az: number): GroundAt {
   const br = (CONSTITUTION_BEARING * Math.PI) / 180;
@@ -67,8 +74,6 @@ function groundSampler(ctx: Ctx, ax: number, az: number): GroundAt {
 }
 
 export function buildConstitution(ctx: Ctx): THREE.Object3D {
-  // Cancel the terrain lift: `Landmarks` will add `sampleHeight(anchor)` to our
-  // Y, and we want to sit on the water plane instead.
   const [ax, az] = lonLatToWorld(CONSTITUTION_LON, CONSTITUTION_LAT);
   const ground = groundSampler(ctx, ax, az);
   const anchorY = ground(0, 0);
@@ -77,10 +82,16 @@ export function buildConstitution(ctx: Ctx): THREE.Object3D {
     { object: level(ctx, true, ground), distance: 0 },
     { object: level(ctx, false, ground), distance: 1100 },
   ]);
+  // Cancel the terrain lift here, on the LOD node rather than on `root` below.
+  // `Landmarks` does `obj.position.set(x, sampleHeight(anchor), z)` on whatever
+  // this function returns — an overwrite, not an addition — so a compensating
+  // offset on `root` itself is silently discarded the moment it is placed. One
+  // extra level of nesting keeps it out of `obj`'s own transform and lets it
+  // survive: local y = 0 ends up at world y = 0 (mean water), as intended.
+  lod.position.y = -anchorY;
 
   const root = new THREE.Group();
   root.name = 'uss-constitution:afloat';
-  root.position.y = -anchorY;
   root.add(lod);
   root.userData.triangles = countTriangles(lod.children[0] ?? lod);
   root.userData.waterlineOffset = -anchorY;

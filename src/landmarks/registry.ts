@@ -38,6 +38,9 @@ import {
   CONSTITUTION_LAT,
   CONSTITUTION_LON,
 } from './buildings/constitution';
+import { buildWidener, buildMemorialChurch, buildSeverHall } from './campus/harvard';
+import { buildKresge, buildStataCenter } from './campus/mit';
+import { NEU_LANDMARKS } from './campus/northeastern';
 
 export interface Landmark {
   /** Matches `BuildingRecord.landmark`. */
@@ -290,6 +293,72 @@ export const LANDMARKS: Landmark[] = [
     absorbs: ['charlestown-navy-yard', 'dry-dock-1'],
     build: buildConstitution,
   },
+
+  /* ------------------------------------------------------- Harvard & MIT */
+  {
+    slug: 'harvard-widener',
+    name: 'Widener Library, Harvard Yard',
+    lon: -71.116471,
+    lat: 42.373476,
+    // The great steps and Corinthian colonnade face south across the Yard;
+    // local +Z is that facade (see `campus/harvard.ts`).
+    rotation: bearingX(103),
+    height: 31.5,
+    radius: 45,
+    tier: 2,
+    build: buildWidener,
+  },
+  {
+    slug: 'harvard-memorial-church',
+    name: 'Memorial Church, Harvard Yard',
+    lon: -71.116060,
+    lat: 42.374904,
+    rotation: bearingX(103),
+    height: 46.5,
+    radius: 28,
+    tier: 2,
+    build: buildMemorialChurch,
+  },
+  {
+    slug: 'harvard-sever-hall',
+    name: 'Sever Hall, Harvard Yard',
+    lon: -71.115446,
+    lat: 42.374333,
+    // The great recessed arch faces west, into the Yard.
+    rotation: bearingX(193),
+    height: 20,
+    radius: 32,
+    tier: 2,
+    build: buildSeverHall,
+  },
+  {
+    slug: 'mit-kresge',
+    name: 'Kresge Auditorium, MIT',
+    lon: -71.095050,
+    lat: 42.358145,
+    // Close to 3-fold symmetric; no facade calls for a specific bearing.
+    rotation: 0,
+    height: 19,
+    radius: 26,
+    tier: 2,
+    build: buildKresge,
+  },
+  {
+    slug: 'mit-stata-center',
+    name: 'Ray and Maria Stata Center, MIT',
+    lon: -71.090597,
+    lat: 42.361671,
+    rotation: bearingX(60),
+    height: 46,
+    radius: 70,
+    tier: 2,
+    build: buildStataCenter,
+  },
+
+  // Northeastern arrives as a prepared array rather than as entries written
+  // out here: it was authored while another agent held this file, so it was
+  // built to be spread in at one point instead of interleaved.
+  ...NEU_LANDMARKS,
 ];
 
 const BY_SLUG = new Map<string, Landmark>();

@@ -85,6 +85,7 @@ export function buildYard(ctx: Ctx, detail: boolean, ground: GroundAt): THREE.Gr
   const brick = M.surface('brick', { color: 0x8c5240, roughness: 0.9, tile: 2.2 });
   const slate = M.surface('slate', { color: 0x4b5057, roughness: 0.7, tile: 1.8 });
   const lamp = M.emissive(0xffd9a0, 1.1, { night: true });
+  const skirt = M.surface('paint', { color: 0x364943, roughness: 0.3, metalness: 0.1 });
 
   /* ------------------------------------------------------------- pier deck */
 
@@ -194,6 +195,10 @@ export function buildYard(ctx: Ctx, detail: boolean, ground: GroundAt): THREE.Gr
     b.addAt(cyl(0.2, 0.08, 15.0, 7), white, [-56, DECK + 0.55, QUAY_Z + 6.0]);
   }
 
+  /* ------------------------------------------------------------ hull skirt */
+
+  hullApron(b, skirt, ground);
+
   /* ------------------------------------------------------------- dry dock */
 
   dryDock(b, granite, cope, graniteDark, iron, detail, ground);
@@ -201,6 +206,57 @@ export function buildYard(ctx: Ctx, detail: boolean, ground: GroundAt): THREE.Gr
   const g = b.build('charlestown-navy-yard');
   g.userData.triangles = b.triangles;
   return g;
+}
+
+/**
+ * A terrain-draped skirt hugging her waterline all the way round, port side
+ * and both ends, where there is no quay to paper over the raster.
+ *
+ * The granite wharf buries its own join with the terrain by running deep
+ * (see the pier walls above); the water has no such thing. It is rasterised
+ * from real shoreline polygons at a coarse texel, and that shoreline was
+ * never going to agree with a hull hand-placed to the centimetre — so
+ * without this, she sits with a rim of bare harbour bed showing between her
+ * planking and the real water on the side away from the quay. Draped the
+ * same way as the dry dock's altars, a hair above whatever the ground
+ * actually does: always covers the gap, and reduces to nothing wherever the
+ * real harbour is already below sea level, which is most of it.
+ */
+function hullApron(b: Builder, mat: THREE.Material, ground: GroundAt): void {
+  const CLEAR = 0.28;
+  const WIDTH = 35;
+  const N = 40;
+
+  // Walk her girth at the waterline: starboard stern to bow, then bow back
+  // to stern along the port side. The half-breadth both stations use go to
+  // zero at the stem, so the two sides already meet there with no seam; the
+  // transom is nearly as narrow at this height, so closing straight back to
+  // the start leaves at most a few centimetres unclosed.
+  const stations: [number, number][] = [];
+  for (let i = 0; i <= N; i++) stations.push([-1 + (2 * i) / N, 1]);
+  for (let i = 0; i <= N; i++) stations.push([1 - (2 * i) / N, -1]);
+  stations.push([-1, 1]);
+
+  const inner: THREE.Vector3[] = [];
+  const outer: THREE.Vector3[] = [];
+  for (const [t, side] of stations) {
+    const p = hullAt(t, 0, side);
+    // Flattened to the horizontal: the hull normal at the waterline tilts
+    // up and down the turn of the bilge, and this has to reach a fixed
+    // distance out over the harbour regardless, not a fixed distance along
+    // a surface that is partly pointing at the sky or the mud.
+    const n = hullNormal(t, 0, side);
+    n.y = 0;
+    if (n.lengthSq() < 1e-8) n.set(side, 0, 0);
+    n.normalize();
+    const ip = p.clone().addScaledVector(n, 0.15);
+    const op = p.clone().addScaledVector(n, WIDTH);
+    ip.y = ground(ip.x, ip.z) + CLEAR;
+    op.y = ground(op.x, op.z) + CLEAR;
+    inner.push(ip);
+    outer.push(op);
+  }
+  b.add(gridGeometry([inner, outer], true), mat);
 }
 
 const DD_TREAD = 1.6;
@@ -280,8 +336,22 @@ function dryDock(
 
   // Coping level: just above the highest ground the rim crosses, so the walk
   // round the dock reads as a kerb at grade rather than a plinth on a lawn.
+  //
+  // Sampled along the long sides only, clear of the rounded ends: the yard's
+  // built-up ground rises toward the landward end, and folding that single
+  // high corner into a ring-wide max drags every course up with it — the
+  // whole dock reads as a shallow slab instead of a stepped pit. The sides
+  // are what she is actually docked between and carry almost all of the
+  // rim's real length, so they are what should set its height.
   let rim = -Infinity;
-  for (const p of ddRing(-3.0, 0, 28)) rim = Math.max(rim, ground(p.x, p.z));
+  const trimU = DD_LEN / 2 - 20;
+  for (let i = 0; i <= 12; i++) {
+    const u = -trimU + (i / 12) * 2 * trimU;
+    for (const v of [-(DD_HALF_W + 3), DD_HALF_W + 3]) {
+      const p = ddPoint(u, v);
+      rim = Math.max(rim, ground(p.x, p.z));
+    }
+  }
   const top = rim + 0.4;
   const floorY = top - DD_STEPS * DD_RISE;
 

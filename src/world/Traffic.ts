@@ -950,6 +950,13 @@ export class Traffic implements WorldModule {
           if (!pointInRing(a.outline, x, z)) continue;
           // Keep clear of the banks so nothing runs aground.
           if (distToRing(a.outline, x, z) < 45) continue;
+          // And of everything the bank encloses. Ten of Boston's water bodies
+          // are punched through by islands, piers and dry docks, and testing
+          // only the outer ring calls all of that water: a boat would be put on
+          // the Charlestown Navy Yard's lawn, alongside the Constitution, with
+          // forty-five metres of clearance from a shoreline hundreds of metres
+          // away. The inner rings need exactly the same margin as the outer one.
+          if (a.holes?.some((h) => pointInRing(h, x, z) || distToRing(h, x, z) < 45)) continue;
           cells.push(x, z, river);
         }
       }
