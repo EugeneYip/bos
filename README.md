@@ -46,11 +46,39 @@ Dalton 226 m; Beacon Hill 30 m, Bunker Hill's crest 33 m, Dorchester Heights
 
 Still rough, and worth knowing before you look:
 
-- **Performance.** At 1080p on `high` the reference viewpoints run 20–60 fps;
-  the high aerial, with the whole city in frame, is the worst at 20. The post
-  chain costs roughly half the frame, so `?post=off` or `?q=medium` are both
-  worth trying on a laptop. Screen-space reflections and motion blur are
-  reserved for `ultra`.
+- **Performance, and three things this section used to get wrong.** At 1280×720
+  on `high` the reference viewpoints run around 30 fps, and there is no single
+  bottleneck to fix. Measured by hiding one layer at a time, five interleaved
+  repeats each, medians, inside one page session (`qa/_ablayer.mjs`) — because
+  rebuilding and comparing two builds on this machine gives 38 fps and 15 fps
+  for the *same* commit:
+
+  | | ms of a 32 ms frame |
+  |---|---|
+  | buildings | 4.2 |
+  | roads | 3.9 |
+  | trees | 2.8 |
+  | traffic | 2.8 |
+  | landmarks, parks | 1.0 each |
+  | shadows — all three cascades, 655 draw calls | 0.9 |
+  | water, props, terrain, far terrain, pedestrians, the T | at or below a ±2 ms noise floor |
+
+  Sixteen of the thirty-two milliseconds are scene geometry, spread thin. The
+  rest is the sky, the post chain, the module updates (`cpu.update`) and the
+  cost of handing the frame to the driver (`cpu.submit`, about 13 µs per draw
+  call at 1500–2500 calls a frame). So the lever that matters is draw-call
+  count — roads alone submit 894, eleven materials per tile — not any one
+  layer.
+
+  What this section claimed before: that the renderer is fill-bound (it is not
+  — quartering the pixel count buys 16%, doubling it costs 17%), that the post
+  chain is half the frame (it is not — `?post=off` is worth a few
+  milliseconds), and that shadows are expensive (0.9 ms). All three came from
+  per-pass GPU timers that were reporting 46 ms inside a 32 ms frame, because
+  three modules each run their own `TIME_ELAPSED` query and WebGL2 allows
+  exactly one in flight per context. Those timers are still wrong. `cpu.update`
+  and `cpu.submit` are wall-clock and are not. Screen-space reflections and
+  motion blur are reserved for `ultra`.
 - **Four duplicate footprints survive** the extraction pass, down from 111.
   They are pairs mapped twice with genuinely different shapes, where picking a
   winner needs a judgement the pipeline does not have.
