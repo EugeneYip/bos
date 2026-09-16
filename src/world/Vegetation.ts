@@ -66,6 +66,29 @@ interface SpeciesTier {
 const NEAR_RADIUS = 145;
 const MID_RADIUS = 300;
 const FADE_BAND = 30;
+/**
+ * Width of the near/mid hand-over band, metres. Kept as its own constant
+ * (distinct from FADE_BAND, which still governs mid/impostor unchanged)
+ * rather than an alias, but tuned to the *same* value deliberately, not by
+ * default: wider was tried — 40 m and 90 m, measured with `qa/_common_lod.mjs`
+ * across four forced tier swaps — and every width past 30 made the frame's
+ * mean-luma swing on a swap *worse* (30 m: ~0.9% mean |dLuma|, about a wash
+ * against no cross-fade at all; 40 m: ~1.0%; 90 m: ~1.1%). Near and mid art do
+ * not average to quite the same post-normalisation brightness for the same
+ * species (`qa/_common_vegdiag.mjs`'s raw map means differ by roughly a
+ * fifth before the shader's own mean-1 renormalisation, and the square root
+ * in that renormalisation compresses a high-contrast leaf card's mean down
+ * further than a softer clump card's), so any tree whose near/mid split
+ * moves nudges the scene's aggregate brightness a little regardless of how
+ * gradually it is dithered — and a wider band means more trees moving at
+ * once. That is a real but different problem from the one this band exists
+ * to fix, which is a *specific, identifiable* tree changing its entire
+ * rendered appearance in one frame: the dither removes that categorically
+ * regardless of width (the two tiers' keep-regions partition the pixel
+ * exactly — see VEG_NEARMID), so there is no reason to pay the aggregate cost
+ * of a band wider than the one already proven not to regress it.
+ */
+const NEARMID_BAND = FADE_BAND;
 const GRID_CELL = 64;
 const FAR_TILES = 4;
 
@@ -207,14 +230,23 @@ export class Vegetation implements WorldModule {
   private materialsFor(ctx: Ctx, s: number, lod: Lod, tg: TreeGeometry): THREE.Material[] {
     const sp = SPECIES[s];
     const tex = this.textures!;
-    // Every tree lives in exactly one of near/mid, so those two never need to
-    // fade against each other — only against the impostor, which holds *all*
-    // of them. Hence: near and mid are simply on; the impostor fades in over
-    // the last band of the mid tier's reach, with the complementary dither.
+    // Three tiers, two hand-overs. Mid <-> impostor already cross-fades over
+    // the last FADE_BAND of the mid tier's reach, with a complementary dither
+    // (see `rebuild`'s VEG_FADE_INVERT note in vegetation/material.ts). Near
+    // <-> mid used to have no such band: a tree was written into exactly one
+    // of the two instance buffers, chosen anew each time `rebuild` ran, so a
+    // single rebuild could flip a couple dozen trees straight from one tier's
+    // art to the other's in one frame — a real, measured pop (`qa/_common_lod.mjs`
+    // isolates it: +2.17% of the frame's mean luma on a clean, camera-static
+    // tier swap). Near now fades out over NEARMID_BAND approaching
+    // NEAR_RADIUS, and mid fades in over the identical band (`rebuild` below
+    // writes a boundary tree into *both* buffers across it), so the two
+    // dither-partition the hand-over exactly like mid/impostor do — over a
+    // band wide enough to survive one rebuild step (see NEARMID_BAND).
     const fade = {
-      near: { in: -1e6, out: 1e9 },
-      mid: { in: -1e6, out: MID_RADIUS },
-      far: { in: MID_RADIUS - FADE_BAND, out: 1e9 },
+      near: { in: -1e6, out: NEAR_RADIUS, band: NEARMID_BAND, inBand: NEARMID_BAND },
+      mid: { in: NEAR_RADIUS - NEARMID_BAND, out: MID_RADIUS, band: FADE_BAND, inBand: NEARMID_BAND },
+      far: { in: MID_RADIUS - FADE_BAND, out: 1e9, band: FADE_BAND, inBand: FADE_BAND },
     }[lod];
 
     // Each tier gets art authored for its own card size: near cards carry
@@ -232,7 +264,8 @@ export class Vegetation implements WorldModule {
       shared: this.shared,
       fadeIn: fade.in,
       fadeOut: fade.out,
-      fadeBand: FADE_BAND,
+      fadeBand: fade.band,
+      fadeInBand: fade.inBand,
       envMapIntensity: lod === 'far' ? 1.5 : 1.15,
       canopy: lod === 'far' ? 0.26 : 0.42,
       mapMean,
@@ -249,7 +282,8 @@ export class Vegetation implements WorldModule {
       shared: this.shared,
       fadeIn: fade.in,
       fadeOut: fade.out,
-      fadeBand: FADE_BAND,
+      fadeBand: fade.band,
+      fadeInBand: fade.inBand,
       envMapIntensity: 1.3,
       // A trunk stands under its own crown. Nothing in the renderer knows
       // that, and its screen-space occlusion assumes the worst, so without a
@@ -494,6 +528,11 @@ export class Vegetation implements WorldModule {
     const cam = rb.at;
     const nearR2 = NEAR_RADIUS * NEAR_RADIUS;
     const midR2 = MID_RADIUS * MID_RADIUS;
+    // Trees at d2 in [nearFadeR2, nearR2) sit in NEARMID_BAND approaching
+    // NEAR_RADIUS: write them into *both* stages so the shader's complementary
+    // dither (VEG_NEARMID in vegetation/material.ts) can cross-fade near's art
+    // out and mid's in, instead of a tree jumping from one to the other whole.
+    const nearFadeR2 = (NEAR_RADIUS - NEARMID_BAND) * (NEAR_RADIUS - NEARMID_BAND);
 
     while (rb.k < this.cellOrder.length && (rb.nearLeft > 0 || rb.midLeft > 0)) {
       if (performance.now() - t0 > budgetMs) return;
@@ -511,10 +550,18 @@ export class Vegetation implements WorldModule {
         if (d2 > midR2) continue;
         const sp = field.species[t];
         const tier = this.tiers[sp];
+        let wroteNear = false;
         if (d2 < nearR2 && rb.nearLeft > 0 && rb.nearN[sp] < tier.nearCap) {
           this.writeTo(field, rb.stageNear[sp], rb.nearN[sp]++, t);
           rb.nearLeft--;
-        } else if (rb.midLeft > 0 && rb.midN[sp] < tier.midCap) {
+          wroteNear = true;
+        }
+        // Mid picks up anything near did not claim (outside NEAR_RADIUS, or
+        // budget/capacity turned it away — unchanged fallback), *plus* every
+        // tree already in near's own hand-over band, so the pair overlaps
+        // there instead of handing off in a single frame.
+        const wantMid = !wroteNear || d2 >= nearFadeR2;
+        if (wantMid && rb.midLeft > 0 && rb.midN[sp] < tier.midCap) {
           this.writeTo(field, rb.stageMid[sp], rb.midN[sp]++, t);
           rb.midLeft--;
         }

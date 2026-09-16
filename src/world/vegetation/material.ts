@@ -76,6 +76,7 @@ uniform float uSway;
 uniform float uFadeIn;
 uniform float uFadeOut;
 uniform float uFadeBand;
+uniform float uFadeInBand;
 varying float vFade;
 varying float vJitter;
 varying float vPhase;
@@ -142,7 +143,13 @@ transformed += foliage * vegAmp * 0.016 * vec3(
   transformed.xz = mat2( vegBc, -vegBs, vegBs, vegBc ) * transformed.xz;
 #endif
 
-vFade = smoothstep( uFadeIn, uFadeIn + uFadeBand, vDist )
+// The fade-in and fade-out spans are independent widths (uFadeInBand,
+// uFadeBand): mid is the one lod with both terms active at once, and its
+// near-side hand-over has to survive a single 'Vegetation.rebuild' step
+// (trees are only re-triaged every REBUILD_MOVE metres of camera travel),
+// while its far-side one is the already-tuned, purely distance-driven
+// mid/impostor cross-fade. They must not share a width.
+vFade = smoothstep( uFadeIn, uFadeIn + uFadeInBand, vDist )
       * ( 1.0 - smoothstep( uFadeOut - uFadeBand, uFadeOut, vDist ) );
 
 // A tier that is entirely faded out still rasterises — and a 16 m impostor
@@ -172,6 +179,11 @@ uniform vec3  uAutumn;
 uniform vec3  uSenescent;
 uniform float uDistWash;
 uniform float uMapMean;
+// Declared here too (not just in VERT_PARS) because VEG_NEARMID's dither
+// split needs them on the fragment side, to pick which of the two boundaries
+// this fragment is closer to.
+uniform float uFadeIn;
+uniform float uFadeInBand;
 ${IGN}
 `;
 
@@ -243,7 +255,14 @@ export interface MaterialOptions {
   shared: SharedUniforms;
   fadeIn: number;
   fadeOut: number;
+  /** Width of the fade-*out* span (uFadeOut - fadeBand .. uFadeOut). */
   fadeBand: number;
+  /**
+   * Width of the fade-*in* span (uFadeIn .. uFadeIn + fadeInBand). Defaults to
+   * `fadeBand` — every lod except mid only ever has one of the two terms
+   * active, so one width serves both until mid needs them to differ.
+   */
+  fadeInBand?: number;
   envMapIntensity: number;
   /** Extra un-occluded skylight, standing in for canopy multiple scattering. */
   canopy?: number;
@@ -284,6 +303,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
   const fadeIn: THREE.IUniform<number> = { value: o.fadeIn };
   const fadeOut: THREE.IUniform<number> = { value: o.fadeOut };
   const fadeBand: THREE.IUniform<number> = { value: o.fadeBand };
+  const fadeInBand: THREE.IUniform<number> = { value: o.fadeInBand ?? o.fadeBand };
 
   // These four convert sRGB to linear twice over — `new THREE.Color(hex)` has
   // already done it, since three's `ColorManagement` is enabled. The species
@@ -301,6 +321,12 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
     (mat.defines as Record<string, unknown>).VEG_BILLBOARD = '';
     (mat.defines as Record<string, unknown>).VEG_FADE_INVERT = '';
   }
+  // Mid is the *complement* tier at both of its borders: standard dither
+  // against the impostor at MID_RADIUS (unchanged), inverted dither against
+  // the near tier at NEAR_RADIUS. The two bands never overlap (FADE_BAND is
+  // 30 m either side of a 155 m gap), so a single runtime branch on distance
+  // picks the right one — see the dithering_fragment patch below.
+  if (lod === 'mid') (mat.defines as Record<string, unknown>).VEG_NEARMID = '';
   if (leaf) (mat.defines as Record<string, unknown>).VEG_LEAF = '';
 
   mat.onBeforeCompile = (shader) => {
@@ -311,6 +337,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
     shader.uniforms.uFadeIn = fadeIn;
     shader.uniforms.uFadeOut = fadeOut;
     shader.uniforms.uFadeBand = fadeBand;
+    shader.uniforms.uFadeInBand = fadeInBand;
     shader.uniforms.uSummer = { value: leaf ? summer : bark };
     shader.uniforms.uAutumn = { value: leaf ? autumn : bark };
     shader.uniforms.uSenescent = { value: leaf ? senescent : bark };
@@ -407,7 +434,8 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
 
     // The impostor's dither is the *complement* of the mid tier's, so across
     // the hand-over band the two tiers tile the pixels between them exactly
-    // instead of both drawing the same tree into the same pixels.
+    // instead of both drawing the same tree into the same pixels. Mid does
+    // the same thing a second time at its other border, against near.
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <dithering_fragment>', /* glsl */ `
         #include <dithering_fragment>
@@ -420,6 +448,18 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
           float vegSel = vegIGN( gl_FragCoord.xy + vec2( 23.0, 41.0 ) );
           if ( vCardKind > 0.5 ) { if ( vegSel < vCardMix ) discard; }
           else                   { if ( vegSel >= vCardMix ) discard; }
+        #elif defined( VEG_NEARMID )
+          // uFadeIn + uFadeInBand is NEAR_RADIUS for the mid material (see
+          // Vegetation.ts's materialsFor). Below it this fragment is in the
+          // near hand-over band, where near itself uses the plain (below)
+          // test, so mid has to take the inverted one to be its exact
+          // complement; at or beyond it mid is handing off to the impostor
+          // instead, which already expects mid to run the plain test.
+          if ( vDist < uFadeIn + uFadeInBand ) {
+            if ( vFade < 1.0 - vegIGN( gl_FragCoord.xy ) ) discard;
+          } else {
+            if ( vFade < vegIGN( gl_FragCoord.xy ) ) discard;
+          }
         #else
           if ( vFade < vegIGN( gl_FragCoord.xy ) ) discard;
         #endif

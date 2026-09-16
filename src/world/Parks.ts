@@ -36,17 +36,33 @@ import { earcut } from './buildings/earcut';
  *    handed to the shader.
  */
 
-/** Kinds worth drawing, with a base colour and how big the texture tiles. */
-const GREEN: Partial<Record<AreaKind, { color: number; tile: number; surface: string }>> = {
-  park:     { color: 0x5d7040, tile: 4.5, surface: 'grass' },
-  grass:    { color: 0x64784a, tile: 4.5, surface: 'grass' },
-  forest:   { color: 0x41522f, tile: 5.5, surface: 'grass' },
-  cemetery: { color: 0x5b7042, tile: 4.5, surface: 'grass' },
-  golf:     { color: 0x66803f, tile: 5.0, surface: 'grass' },
-  pitch:    { color: 0x5a7440, tile: 4.0, surface: 'grass' },
-  wetland:  { color: 0x5c6739, tile: 5.0, surface: 'grass' },
-  beach:    { color: 0xbfae8c, tile: 4.0, surface: 'sand' },
-  sand:     { color: 0xc1b08f, tile: 4.0, surface: 'sand' },
+/**
+ * Kinds worth drawing, with a base colour and which baked surface family to
+ * borrow the ground texture from. Physical tile size is *not* listed here —
+ * see `tileMetersFor`: it used to be a set of one-off numbers (4-5.5 m,
+ * invented per land-use kind) that had nothing to do with the actual texture,
+ * and every one of them was more than double the family's own `tileMeters`.
+ * Consumers deriving UVs as `worldMetres / tileMeters` is the one documented
+ * rule for this (ARCHITECTURE.md, "Physical texel density"; Roads and Terrain
+ * both read `set.tileMeters` the same way) precisely so a baked texture's own
+ * feature size — a grass family's tussocks are tuned for a 2 m tile, 16 to a
+ * side, i.e. 12.5 cm apiece — lands at the size it was authored at instead of
+ * being stretched. Stretched 2-2.75x, as these were, those same tussock cells
+ * and the bare-soil gaps between them come out 28-34 cm across: coarse,
+ * square-ish and regularly spaced enough at close range and a grazing angle
+ * to read as a paving-slab lattice rather than turf, which is what the
+ * "walkways" across Boston Common's lawn actually were.
+ */
+const GREEN: Partial<Record<AreaKind, { color: number; surface: string }>> = {
+  park:     { color: 0x5d7040, surface: 'grass' },
+  grass:    { color: 0x64784a, surface: 'grass' },
+  forest:   { color: 0x41522f, surface: 'grass' },
+  cemetery: { color: 0x5b7042, surface: 'grass' },
+  golf:     { color: 0x66803f, surface: 'grass' },
+  pitch:    { color: 0x5a7440, surface: 'grass' },
+  wetland:  { color: 0x5c6739, surface: 'grass' },
+  beach:    { color: 0xbfae8c, surface: 'sand' },
+  sand:     { color: 0xc1b08f, surface: 'sand' },
 };
 
 /**
@@ -125,6 +141,7 @@ export class Parks implements WorldModule {
   private materials: THREE.Material[] = [];
   private triCount = 0;
   private canopy?: CanopyField;
+  private tileCache = new Map<string, number>();
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'parks';
@@ -197,6 +214,7 @@ export class Parks implements WorldModule {
 
       let b = buckets.get(spec.surface);
       if (!b) { b = { pos: [], uv: [], col: [], idx: [] }; buckets.set(spec.surface, b); }
+      const tile = this.tileMetersFor(ctx, spec.surface);
 
       // Deterministic per-polygon shade so neighbouring lawns are not
       // identical. The vertex colour *is* the albedo now — the shader hands it
@@ -238,9 +256,10 @@ export class Parks implements WorldModule {
         const base = b!.pos.length / 3;
         for (const [x, z] of [[ax, az], [bx, bz], [cx, cz]] as const) {
           b!.pos.push(x, ctx.sampleHeight(x, z) + LIFT, z);
-          // World-metre UVs, so texture scale is physical and seamless across
-          // polygon boundaries.
-          b!.uv.push(x / spec.tile, z / spec.tile);
+          // World-metre UVs at the surface's own physical tile size, so
+          // texture scale is seamless across polygon boundaries *and* matches
+          // what the family's shader was actually tuned for.
+          b!.uv.push(x / tile, z / tile);
           b!.col.push(c.r, c.g, c.b);
         }
         b!.idx.push(base, base + 1, base + 2);
@@ -302,6 +321,23 @@ export class Parks implements WorldModule {
   }
 
   // -------------------------------------------------------------------------
+
+  /**
+   * World metres spanned by one UV tile of `surface`'s baked texture — the
+   * measurement the family was actually authored at (`Materials.ts`'s
+   * `tileMeters`), not a value invented per land-use kind. Falls back to a
+   * round number only if the library has no map for this surface at all (see
+   * `surfaceMaterial`'s own flat-tint fallback), so a decal never divides by
+   * zero.
+   */
+  private tileMetersFor(ctx: Ctx, surface: string): number {
+    let t = this.tileCache.get(surface);
+    if (t === undefined) {
+      t = ctx.materials.textures(surface)?.tileMeters ?? 4.5;
+      this.tileCache.set(surface, t);
+    }
+    return t;
+  }
 
   /**
    * The ground surface for one land-use family.
