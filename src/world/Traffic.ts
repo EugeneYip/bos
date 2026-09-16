@@ -121,10 +121,22 @@ interface Walker {
 interface Boat {
   type: number;
   x: number; z: number;
+  /**
+   * Still-water surface height under this boat, metres — the same number
+   * `WaterBody.elevation` carries for whichever body it is currently on. The
+   * harbour sits at sea level, but the impounded Charles is +0.6 m, and a
+   * hull placed at world y=0 there floats permanently half a metre under the
+   * opaque water surface: the boat itself disappears and only whatever
+   * pokes up past 0.6 m — a rower's head and shoulders, a dinghy's sail —
+   * still shows, which reads as swimmers towing rigging, not boats.
+   */
+  elevation: number;
   /** Yaw in the same convention as everything else: atan2(-dz, dx). */
   yaw: number;
   /** Heading it is steering toward. */
   want: number;
+  /** Smoothed turn rate, rad/s, signed the same way as yaw: banks the hull into a turn. */
+  turnRate: number;
   speed: number;
   colour: number;
   /** Stroke phase for the rowing boats. */
@@ -177,7 +189,7 @@ export class Traffic implements WorldModule {
   private boatStroke: THREE.InstancedBufferAttribute[] = [];
   private wakeMesh: THREE.InstancedMesh | null = null;
   private wakeFade: THREE.InstancedBufferAttribute | null = null;
-  /** Sampled water cells boats are allowed to occupy: [x,z,riverFlag]. */
+  /** Sampled water cells boats are allowed to occupy: [x,z,riverFlag,elevation]. */
   private waterCells: Float32Array = new Float32Array(0);
   /** Scratch for the camera's forward vector; boats spawn out of shot. */
   private camFwd = new THREE.Vector3();
@@ -957,7 +969,7 @@ export class Traffic implements WorldModule {
           // forty-five metres of clearance from a shoreline hundreds of metres
           // away. The inner rings need exactly the same margin as the outer one.
           if (a.holes?.some((h) => pointInRing(h, x, z) || distToRing(h, x, z) < 45)) continue;
-          cells.push(x, z, river);
+          cells.push(x, z, river, a.elevation);
         }
       }
     }
@@ -966,7 +978,7 @@ export class Traffic implements WorldModule {
     // Index them: checking a boat against every cell in the harbour each
     // frame was costing more than drawing the boats.
     this.cellGrid.clear();
-    for (let i = 0; i < this.waterCells.length; i += 3) {
+    for (let i = 0; i < this.waterCells.length; i += 4) {
       const k = cellKey(this.waterCells[i], this.waterCells[i + 1]);
       const b = this.cellGrid.get(k);
       if (b) b.push(i);
@@ -1005,7 +1017,7 @@ export class Traffic implements WorldModule {
 
       for (let i = 0; i < cap; i++) {
         const b: Boat = {
-          type: t, x: 0, z: 0, yaw: 0, want: 0, speed: d.speed,
+          type: t, x: 0, z: 0, elevation: 0, yaw: 0, want: 0, turnRate: 0, speed: d.speed,
           colour: d.hullColor, stroke: Math.random() * 6.283, recheck: Math.random(),
         };
         this.boats.push(b);
@@ -1095,7 +1107,7 @@ export class Traffic implements WorldModule {
    * can see it arrive.
    */
   private placeBoat(b: Boat, ctx: Ctx): void {
-    const n = this.waterCells.length / 3;
+    const n = this.waterCells.length / 4;
     if (!n) return;
     const def = this.vdefs[b.type];
     const want = def.water;
@@ -1108,12 +1120,12 @@ export class Traffic implements WorldModule {
     let fallback = -1;
     for (let i = 0; i < 90; i++) {
       const k = (Math.random() * n) | 0;
-      const river = this.waterCells[k * 3 + 2] > 0.5;
+      const river = this.waterCells[k * 4 + 2] > 0.5;
       if (want === 'river' && !river) continue;
       if (want === 'harbour' && river) continue;
       if (fallback < 0) fallback = k;
-      const dx = this.waterCells[k * 3] - cam.x;
-      const dz = this.waterCells[k * 3 + 1] - cam.z;
+      const dx = this.waterCells[k * 4] - cam.x;
+      const dz = this.waterCells[k * 4 + 1] - cam.z;
       const d = Math.hypot(dx, dz);
       if (d > radius) continue;
       if (d < inner && (dx * fx + dz * fz) > -0.2 * d) continue;
@@ -1124,8 +1136,9 @@ export class Traffic implements WorldModule {
   }
 
   private setBoat(b: Boat, cell: number): void {
-    b.x = this.waterCells[cell * 3];
-    b.z = this.waterCells[cell * 3 + 1];
+    b.x = this.waterCells[cell * 4];
+    b.z = this.waterCells[cell * 4 + 1];
+    b.elevation = this.waterCells[cell * 4 + 3];
     b.speed = this.vdefs[b.type].speed * (0.7 + Math.random() * 0.5);
     b.yaw = this.clearHeading(b, Math.random() * Math.PI * 2);
     b.want = b.yaw;
@@ -1183,7 +1196,14 @@ export class Traffic implements WorldModule {
       else if (dy < -Math.PI) dy += Math.PI * 2;
       // A hull turns slowly, and a big one turns much more slowly than a skiff.
       const rate = Math.min(0.55, 6.5 / def.length);
-      b.yaw += THREE.MathUtils.clamp(dy, -rate * dt, rate * dt);
+      const turn = THREE.MathUtils.clamp(dy, -rate * dt, rate * dt);
+      b.yaw += turn;
+      // Smoothed rather than read off `turn` directly, so the heel below
+      // settles into a sustained turn instead of snapping on and off every
+      // time a course recheck nudges `want` by a few degrees and is
+      // immediately satisfied.
+      const turnInst = dt > 1e-4 ? turn / dt : 0;
+      b.turnRate += (turnInst - b.turnRate) * Math.min(1, dt * 1.5);
 
       const dirX = Math.cos(b.yaw);
       const dirZ = -Math.sin(b.yaw);
@@ -1209,8 +1229,13 @@ export class Traffic implements WorldModule {
       // a rowing shell bobs and a container ship barely moves.
       const scale = Math.min(20 / def.length, 1);
       const ph = this.time * 0.9 + b.x * 0.02;
-      pos.set(b.x, Math.sin(ph) * 0.09 * scale, b.z);
-      e.set(Math.cos(ph * 1.1) * 0.035 * scale, b.yaw, Math.sin(ph * 0.8) * 0.02 * scale, 'YXZ');
+      pos.set(b.x, b.elevation + Math.sin(ph) * 0.09 * scale, b.z);
+      // Heel away from a turn — the same weight-transfer reaction a car's
+      // body roll shows under lateral load, and the reason a boat banks
+      // outward rather than into the corner the way a bicycle does. Zero
+      // when running straight, so it never fights the ambient swell roll.
+      const heel = THREE.MathUtils.clamp(-b.turnRate * 0.85, -0.18, 0.18);
+      e.set(Math.cos(ph * 1.1) * 0.035 * scale + heel, b.yaw, Math.sin(ph * 0.8) * 0.02 * scale, 'YXZ');
       q.setFromEuler(e);
       m.compose(pos, q, one);
       for (const bk of buckets) bk.mesh.setMatrixAt(slot, m);
@@ -1219,7 +1244,7 @@ export class Traffic implements WorldModule {
       // The wake, laid from the bow aft along the track.
       if (this.wakeMesh && fade && wslot < this.wakeMesh.instanceMatrix.count) {
         const half = def.length * 0.5;
-        pos.set(b.x + dirX * half, 0.34, b.z + dirZ * half);
+        pos.set(b.x + dirX * half, b.elevation + 0.34, b.z + dirZ * half);
         q.setFromAxisAngle(up, b.yaw);
         wscale.set(def.wake[0] * def.length, 1, def.wake[1] * def.length * 2);
         m.compose(pos, q, wscale);

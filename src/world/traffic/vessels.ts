@@ -44,19 +44,52 @@ export interface VesselDef {
 /**
  * A displacement hull: a box tapered to a point at the bow and narrowed at
  * the stern, sitting so the waterline is at y=0.
+ *
+ * Plan-view taper alone leaves the midship cross-section a plain rectangle —
+ * vertical topsides dropping straight to a flat bottom — which is what reads
+ * as a shoebox the moment a vessel is seen bow-on or from slightly above,
+ * every camera angle a harbour view actually uses. Two more deformations,
+ * applied in the same per-vertex pass, are the difference between a slab and
+ * a hull: the beam tucks in toward the keel (a shallow chine, not a slab
+ * bottom) and eases back out just above the waterline (the flare a real
+ * topside carries), and the deck sheer climbs toward the bow — sharply
+ * there, a little at the stern — instead of running dead level end to end.
  */
 function hull(len: number, beam: number, depth: number, freeboard: number): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(len, depth + freeboard, beam, 6, 1, 1);
   const pos = g.getAttribute('position') as THREE.BufferAttribute;
   const half = len / 2;
+  const halfH = (depth + freeboard) / 2;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
+    const y = pos.getY(i);
     const t = x / half;                      // -1 stern .. +1 bow
     // Bow taper is sharp, stern taper is gentle.
-    const k = t > 0 ? 1 - Math.pow(t, 2.2) * 0.92 : 1 - Math.pow(-t, 3.0) * 0.45;
-    pos.setZ(i, pos.getZ(i) * Math.max(k, 0.06));
-    // Rocker: the keel rises toward the ends.
-    if (pos.getY(i) < 0) pos.setY(i, pos.getY(i) * (1 - Math.pow(Math.abs(t), 2.5) * 0.7));
+    const kPlan = t > 0 ? 1 - Math.pow(t, 2.2) * 0.92 : 1 - Math.pow(-t, 3.0) * 0.45;
+
+    let kSection = 1;
+    if (y < 0) {
+      // Chine: the bottom row of the box is the keel, tucked in to about
+      // 60% beam rather than running out flat to the bilge corner.
+      const below = Math.min(1, -y / halfH);
+      kSection = 1 - 0.40 * Math.pow(below, 1.5);
+    } else if (halfH > 1e-6) {
+      // Flare: a little extra beam at mid-freeboard, easing off again by
+      // the gunwale — the bulge a real topside has, not a straight wall.
+      const above = Math.min(1, y / halfH);
+      kSection = 1 + 0.40 * above * (1 - above);
+    }
+    pos.setZ(i, pos.getZ(i) * Math.max(kPlan, 0.06) * kSection);
+
+    if (y < 0) {
+      // Rocker: the keel rises toward the ends.
+      pos.setY(i, y * (1 - Math.pow(Math.abs(t), 2.5) * 0.7));
+    } else {
+      // Sheer: the deck climbs toward the bow, and a little at the stern,
+      // instead of sitting dead flat from transom to stem.
+      pos.setY(i, y + halfH * (0.60 * Math.pow(Math.max(t, 0), 2.4)
+                             + 0.18 * Math.pow(Math.max(-t, 0), 2.4)));
+    }
   }
   pos.needsUpdate = true;
   g.computeVertexNormals();
@@ -228,6 +261,22 @@ function containerShip(): VesselDef['parts'] {
   return { hull: h, house, glass, dark };
 }
 
+/**
+ * Lobster boat: a Downeast workboat, wheelhouse set well forward and a long,
+ * low, open cockpit aft for hauling traps over the rail. That balance — cabin
+ * toward the bow rather than amidships or aft — is what separates it from
+ * every other harbour silhouette here, tug included.
+ */
+function lobsterBoat(): VesselDef['parts'] {
+  const len = 12.0, beam = 4.0;
+  const h = hull(len, beam, 1.1, 1.35);
+  const house = box(len * 0.30, 1.55, beam * 0.62, len * 0.16, 1.30);
+  const glass = box(len * 0.27, 0.50, beam * 0.58, len * 0.16, 1.55);
+  const mast = new THREE.CylinderGeometry(0.028, 0.04, 2.6, 5);
+  mast.translate(len * 0.12, 1.30 + 1.55 + 1.3, 0);
+  return { hull: h, house, glass, dark: mast };
+}
+
 export function vesselTypes(): VesselDef[] {
   return [
     { name: 'eight',   length: 17,  speed: 4.6, water: 'river',   weight: 22, hullColor: 0xf0efe9,
@@ -250,6 +299,8 @@ export function vesselTypes(): VesselDef[] {
       wake: [3.6, 1.20], parts: tug() },
     { name: 'ship',    length: 190, speed: 4.0, water: 'harbour', weight: 2,  hullColor: 0x2a4f6b,
       wake: [1.6, 0.50], parts: containerShip() },
+    { name: 'lobsterboat', length: 12, speed: 4.6, water: 'harbour', weight: 9, hullColor: 0xe8e2d0,
+      wake: [2.0, 0.65], parts: lobsterBoat() },
   ];
 }
 
@@ -317,21 +368,28 @@ export function wakeTexture(): THREE.CanvasTexture {
 
       // Bow crescent: a tight bright arc right at the stem.
       const bow = Math.exp(-Math.pow((u - 0.035) / 0.030, 2)) * Math.exp(-Math.pow(av / 0.16, 2));
-      a += bow * 0.95;
+      a += bow * 0.85;
 
-      // Diverging crests. They leave the bow and open out linearly; the arm
-      // gets broader and softer with distance while the crest itself fades.
+      // Diverging crests. They leave the bow and open out linearly at the
+      // Kelvin half-angle; the arm gets broader and softer with distance
+      // while the crest itself fades. Kept narrow relative to the gap it
+      // opens up — a wide, bright band here is what a real wake never has,
+      // and is why a first pass at this read as a solid wedge of white
+      // rather than two lines with clear water between and behind them; at
+      // the distance most of the fleet is actually seen from, a wide band
+      // also survives texture minification as a filled triangle, because
+      // there is no gap left for the minified sample to average against.
       const arm = u * 0.94;                    // where the crest sits at this u
-      const wdt = 0.045 + u * 0.16;
+      const wdt = 0.026 + u * 0.075;
       const crest = Math.exp(-Math.pow((av - arm) / wdt, 2));
       const decay = Math.exp(-u * 1.55) * (1 - Math.exp(-u * 26));
-      a += crest * decay * 1.35;
+      a += crest * decay * 1.1;
 
       // Broken water astern: strongest just behind the transom, decaying.
-      const stern = Math.exp(-Math.pow((u - 0.22) / 0.30, 2)) * Math.exp(-Math.pow(av / 0.30, 2));
+      const stern = Math.exp(-Math.pow((u - 0.22) / 0.30, 2)) * Math.exp(-Math.pow(av / 0.26, 2));
       // A little streaky structure so it does not read as an airbrushed blob.
       const grain = 0.72 + 0.28 * Math.sin(u * 61 + v * 17) * Math.sin(u * 23 - v * 41);
-      a += stern * grain * 0.85;
+      a += stern * grain * 0.72;
 
       a *= 1 - Math.pow(Math.min(av, 1), 6);   // hard stop at the quad edge
       a *= Math.min(1, (1 - u) * 6);           // and fade out at the far end
@@ -339,7 +397,7 @@ export function wakeTexture(): THREE.CanvasTexture {
       const i = (y * W + x) * 4;
       const k = Math.max(0, Math.min(1, a));
       d[i] = 255; d[i + 1] = 255; d[i + 2] = 255;
-      d[i + 3] = Math.round(255 * Math.min(1, k * 0.92));
+      d[i + 3] = Math.round(255 * Math.min(1, k * 0.90));
     }
   }
   g.putImageData(img, 0, 0);
