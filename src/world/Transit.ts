@@ -8,6 +8,7 @@ import {
 } from './transit/graph';
 import { SYSTEM_IDS, SYSTEM_LABEL, type SystemId } from './transit/lines';
 import { lampGeometry, railStock, type RailCarDef } from './transit/stock';
+import { buildCatenary } from './transit/wire';
 
 /**
  * The T, running on the surface trackage `Roads` already draws.
@@ -79,6 +80,11 @@ interface Train {
   /** World position of the head, cached each frame so other trains can spawn clear of it. */
   headX: number;
   headZ: number;
+  /** Head heading, cached each frame alongside the position so another train
+   *  can tell whether it is closing on this one from behind (same system,
+   *  same direction) rather than approaching it head-on. */
+  headHX: number;
+  headHZ: number;
 }
 
 interface SysEntry {
@@ -124,6 +130,9 @@ export class Transit implements WorldModule {
   private headCursor = 0;
   private tailCursor = 0;
 
+  private wireMesh: THREE.Mesh | null = null;
+  private poleMesh: THREE.Mesh | null = null;
+
   private systems: SysEntry[] = [];
 
   private materials: THREE.Material[] = [];
@@ -152,6 +161,7 @@ export class Transit implements WorldModule {
 
     this.buildStock(ctx);
     this.buildLamps(ctx);
+    this.buildWire(roads);
 
     for (const id of SYSTEM_IDS) {
       const graph = graphs.get(id)!;
@@ -161,7 +171,7 @@ export class Transit implements WorldModule {
       for (let i = 0; i < poolSize; i++) {
         trains.push({
           cars: [], frontOffset: [], totalLen: 0, edge: 0, s: 0, speed: 0, cruise: 0,
-          history: [], active: false, headX: 0, headZ: 0,
+          history: [], active: false, headX: 0, headZ: 0, headHX: 1, headHZ: 0,
         });
       }
       this.systems.push({
@@ -281,6 +291,46 @@ export class Transit implements WorldModule {
     this.tailLamp = tail;
   }
 
+  /**
+   * Static overhead contact wire and support poles for the Green Line's
+   * surface running — see `transit/wire.ts`. Built once from the raw road
+   * records, not per-frame and not per-train, as one merged mesh apiece: the
+   * whole network costs two draw calls regardless of route length, and
+   * neither mesh ever needs to move or be re-instanced per car the way the
+   * rolling stock does.
+   */
+  private buildWire(roads: RoadRecord[]): void {
+    const { wire, poles } = buildCatenary(roads);
+
+    if (wire) {
+      const mat = new THREE.MeshStandardMaterial({
+        name: 'rail:wire', color: 0x4a3a28, roughness: 0.45, metalness: 0.75,
+      });
+      this.materials.push(mat);
+      const mesh = new THREE.Mesh(wire, mat);
+      mesh.name = 'transit:wire';
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.userData.noShadow = true; // a paper-thin wire casting a shadow reads as noise, not infrastructure
+      mesh.frustumCulled = false;
+      this.root.add(mesh);
+      this.wireMesh = mesh;
+    }
+
+    if (poles) {
+      const mat = new THREE.MeshStandardMaterial({
+        name: 'rail:pole', color: 0x2b2d30, roughness: 0.55, metalness: 0.5,
+      });
+      this.materials.push(mat);
+      const mesh = new THREE.Mesh(poles, mat);
+      mesh.name = 'transit:pole';
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      this.root.add(mesh);
+      this.poleMesh = mesh;
+    }
+  }
+
   /* ------------------------------------------------------------- consists */
 
   private composeConsist(train: Train, id: SystemId): void {
@@ -396,7 +446,33 @@ export class Transit implements WorldModule {
       // there is no separate "curve" tag, but an edge that bends a lot
       // between its own start and end heading is a curve worth slowing for.
       const bend = 1 - (e.sx * e.ex + e.sz * e.ez);
-      const vLimit = train.cruise * THREE.MathUtils.clamp(1 - 0.4 * Math.min(bend, 1.4), 0.45, 1);
+      let vLimit = train.cruise * THREE.MathUtils.clamp(1 - 0.4 * Math.min(bend, 1.4), 0.45, 1);
+
+      // Keep a following gap. Spawning already refuses to place a train
+      // within `minSep` of another, but that only guards the moment it
+      // appears -- nothing since stopped a faster train riding up on a
+      // slower one it was never spawned near, which is how two same-
+      // direction cars ended up nearly nose to tail. A cheap O(pool) scan
+      // against the (last frame's) head of every other active train in this
+      // system is enough at these pool sizes (a dozen at most).
+      const followMin = train.totalLen + 14;
+      let followGap = Infinity;
+      for (const other of sys.trains) {
+        if (other === train || !other.active) continue;
+        const dx = other.headX - train.headX;
+        const dz = other.headZ - train.headZ;
+        // Ahead of me, and heading the same way I am -- a train coming the
+        // other way is the overlap fix's job, not a following distance.
+        if (dx * train.headHX + dz * train.headHZ <= 0) continue;
+        if (other.headHX * train.headHX + other.headHZ * train.headHZ < 0.5) continue;
+        const gap = Math.hypot(dx, dz);
+        if (gap < followGap) followGap = gap;
+      }
+      if (followGap < followMin) {
+        const t = THREE.MathUtils.clamp(followGap / followMin, 0, 1);
+        vLimit = Math.min(vLimit, train.cruise * t * t);
+      }
+
       const accel = THREE.MathUtils.clamp((vLimit - train.speed) * 1.1, -1.8, 1.1);
       train.speed = Math.max(0, train.speed + accel * dt);
       train.s += train.speed * dt;
@@ -422,6 +498,8 @@ export class Transit implements WorldModule {
       sampleEdge(e, train.s, headSample);
       train.headX = headSample.x;
       train.headZ = headSample.z;
+      train.headHX = headSample.hx;
+      train.headHZ = headSample.hz;
       const hdx = headSample.x - cam.x;
       const hdz = headSample.z - cam.z;
       if (hdx * hdx + hdz * hdz > recycle * recycle) { train.active = false; continue; }
