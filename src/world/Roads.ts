@@ -87,6 +87,24 @@ interface Tile {
   lastSeen: number;
 }
 
+/**
+ * A tile part-way through its build, carried across frames.
+ *
+ * A dense downtown tile is thousands of ribbons and junction fills. Built in
+ * one go that is a 100-400 ms stall, which at street level lands exactly when
+ * you are moving and lands repeatedly -- the 'ten frames a second' complaint
+ * was mostly this. So the two emit loops resume where they stopped.
+ */
+interface Build {
+  tile: Tile;
+  tier: 0 | 1 | 2;
+  bk: Buckets;
+  /** Next index into `tile.items`. */
+  item: number;
+  /** Next index into `tile.junctions`. */
+  junction: number;
+}
+
 type Sample = (x: number, z: number) => number;
 
 /* ------------------------------------------------------------------ module */
@@ -118,6 +136,19 @@ export class Roads implements WorldModule {
 
   private queue: Tile[] = [];
   private queueTier: Array<1 | 2> = [];
+  /** The tile currently mid-build, if a slice ran out of time. */
+  private build: Build | null = null;
+  private worstFlush = 0;
+  /**
+   * Most items emitted in a single frame, ever.
+   *
+   * A counter rather than a timer, deliberately. Wall-clock inside one update
+   * call includes any preemption the OS handed out, which on a loaded machine
+   * turns 4 ms of work into a reported 500. The item count is what the slice
+   * budget is actually controlling and nothing outside this module can move it.
+   */
+  private worstSlice = 0;
+  private sliceItems = 0;
   private frame = 0;
   private buildMs = 0;
   private ready = false;
@@ -180,6 +211,13 @@ export class Roads implements WorldModule {
       this.net.roads.reduce((s, r) => s + (r.tunnel ? 0 : r.length), 0) / 100,
     ) / 10;
     ctx.stats.roadNodes = this.junctions.length;
+    // The heaviest tile in the city is what an unbudgeted build used to cost in
+    // one frame; `roadWorstSliceItems` is what it costs now.
+    let heaviest = 0;
+    for (const m of [this.detailTiles, this.microTiles]) {
+      for (const t of m.values()) heaviest = Math.max(heaviest, t.items.length + t.junctions.length);
+    }
+    ctx.stats.roadHeaviestTile = heaviest;
     console.info(
       `[Roads] ${this.net.roads.length} ways, ${this.junctions.length} junctions, ` +
       `${this.items.length} chunks; topology ${tNet.toFixed(0)} ms, base ${tBase.toFixed(0)} ms`,
@@ -288,19 +326,41 @@ export class Roads implements WorldModule {
   }
 
   /**
-   * Builds one tile at one detail tier. Every surface family in the tile
-   * collapses to a single merged mesh, so a tile is 1-4 draw calls.
+   * Builds one tile at one detail tier, to completion. Every surface family in
+   * the tile collapses to a single merged mesh, so a tile is 1-4 draw calls.
+   *
+   * Only for the base tier, which is built behind the loading screen where a
+   * long frame costs nothing. Everything streamed while the camera is moving
+   * goes through {@link advanceTile} instead.
    */
   private buildTile(tile: Tile, tier: 0 | 1 | 2): void {
-    const bk = new Buckets();
+    this.build = { tile, tier, bk: new Buckets(), item: 0, junction: 0 };
+    this.advanceTile(Infinity);
+  }
+
+  /**
+   * Emits as much of {@link build} as fits before `deadline`, and returns
+   * whether the tile is finished.
+   *
+   * The clock is read once every 16 items, not every item: a single ribbon is
+   * a few microseconds and `performance.now` is not free. That also guarantees
+   * forward progress -- a slice always emits at least 16 items, however late
+   * it was called.
+   */
+  private advanceTile(deadline: number): boolean {
+    const b = this.build;
+    if (!b) return true;
+    const { tile, tier, bk } = b;
     const mats = this.mats;
     const sample: Sample = (x, z) => {
       const v = this.ctx.sampleHeight?.(x, z);
       return Number.isFinite(v) ? (v as number) : 0;
     };
 
-    for (const i of tile.items) {
-      const it = this.items[i];
+    let n = 0;
+    while (b.item < tile.items.length) {
+      if ((n++ & 15) === 0 && performance.now() > deadline) { this.sliceItems += n; return false; }
+      const it = this.items[tile.items[b.item++]];
       const rib = makeRibbon(it.chunk, it.road, tier > 0);
       if (!rib) continue;
 
@@ -325,8 +385,9 @@ export class Roads implements WorldModule {
       }
     }
 
-    for (const i of tile.junctions) {
-      const j = this.junctions[i];
+    while (b.junction < tile.junctions.length) {
+      if ((n++ & 15) === 0 && performance.now() > deadline) { this.sliceItems += n; return false; }
+      const j = this.junctions[tile.junctions[b.junction++]];
       if (tier === 0) {
         emitJunctionFill(bk.get(surfaceMat(j.surface)), j, mats.tile(surfaceMat(j.surface)));
       } else if (tier === 1) {
@@ -336,11 +397,27 @@ export class Roads implements WorldModule {
       }
     }
 
+    this.sliceItems += n;
+    this.flushTile(b);
+    this.build = null;
+    return true;
+  }
+
+  /**
+   * Turns the finished buckets into meshes. Atomic -- a merge cannot be handed
+   * back half done -- and timed separately, so if it ever becomes the thing
+   * that hitches, `roadWorstFlushMs` says so instead of hiding inside the
+   * tile total.
+   */
+  private flushTile(b: Build): void {
+    const { tile, tier, bk } = b;
+    const f0 = performance.now();
     const stats = bk.stats();
     // Ground-level road surface, kerbs and walks lie on the terrain: there is
     // nothing beneath them to shade, and self-shadowing a flat decal only buys
     // acne. Only the structural passes (bridges, portals, below) cast.
-    const meshes = bk.flush(mats, `road-t${tier}`, false);
+    const meshes = bk.flush(this.mats, `road-t${tier}`, false);
+    this.worstFlush = Math.max(this.worstFlush, performance.now() - f0);
     if (!meshes.length) {
       tile.group = new THREE.Group();
       return;
@@ -524,18 +601,20 @@ export class Roads implements WorldModule {
 
     // A camera teleport (the QA harness, or a jump cut) deserves a big slice.
     const budget = moved > 150 || ctx.elapsed < 6 ? 16 : 5;
-    while (this.queue.length) {
-      if (performance.now() - t0 > budget) break;
+    const deadline = t0 + budget;
+    this.sliceItems = 0;
+    // Finish whatever last frame ran out of time on before starting anything
+    // new, so a tile cannot sit half-emitted while the queue churns past it.
+    let room = this.advanceTile(deadline);
+    while (room && this.queue.length && performance.now() < deadline) {
       const tile = this.queue.shift()!;
       const tier = this.queueTier.shift()!;
       if (tile.group) continue;
-      // The budget is checked *before* a build, so one heavy tile overshoots it
-      // by however long it takes. Record the worst, or the overshoot is
-      // invisible behind the average.
-      const b0 = performance.now();
-      this.buildTile(tile, tier);
-      this.worstTile = Math.max(this.worstTile, performance.now() - b0);
+      this.build = { tile, tier, bk: new Buckets(), item: 0, junction: 0 };
+      room = this.advanceTile(deadline);
     }
+    this.worstTile = Math.max(this.worstTile, performance.now() - t0);
+    this.worstSlice = Math.max(this.worstSlice, this.sliceItems);
 
     let draws = 0;
     for (const g of this.baseGroup.children) if (g.visible) draws += g.children.length;
@@ -548,7 +627,11 @@ export class Roads implements WorldModule {
     ctx.stats.roadMeshes = draws;
     ctx.stats.roadTris = this.tris;
     ctx.stats.roadQueue = this.queue.length;
+    // The worst *slice*, which is what a dropped frame actually is, not the
+    // worst whole tile -- a tile may now legitimately span several frames.
     ctx.stats['roadWorstTileMs'] = Math.round(this.worstTile * 10) / 10;
+    ctx.stats['roadWorstFlushMs'] = Math.round(this.worstFlush * 10) / 10;
+    ctx.stats['roadWorstSliceItems'] = this.worstSlice;
   }
 
   /** Queues tiles in range, newest-nearest first, and hides the rest. */
@@ -571,7 +654,7 @@ export class Roads implements WorldModule {
       (a, b) => ((a.cx - cx) ** 2 + (a.cz - cz) ** 2) - ((b.cx - cx) ** 2 + (b.cz - cz) ** 2),
     );
     for (const t of want) {
-      if (this.queue.includes(t)) continue;
+      if (t === this.build?.tile || this.queue.includes(t)) continue;
       this.queue.push(t);
       this.queueTier.push(tier);
     }
@@ -610,6 +693,7 @@ export class Roads implements WorldModule {
     this.detailTiles.clear();
     this.microTiles.clear();
     this.queue.length = 0;
+    this.build = null;
   }
 }
 
