@@ -38,7 +38,24 @@ void main() {
   c += max(texture2D(tColor, vUv + vec2( 0.5,  0.5) * uSrcTexel).rgb, vec3(0.0));
   c *= 0.25;
 
-  float l = clamp(luma(c), uMinLum, uMaxLum);
+  // Reject a non-finite texel rather than metering it.
+  //
+  // 'clamp' with a NaN argument is implementation-defined, as is 'max', so a
+  // single NaN pixel anywhere in the scene can poison the reduction and
+  // mis-expose the entire frame. That is not hypothetical: a Beckmann lobe in
+  // the water shader was dividing by an underflowed cos^4 and producing NaN
+  // across whole square kilometres of harbour, and the frames that came back
+  // wrong were wrong *everywhere* -- blown pavement, crushed shadows -- while
+  // the one view with no water in it metered correctly.
+  //
+  // A comparison against a NaN is false, so this substitutes the middle of the
+  // metering range for one: it contributes its weight but does not drag the
+  // average. Fixing the source is the real fix; a meter should not be able to
+  // be broken by one pixel either way.
+  float lRaw = luma(c);
+  float l = (lRaw > 0.0 && lRaw < 1.0e8)
+    ? clamp(lRaw, uMinLum, uMaxLum)
+    : sqrt(uMinLum * uMaxLum);
 
   // Centre-weighted metering: a radial falloff from the frame centre, so the
   // sky in the top corners does not stop the street from being readable.
