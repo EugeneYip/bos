@@ -71,6 +71,105 @@ export interface LandCover {
   deckElev: Bytes;
 }
 
+/** Dilation radius around the paved surfaces, in metres. */
+const INFIELD_REACH = 220;
+/** Coarse cell size for the dilation, in metres. */
+const INFIELD_CELL = 32;
+
+/**
+ * Where Logan's mown grass goes: `reach` is the aeroway mask dilated by
+ * {@link INFIELD_REACH}, `mask` is the undilated pavement itself.
+ *
+ * Logan is the one place where the urban default is plainly wrong. Its aeroway
+ * polygons cover the runways, taxiways and aprons; the land between them is
+ * mown grass, and nothing in the extract says so. Left as the default it
+ * splats to 58% gravel, which rendered the whole peninsula as a pale sheet --
+ * brighter than the buildings standing on it and twice the luma of a city
+ * road.
+ *
+ * Dilating rather than filling a hull matters: a convex hull of Logan's
+ * runways reaches well into East Boston, and the axis-aligned box of one
+ * runway on a 20-degree bearing is 1100 x 2800 m. The dilation runs on a
+ * coarse grid because a separable max filter at a 130 m radius over four
+ * million cells is not something to do at load.
+ */
+function airfieldInfieldMask(
+  areas: readonly AreaRecord[],
+  grid: RasterGrid,
+): { mask: Uint8Array; reach: Uint8Array } | null {
+  const paved = areas.filter((a) => a.kind === 'runway');
+  if (!paved.length) return null;
+
+  const n = grid.width * grid.height;
+  const mask = new Uint8Array(n);
+  let minI = grid.width, maxI = -1, minJ = grid.height, maxJ = -1;
+  for (const rec of paved) {
+    const rings: readonly number[][] = rec.holes?.length ? [rec.outline, ...rec.holes] : [rec.outline];
+    fillPolygon(rings, grid, (row, i0, i1, j) => {
+      for (let i = i0; i < i1; i++) mask[row + i] = 1;
+      if (i0 < minI) minI = i0;
+      if (i1 > maxI) maxI = i1;
+      if (j < minJ) minJ = j;
+      if (j > maxJ) maxJ = j;
+    });
+  }
+  if (maxI < 0) return null;
+
+  const stepI = Math.max(1, Math.round(INFIELD_CELL / grid.spacingX));
+  const stepJ = Math.max(1, Math.round(INFIELD_CELL / grid.spacingZ));
+  const padI = Math.ceil(INFIELD_REACH / (stepI * grid.spacingX));
+  const padJ = Math.ceil(INFIELD_REACH / (stepJ * grid.spacingZ));
+  const ci0 = Math.max(0, Math.floor(minI / stepI) - padI - 1);
+  const ci1 = Math.min(Math.ceil(grid.width / stepI), Math.ceil(maxI / stepI) + padI + 1);
+  const cj0 = Math.max(0, Math.floor(minJ / stepJ) - padJ - 1);
+  const cj1 = Math.min(Math.ceil(grid.height / stepJ), Math.ceil(maxJ / stepJ) + padJ + 1);
+  const cw = ci1 - ci0, ch = cj1 - cj0;
+  if (cw <= 0 || ch <= 0) return null;
+
+  const coarse = new Uint8Array(cw * ch);
+  for (let cj = 0; cj < ch; cj++) {
+    for (let ci = 0; ci < cw; ci++) {
+      const j0 = (cj0 + cj) * stepJ, i0 = (ci0 + ci) * stepI;
+      let hit = 0;
+      for (let j = j0; j < Math.min(j0 + stepJ, grid.height) && !hit; j++) {
+        const row = j * grid.width;
+        for (let i = i0; i < Math.min(i0 + stepI, grid.width); i++) {
+          if (mask[row + i]) { hit = 1; break; }
+        }
+      }
+      coarse[cj * cw + ci] = hit;
+    }
+  }
+  const tmp = new Uint8Array(cw * ch);
+  for (let cj = 0; cj < ch; cj++) {
+    for (let ci = 0; ci < cw; ci++) {
+      let hit = 0;
+      for (let d = -padI; d <= padI && !hit; d++) {
+        const x = ci + d;
+        if (x >= 0 && x < cw && coarse[cj * cw + x]) hit = 1;
+      }
+      tmp[cj * cw + ci] = hit;
+    }
+  }
+  const reach = new Uint8Array(n);
+  for (let cj = 0; cj < ch; cj++) {
+    for (let ci = 0; ci < cw; ci++) {
+      let hit = 0;
+      for (let d = -padJ; d <= padJ && !hit; d++) {
+        const y = cj + d;
+        if (y >= 0 && y < ch && tmp[y * cw + ci]) hit = 1;
+      }
+      if (!hit) continue;
+      const j0 = (cj0 + cj) * stepJ, i0 = (ci0 + ci) * stepI;
+      for (let j = j0; j < Math.min(j0 + stepJ, grid.height); j++) {
+        const row = j * grid.width;
+        for (let i = i0; i < Math.min(i0 + stepI, grid.width); i++) reach[row + i] = 1;
+      }
+    }
+  }
+  return { mask, reach };
+}
+
 function ringArea(outline: readonly number[]): number {
   let s = 0;
   const n = outline.length;
@@ -88,10 +187,28 @@ export function rasteriseLandCover(areas: readonly AreaRecord[], grid: RasterGri
   const waterDepth = new Uint8Array(n);
   const waterElev = new Uint8Array(n);
   const deckElev = new Uint8Array(n);
+  /** 1 where some area polygon has had its say, so the infield fill leaves it. */
+  const painted = new Uint8Array(n);
 
   // Default: bare urban ground. Roads and buildings cover most of it; what
   // shows through wants to read as grimy pavement, not as bright grass.
   for (let k = 0; k < n; k++) cover[k * 4 + 3] = HARD.urban;
+
+  // --- airfield infield ---------------------------------------------------
+  //
+  // Logan is the one place where the urban default is plainly wrong. Its
+  // aeroway polygons cover the runways, taxiways and aprons; the land between
+  // them is mown grass, and there is no polygon in the extract that says so.
+  // Left as the default it splats to 58% gravel, which rendered the whole
+  // peninsula as a pale grey sheet -- brighter than the buildings on it and
+  // twice the luma of a city road.
+  //
+  // So the aeroway mask is dilated and the surround painted grass, before
+  // every other pass, so water still wins where the harbour reaches in and the
+  // pavement still wins where it actually is. The dilation happens on a coarse
+  // grid because a separable max filter over four million cells at a
+  // 130 m radius is not something to do at load.
+  const airfield = airfieldInfieldMask(areas, grid);
 
   interface Job { rec: AreaRecord; pass: number; area: number }
   const jobs: Job[] = [];
@@ -141,6 +258,7 @@ export function rasteriseLandCover(areas: readonly AreaRecord[], grid: RasterGri
         cover[c + 1] = g;
         cover[c + 2] = b;
         cover[c + 3] = a;
+        painted[k] = 1;
         if (isPier) {
           // A wharf deck is land, however much water the polygon overlaps.
           waterMask[k] = 0;
@@ -148,6 +266,31 @@ export function rasteriseLandCover(areas: readonly AreaRecord[], grid: RasterGri
         }
       }
     });
+  }
+
+  // Fill what is left between Logan's pavement with mown grass.
+  //
+  // Only cells no polygon touched. The extract already has 81 grass polygons
+  // around the airport and 21 parking ones, and an earlier version of this ran
+  // last and overrode everything except water -- which would have turned
+  // Central Parking into a lawn. What it is for is the gaps between all of
+  // that, which default to `HARD.urban` and splat to 58% gravel: a pale grey
+  // sheet, brighter than the buildings standing on it and twice the luma of a
+  // city road.
+  if (airfield) {
+    const g = KEYS.grass!;
+    const { reach } = airfield;
+    let filled = 0;
+    for (let k = 0; k < n; k++) {
+      if (!reach[k] || painted[k] || waterMask[k]) continue;
+      const c = k * 4;
+      cover[c] = g.r;
+      cover[c + 1] = g.g;
+      cover[c + 2] = g.b;
+      cover[c + 3] = g.a;
+      filled++;
+    }
+    if (filled) console.info(`[LandCover] airfield infield ${filled} cells`);
   }
 
   return { grid, cover, waterMask, waterDepth, waterElev, deckElev };

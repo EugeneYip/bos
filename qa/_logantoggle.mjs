@@ -20,11 +20,11 @@ const shot = async (tag) => {
   fs.writeFileSync(`${ROOT}/qa/shots/logan-tog-${tag}.png`, await pg.screenshot());
   console.log('wrote', tag);
 };
-await shot('all');
-console.log('hid', await pg.evaluate(()=>window.__debug.toggle('airport:pavement', false)));
-await shot('no-pavement');
-await pg.evaluate(()=>window.__debug.toggle('airport:pavement', true));
-console.log('hid all airport', await pg.evaluate(()=>window.__debug.toggle('airport', false)));
-await shot('no-airport');
-await pg.evaluate(()=>window.__debug.toggle('airport', true));
+await shot('all2');
+for (const m of ['terrain', 'far-terrain', 'parks', 'road-t', 'water']) {
+  const n = await pg.evaluate((k)=>window.__debug.toggle(k, false), m);
+  await shot('no-' + m);
+  await pg.evaluate((k)=>window.__debug.toggle(k, true), m);
+  console.log('hid', m, n);
+}
 await b.close(); srv.kill();
