@@ -467,7 +467,16 @@ export class Roads implements WorldModule {
     for (const j of this.junctions) {
       // Reach past the kerb line: the paint runs through the crossing and a
       // little way out of it on each side.
-      const r = Math.min(34, j.radius + 9);
+      //
+      // The falloff below only fades over the outer 1.3% of this radius, so
+      // `r` is very nearly the painted radius, and at 34 m that is a 68 m
+      // green blob per junction. Where the Seaport's ramps put junctions
+      // every fifty metres those blobs merged into one continuous green
+      // ribbon down the carriageway -- which is the thing this probe exists to
+      // prevent. Boston's green runs about the width of the cross street plus
+      // a couple of metres, so 15-25 m across. A cycleway sits 6-8 m off the
+      // junction centre, so a 12 m radius paints roughly 19 m of its length.
+      const r = Math.min(16, j.radius + 4);
       const cx = Math.floor(j.p.x / CELL);
       const cz = Math.floor(j.p.z / CELL);
       const span = Math.ceil(r / CELL);
