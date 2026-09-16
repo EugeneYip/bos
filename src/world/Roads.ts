@@ -191,7 +191,11 @@ export class Roads implements WorldModule {
     await yieldFrame();
 
     const t0 = performance.now();
-    this.net = buildNetwork(records, sample);
+    // `ctx.waterDistAt` is published by the Water module, which initialises
+    // before this one. Without it, bridge decks keep whatever elevation their
+    // land endpoints interpolate to -- which at Fort Point Channel is the
+    // water surface itself.
+    this.net = buildNetwork(records, sample, ctx.waterDistAt);
     const tNet = performance.now() - t0;
     await yieldFrame();
 

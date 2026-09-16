@@ -13,9 +13,15 @@ import {
   type V2, add, cumulative, dedupe, dist, norm, perp, polylineLength,
   rayIntersect, scale, simplify, smoothProfile, sub, hashStr,
 } from './math2';
+import { SEA_LEVEL } from '../../core/config';
 import {
   CLASS, type ClassSpec, type SurfaceKey, TUNE, crownDy, lanesOf, surfaceOf, widthOf,
 } from './spec';
+
+/** Minimum deck height above the water surface, metres. */
+const BRIDGE_CLEARANCE = 3.6;
+/** Metres in from the bank over which the deck reaches full clearance. */
+const BRIDGE_RAMP = 16;
 
 export interface PreparedRoad {
   id: string;
@@ -206,6 +212,7 @@ function markSidewalkDuplicates(prepared: PreparedRoad[]): Set<PreparedRoad> {
 export function buildNetwork(
   records: RoadRecord[],
   sample: (x: number, z: number) => number,
+  waterDist?: (x: number, z: number) => number,
 ): Network {
   // ---- 1. prepare -------------------------------------------------------
   let prepared: PreparedRoad[] = [];
@@ -229,7 +236,33 @@ export function buildNetwork(
     // the ribbon that meets it are computed from identical numbers.
     const sm = simplify(dd.pts, dd.ys, TUNE.simplifyEps);
     if (sm.pts.length < 2) continue;
-    const ys = sm.ys.length > 3 ? smoothProfile(sm.ys, 2, 0.45) : sm.ys;
+    let ys = sm.ys.length > 3 ? smoothProfile(sm.ys, 2, 0.45) : sm.ys;
+
+    // Lift a bridge deck clear of the water it crosses.
+    //
+    // A deck's elevation is interpolated between its land endpoints, and where
+    // both of those sit near sea level -- which is every crossing of Fort Point
+    // Channel -- the deck lands *at* the water surface. What you see from
+    // altitude is a one-pixel line of carriageway appearing and disappearing
+    // as the wave troughs pass under it, with no bridge visible at all.
+    //
+    // The ramp comes from the shoreline field's own signed distance rather than
+    // from a guess, so the deck meets the bank at bank height and reaches full
+    // clearance out in the channel. No kink to smooth afterwards, and a deck
+    // that is already high enough is left alone by the `max`.
+    if (waterDist && (rec.bridge || /\bbridge\b/i.test(rec.name ?? ''))) {
+      let lifted: number[] | null = null;
+      for (let i = 0; i < sm.pts.length; i++) {
+        const d = waterDist(sm.pts[i].x, sm.pts[i].z);
+        if (!(d > 0)) continue;
+        const t = Math.min(1, d / BRIDGE_RAMP);
+        const want = SEA_LEVEL + BRIDGE_CLEARANCE * t;
+        if (want <= ys[i]) continue;
+        if (!lifted) lifted = ys.slice();
+        lifted[i] = want;
+      }
+      if (lifted) ys = smoothProfile(lifted, 1, 0.35);
+    }
 
     const mid = sm.pts[sm.pts.length >> 1];
     const width = widthOf(rec);

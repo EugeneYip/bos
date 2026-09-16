@@ -147,6 +147,10 @@ export class Water implements WorldModule {
       surf.chunks.map((g) => [g, this.material!] as [THREE.BufferGeometry, THREE.ShaderMaterial]);
     pieces.push([skirt, this.skirtMaterial]);
 
+    // Hand the shoreline field to anyone who needs to know where the water is.
+    // Water initialises before Roads, which is what makes this usable there.
+    ctx.waterDistAt = (x, z) => field.sampleDist(x, z);
+
     this.timer = new GpuTimer(ctx.renderer.getContext());
     this.vis = new SurfaceVisibility(ctx.renderer.getContext());
 

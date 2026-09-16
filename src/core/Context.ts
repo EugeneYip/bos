@@ -115,6 +115,17 @@ export interface Ctx {
    */
   lampField: LampField | null;
 
+  /**
+   * Signed distance to the nearest shoreline in metres, positive inside water.
+   * Published by the Water module, which owns the field it comes from.
+   *
+   * Roads needs it: a bridge deck's elevation is interpolated between its land
+   * endpoints, and where both of those sit near sea level -- which is every
+   * crossing of Fort Point Channel -- the deck lands *at* the water surface and
+   * the wave troughs wash over the carriageway.
+   */
+  waterDistAt?: (x: number, z: number) => number;
+
   /** Shared PBR texture/material library; installed by the Materials module. */
   materials: MaterialLibrary;
 
