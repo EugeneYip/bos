@@ -65,7 +65,9 @@ void main() {
 
   bool outside = any(lessThan(histUv, vec2(0.0))) || any(greaterThan(histUv, vec2(1.0)));
   if (uValid < 0.5 || outside || pw <= 0.0) {
-    gl_FragColor = vec4(current, 1.0);
+    // Alpha doubles as this frame's temporal confidence (see below): there is
+    // no history at all here, so it is zero.
+    gl_FragColor = vec4(current, 0.0);
     return;
   }
 
@@ -128,7 +130,16 @@ void main() {
   float b = feedback * wh;
   vec3 result = (current * a + history * b) / max(a + b, 1e-5);
 
-  gl_FragColor = vec4(max(result, vec3(0.0)), 1.0);
+  // Alpha is not coverage here (nothing downstream composites this texture) —
+  // it is repurposed as a temporal-confidence channel: 1 where the clip left
+  // history untouched, falling to 0 the harder the clip had to pull it back
+  // towards the current frame, which is the same disocclusion signature
+  // clipDist already flags above. Motion blur's reconstruction is the one
+  // consumer (see motionBlur.ts): a pixel that was not corroborated by last
+  // frame's history was not on screen a frame ago — a streamed-in building,
+  // a just-completed vegetation tile swap, a disoccluded edge — and its
+  // reprojected velocity is not trustworthy, so it should not smear.
+  gl_FragColor = vec4(max(result, vec3(0.0)), 1.0 - clipDist);
 }
 `;
 

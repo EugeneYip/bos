@@ -105,13 +105,24 @@ float cone(float dist, float speed) { return clamp(1.0 - dist / max(speed, 1e-5)
 float cylinder(float dist, float speed) { return 1.0 - smoothstep(0.95 * speed, 1.05 * speed, dist); }
 
 void main() {
-  vec3 center = texture2D(tColor, vUv).rgb;
+  vec4 centerSample = texture2D(tColor, vUv);
+  vec3 center = centerSample.rgb;
   vec2 vN = texture2D(tNeighbor, vUv).xy * uSize;     // pixels
   float lenN = length(vN);
   if (lenN < 0.75) { gl_FragColor = vec4(center, 1.0); return; }
 
   vec3 velC = texture2D(tVel, vUv).xyz;
-  vec2 vC = velC.xy * uSize;
+  // Depth-reprojected velocity assumes the surface under this pixel also
+  // existed last frame. tColor is TAA's resolve, which carries how well that
+  // held up in its alpha (see taa.ts): low confidence means this pixel was
+  // not corroborated by last frame's history — a building tile or a
+  // vegetation-tier swap that streamed in this frame, not a real object in
+  // motion — so the "velocity" is really just the depth gap between the new
+  // surface and whatever used to be behind it, and is scaled down rather
+  // than trusted at face value. A genuinely fast, freshly-disoccluded object
+  // is also low-confidence at its leading edge, so this trades a hard,
+  // unblurred silhouette there for not smearing streamed-in content.
+  vec2 vC = velC.xy * uSize * mix(0.15, 1.0, centerSample.a);
   float lenC = max(length(vC), 0.5);
   float zC = velC.z;
 
@@ -139,7 +150,14 @@ void main() {
     float weight = fg * cone(dist, lenS) + bg * cone(dist, lenC)
                  + cylinder(dist, lenS) * cylinder(dist, lenC) * 2.0;
 
-    sum += texture2D(tColor, suv).rgb * weight;
+    // Same reasoning as centreSample above, applied to the sample this gather
+    // is about to pull in: a low-confidence sample is streamed-in content
+    // reached via the tile-max dilation (vN), not a real smear source, so its
+    // contribution is damped rather than blended in at full strength.
+    vec4 s = texture2D(tColor, suv);
+    weight *= mix(0.2, 1.0, s.a);
+
+    sum += s.rgb * weight;
     wsum += weight;
   }
 
