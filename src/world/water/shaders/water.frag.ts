@@ -509,7 +509,12 @@ void main() {
   // A glitter path is many small highlights, not a sheet. Clamped at 46 the
   // lobe saturated whole square kilometres of the Charles into flat white
   // under a low sun; 7 keeps the sparkle and loses the sheet.
-  color += uSunColor * min(spec, 7.0) * smoothstep(-0.04, 0.09, uSunDir.y);
+  // A comparison rather than a bare min: any comparison against a NaN is
+  // false, so this contributes nothing for one, whereas 'min(spec, 7.0)' would
+  // pass it straight through on any driver that returns its NaN argument.
+  // 'beckmannAniso' is NaN-free at the source now; this is the second line.
+  color += uSunColor * (spec > 0.0 ? min(spec, 7.0) : 0.0)
+         * smoothstep(-0.04, 0.09, uSunDir.y);
 
   // -------------------------------------------------------------- foam ----
   float cov = 0.0;

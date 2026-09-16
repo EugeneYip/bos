@@ -266,13 +266,32 @@ float fresnelWater(float NoV, float rough) {
  * two, the rms slope of the facets the lobe is made of.
  */
 float beckmannAniso(float NoH, float ToH, float BoH, float ax, float ay) {
-  float c = max(NoH, 1e-4);
+  // 'c^4' in the denominator is the hazard here, and it is why square
+  // kilometres of water can come out flat white.
+  //
+  // At grazing incidence NoH goes to zero. With the old floor of 1e-4 the
+  // denominator reached 1e-16 * PI * ax * ay, which is about 2e-20 -- fine in
+  // single precision, but below the smallest half-float subnormal, so on any
+  // path that runs this at mediump it is simply zero. 'exp(-e)' has gone to
+  // zero by then as well, because the slope term blows up as 1/c. So the
+  // result is 0/0: a NaN. And a NaN that reaches the framebuffer renders
+  // white, while 'min(spec, 7.0)' downstream is not a guard against it --
+  // GLSL leaves min with a NaN argument implementation-defined, so one driver
+  // clamps it and the next one hands the NaN straight through.
+  //
+  // Two changes, both exact where it matters. The floor on c is raised to a
+  // value whose fourth power survives half precision, and the Gaussian is
+  // short-circuited before the division once its exponent is past the point
+  // where exp(-e) is zero to any precision. exp(-60) is 1e-26, so nothing
+  // visible is being thrown away.
+  float c = max(NoH, 0.05);
   // Half-vector slope, i.e. tan(theta_h) resolved onto the wind axes.
   float sx = ToH / c;
   float sy = BoH / c;
   float e = sx * sx / (ax * ax) + sy * sy / (ay * ay);
+  if (!(e < 60.0)) return 0.0;
   float c2 = c * c;
-  return exp(-e) / (PI * ax * ay * c2 * c2);
+  return exp(-e) / max(PI * ax * ay * c2 * c2, 1e-12);
 }
 
 float smithVis(float NoV, float NoL, float a) {
