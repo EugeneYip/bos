@@ -22,7 +22,8 @@ for (const v of vp) {
   await new Promise(r=>setTimeout(r,2600));
   await pg.evaluate(()=>window.__debug.settle(60));
   const st = await pg.evaluate(()=>({ cover: window.__boston.ctx.stats['water.cover'],
-    reflect: window.__boston.ctx.stats['water.reflect'] }));
+    reflect: window.__boston.ctx.stats['water.reflect'],
+    seen: window.__boston.ctx.stats['water.seen'] }));
   // True coverage, from the depth-correct thing: count pixels the water owns
   // by reading them before and after flooding is too slow here, so use the
   // gate's own decision against a magenta flood only where it says skip.
@@ -58,7 +59,8 @@ for (const v of vp) {
     truth = `   TRUE water ${pct.toFixed(2)}%`;
     if (pct > 0.25) { truth += '  <-- SKIPPED WITH WATER ON SCREEN'; bad++; }
   }
-  console.log(`${String(v.id).padEnd(18)} cover ${String(st.cover).padStart(5)}%  reflect ${st.reflect}${truth}`);
+  console.log(`${String(v.id).padEnd(18)} cover ${String(st.cover).padStart(5)}%  seen ${st.seen}`
+    + `  reflect ${st.reflect}${truth}`);
 }
 console.log(`\nviewpoints where the gate skipped with water visible: ${bad}`);
 await b.close(); srv.kill();

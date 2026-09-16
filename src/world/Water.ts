@@ -43,6 +43,7 @@ import { WaterField } from './water/field';
 import { buildSurfaces, buildOceanSkirt } from './water/surface';
 import { buildWaterTextures, type WaterTextures } from './water/textures';
 import { PlanarReflection } from './water/reflection';
+import { SurfaceVisibility } from './water/visibility';
 import { WATER_VERT } from './water/shaders/water.vert';
 import { waterFrag } from './water/shaders/water.frag';
 import { GpuTimer } from './water/timing';
@@ -79,6 +80,8 @@ export class Water implements WorldModule {
   private bodies: WaterBody[] = [];
   private time = 0;
   private reflectEnabled = false;
+  private vis: SurfaceVisibility | null = null;
+  private probe: THREE.Mesh | null = null;
 
   // Scratch — allocating per frame is how you get GC hitches.
   private static _v3 = new THREE.Vector3();
@@ -145,6 +148,7 @@ export class Water implements WorldModule {
     pieces.push([skirt, this.skirtMaterial]);
 
     this.timer = new GpuTimer(ctx.renderer.getContext());
+    this.vis = new SurfaceVisibility(ctx.renderer.getContext());
 
     for (const [g, mat] of pieces) {
       const mesh = new THREE.Mesh(g, mat);
@@ -158,12 +162,38 @@ export class Water implements WorldModule {
       // water's pixels on depth, and the GPU timer spans a single run of
       // draws instead of the entire frame.
       mesh.renderOrder = 6;
-      if (this.timer.supported) {
-        mesh.onBeforeRender = () => this.timer?.begin();
-        mesh.onAfterRender = () => this.timer?.end();
+      const timer = this.timer;
+      const vis = this.vis;
+      if (timer.supported || vis.supported) {
+        mesh.onBeforeRender = () => { timer.begin(); vis.begin(); };
+        mesh.onAfterRender = () => { timer.end(); };
       }
       this.root.add(mesh);
       this.meshes.push(mesh);
+    }
+
+    // The sentinel that closes the occlusion span. A single degenerate
+    // triangle one renderOrder past the water, so it is drawn immediately
+    // after the last chunk: zero area so it cannot contribute a sample,
+    // nothing written so it cannot tint or occlude, never frustum-culled so
+    // it is always in the render list to be asked. See `visibility.ts`.
+    if (this.vis.supported) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0], 3));
+      const sentinel = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        name: 'water:probe', colorWrite: false, depthWrite: false, depthTest: false,
+      }));
+      sentinel.name = 'water:probe';
+      sentinel.renderOrder = 7;
+      sentinel.frustumCulled = false;
+      sentinel.matrixAutoUpdate = false;
+      sentinel.userData.noShadow = true;
+      sentinel.castShadow = false;
+      sentinel.receiveShadow = false;
+      const vis = this.vis;
+      sentinel.onBeforeRender = () => vis.end();
+      this.root.add(sentinel);
+      this.probe = sentinel;
     }
 
     ctx.stats.waterBodies = this.bodies.length;
@@ -319,6 +349,9 @@ export class Water implements WorldModule {
 
     this.timer?.poll();
     this.timer?.beginFrame();
+    // Drains the previous frames' occlusion answers and arms this frame's, so
+    // it has to run before the render and after the camera has its final pose.
+    this.vis?.beginFrame();
 
     this.time += dt;
     m.uniforms.uTime.value = this.time;
@@ -419,7 +452,14 @@ export class Water implements WorldModule {
       // nothing.
       const cover = this.surfaceCoverage(ctx);
       ctx.stats['water.cover'] = Math.round(cover * 1000) / 10;
-      if (cover >= REFLECT_MIN_COVER) {
+      // Two tests, because neither alone is enough. The coverage estimate
+      // catches water that is too small on screen to be worth mirroring but
+      // cannot see occlusion; the occlusion query is exact about occlusion but
+      // answers yes for a single surviving pixel. Together they cover both the
+      // harbour glimpsed down an alley and the Charles hidden behind Back Bay.
+      const seen = !this.vis?.supported || this.vis.visible;
+      ctx.stats['water.seen'] = seen ? 1 : 0;
+      if (cover >= REFLECT_MIN_COVER && seen) {
         m.uniforms.uReflMaxLod.value = this.reflection.maxLod;
         this.timer?.begin();
         this.reflection.render(ctx.renderer, ctx.scene, ctx.camera, SEA_LEVEL, this.root);
@@ -434,6 +474,7 @@ export class Water implements WorldModule {
     }
 
     if (this.timer?.supported) ctx.stats['water.ms'] = Number(this.timer.ms.toFixed(2));
+    ctx.stats['water.occluded'] = this.vis?.hidden ?? 0;
   }
 
   resize(width: number, height: number): void {
@@ -511,6 +552,10 @@ export class Water implements WorldModule {
 
   dispose(ctx: Ctx): void {
     ctx.scene.remove(this.root);
+    this.vis?.dispose();
+    this.probe?.geometry.dispose();
+    (this.probe?.material as THREE.Material | undefined)?.dispose();
+    this.probe = null;
     for (const m of this.meshes) m.geometry.dispose();
     this.material?.dispose();
     this.skirtMaterial?.dispose();
