@@ -14,6 +14,7 @@ import { Landmarks } from './landmarks/Landmarks';
 import { Vegetation } from './world/Vegetation';
 import { Props } from './world/Props';
 import { Traffic } from './world/Traffic';
+import { Transit } from './world/Transit';
 import { Physics } from './physics/Physics';
 import { CameraRig } from './controls/CameraRig';
 import { Post } from './post/Post';
@@ -62,6 +63,10 @@ async function main(): Promise<void> {
     new Vegetation(),
     new Props(),
     new Traffic(),
+    // After Roads, which owns the rail network, and after Traffic, whose
+    // established pattern (graph + instanced meshes + distance culling) this
+    // follows for the trains that run on it.
+    new Transit(),
     new Physics(),
     new CameraRig(),
     post,
