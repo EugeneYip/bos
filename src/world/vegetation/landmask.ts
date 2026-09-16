@@ -23,8 +23,24 @@ export const CLASS_BLOCKED = 5;
 export const FLAG_ROAD = 8;
 /** Bit 4: a building footprint covers this cell. */
 export const FLAG_BUILDING = 16;
+/**
+ * Bit 5: inside the airfield. Not the pavement -- the `runway` polygons are
+ * already CLASS_BLOCKED -- but the mown infield between and around it, which
+ * OSM does map as grass and which therefore grew a forest of street and park
+ * trees in the middle of Logan. An operational airfield has nothing taller
+ * than the grass anywhere near the movement area.
+ */
+export const FLAG_AIRSIDE = 32;
 
 const CELL = 5;
+/**
+ * How far the airside flag reaches beyond the pavement, metres. Matches
+ * `INFIELD_REACH` in terrain/landcover.ts, which sows the same ground with
+ * grass -- the two want to describe the same region.
+ */
+const AIRSIDE_REACH = 220;
+/** Coarse grid the dilation runs on. The fine grid is 3.6M cells. */
+const AIRSIDE_CELL = 40;
 
 interface Key { cls: number; pass: number }
 
@@ -88,6 +104,7 @@ export class LandMask {
 
     for (const { a, k } of sorted) this.fill(a, k.cls);
     for (const r of roads) this.stampRoad(r);
+    this.markAirside(areas);
 
     let green = 0;
     for (let i = 0; i < this.data.length; i++) {
@@ -99,6 +116,73 @@ export class LandMask {
 
   get ready(): boolean {
     return this.data.length > 0;
+  }
+
+  /**
+   * Flag everything within {@link AIRSIDE_REACH} of a runway polygon.
+   *
+   * Dilated on a coarse grid and written back, because a 220 m reach is 44
+   * cells at the 5 m resolution and a sliding max over 3.6M of them for an
+   * 89-wide window is not worth it for a boundary this soft.
+   */
+  private markAirside(areas: AreaRecord[]): void {
+    const runways = areas.filter((a) => a.kind === 'runway' && a.outline.length >= 6);
+    if (!runways.length) return;
+
+    const cx = Math.ceil((this.nx * CELL) / AIRSIDE_CELL) + 1;
+    const cz = Math.ceil((this.nz * CELL) / AIRSIDE_CELL) + 1;
+    const seed = new Uint8Array(cx * cz);
+    // Walk the edges rather than the vertices: a runway polygon is four
+    // corners around a 2,800 m strip, and seeding only those would leave the
+    // whole middle of it unflagged however far the result is dilated.
+    for (const a of runways) {
+      const o = a.outline;
+      for (let i = 0; i < o.length; i += 2) {
+        const k = (i + 2) % o.length;
+        const ax = o[i], az = o[i + 1], bx = o[k], bz = o[k + 1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (AIRSIDE_CELL * 0.5)));
+        for (let t = 0; t <= steps; t++) {
+          const u = t / steps;
+          const i0 = Math.floor((ax + (bx - ax) * u - this.x0) / AIRSIDE_CELL);
+          const j0 = Math.floor((az + (bz - az) * u - this.z0) / AIRSIDE_CELL);
+          if (i0 < 0 || j0 < 0 || i0 >= cx || j0 >= cz) continue;
+          seed[j0 * cx + i0] = 1;
+        }
+      }
+    }
+
+    const r = Math.ceil(AIRSIDE_REACH / AIRSIDE_CELL);
+    const tmp = new Uint8Array(cx * cz);
+    for (let j = 0; j < cz; j++) {
+      for (let i = 0; i < cx; i++) {
+        let v = 0;
+        for (let k = -r; k <= r && !v; k++) {
+          const ii = i + k;
+          if (ii >= 0 && ii < cx && seed[j * cx + ii]) v = 1;
+        }
+        tmp[j * cx + i] = v;
+      }
+    }
+    for (let j = 0; j < cz; j++) {
+      for (let i = 0; i < cx; i++) {
+        let v = 0;
+        for (let k = -r; k <= r && !v; k++) {
+          const jj = j + k;
+          if (jj >= 0 && jj < cz && tmp[jj * cx + i]) v = 1;
+        }
+        if (!v) continue;
+        // Write the coarse cell back over the fine cells it covers.
+        const fi0 = Math.floor((i * AIRSIDE_CELL) / CELL);
+        const fj0 = Math.floor((j * AIRSIDE_CELL) / CELL);
+        const span = Math.ceil(AIRSIDE_CELL / CELL);
+        for (let fj = fj0; fj < fj0 + span && fj < this.nz; fj++) {
+          const row = fj * this.nx;
+          for (let fi = fi0; fi < fi0 + span && fi < this.nx; fi++) {
+            this.data[row + fi] |= FLAG_AIRSIDE;
+          }
+        }
+      }
+    }
   }
 
   /** Approximate area of a ring, used to size the trees a park grows. */

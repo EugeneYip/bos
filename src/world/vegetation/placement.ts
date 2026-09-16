@@ -25,7 +25,7 @@
  */
 import type { PropSet } from '../../core/types';
 import { SPECIES, type HabitatKey } from './species';
-import { CLASS_CEMETERY, CLASS_FOREST, CLASS_LAWN, CLASS_NONE, CLASS_PARK, FLAG_ROAD, LandMask } from './landmask';
+import { CLASS_CEMETERY, CLASS_FOREST, CLASS_LAWN, CLASS_NONE, CLASS_PARK, FLAG_AIRSIDE, FLAG_ROAD, LandMask } from './landmask';
 
 export interface TreeField {
   count: number;
@@ -115,6 +115,9 @@ export function buildTreeField(sets: PropSet[], o: PlacementOptions): TreeField 
       let x = s.positions[i * 3];
       let z = s.positions[i * 3 + 2];
       const raw = mask.at(x, z);
+      // Nothing grows airside. OSM maps Logan's infield as grass, so without
+      // this the movement area sprouts a scattering of park trees.
+      if (raw & FLAG_AIRSIDE) continue;
       let c = raw & 7;
       if (c > CLASS_CEMETERY) c = CLASS_NONE; // blocked cells: treat as street
 

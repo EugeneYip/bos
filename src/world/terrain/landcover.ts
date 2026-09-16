@@ -281,16 +281,30 @@ export function rasteriseLandCover(areas: readonly AreaRecord[], grid: RasterGri
     const g = KEYS.grass!;
     const { reach } = airfield;
     let filled = 0;
+    let paved = 0;
     for (let k = 0; k < n; k++) {
-      if (!reach[k] || painted[k] || waterMask[k]) continue;
+      if (!reach[k] || waterMask[k]) continue;
       const c = k * 4;
-      cover[c] = g.r;
-      cover[c + 1] = g.g;
-      cover[c + 2] = g.b;
-      cover[c + 3] = g.a;
-      filled++;
+      if (!painted[k]) {
+        cover[c] = g.r;
+        cover[c + 1] = g.g;
+        cover[c + 2] = g.b;
+        cover[c + 3] = g.a;
+        filled++;
+        continue;
+      }
+      // Airside ground that is not grass is pavement, so say so.
+      //
+      // Sowing only the untouched cells left long strips of the airfield
+      // sitting in the hard-surface ramp's gravel band, which renders as a
+      // pale sheet -- and the airport module draws its own dark apron mesh
+      // over the middle of it, so the two met along hard edges and the
+      // airfield came out as near-black slabs against near-white ones. There
+      // is no gravel airside; whatever a polygon called it, if it is not
+      // growing anything out here it is paved.
+      if (cover[c] < 64) { cover[c + 3] = HARD.asphalt; paved++; }
     }
-    if (filled) console.info(`[LandCover] airfield infield ${filled} cells`);
+    console.info(`[LandCover] airfield infield ${filled} cells sown, ${paved} re-paved`);
   }
 
   return { grid, cover, waterMask, waterDepth, waterElev, deckElev };

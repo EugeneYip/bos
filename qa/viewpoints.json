@@ -478,5 +478,37 @@
     ],
     "hour": 15.8,
     "note": "The tower must read as a low base, a long slender battered shaft and a glazed cab flaring out past it \u2014 not a full-width concrete slab. Cab and mast must appear exactly once."
+  },
+  {
+    "id": "logan-runway",
+    "title": "Oblique aerial down Logan runway 04R/22L",
+    "pos": [
+      4010,
+      230,
+      640
+    ],
+    "target": [
+      4650,
+      15,
+      -820
+    ],
+    "hour": 12.8,
+    "note": "Threshold, touchdown zone and centreline markings, and the pavement tone against the infield grass."
+  },
+  {
+    "id": "logan-taxi-wide",
+    "title": "Logan apron, taxi route and threshold together",
+    "pos": [
+      4550,
+      260,
+      -700
+    ],
+    "target": [
+      4250,
+      10,
+      -200
+    ],
+    "hour": 13.5,
+    "note": "The wide read of the airfield: apron, taxiways and runway in one frame, where pale patches show up."
   }
 ]
