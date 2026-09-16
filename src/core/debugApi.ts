@@ -61,6 +61,30 @@ export function installDebugApi(app: App): void {
       ctx.camera.position.set(pos[0], pos[1], pos[2]);
       ctx.camera.lookAt(new THREE.Vector3(target[0], target[1], target[2]));
       ctx.camera.updateMatrixWorld(true);
+
+      // Say so when the pose is on or under the deck.
+      //
+      // `setView` deliberately bypasses the rig, and the rig is the thing that
+      // clamps the camera above the ground -- orbit slides along the terrain,
+      // fly holds 1.6 m. So a QA pose can sit below the surface, and then the
+      // lower part of the frame looks *underneath* the world, where there is no
+      // geometry, and fills with the clear colour. That reads as a large flat
+      // untextured region exactly matching the fog colour, it survives every
+      // layer toggle, and `pick` returns nothing for it -- which is a very
+      // convincing impression of a terrain or water bug. It cost a long
+      // investigation once; a pose 17 cm above the Common's grass was all it
+      // was.
+      const g = ctx.sampleHeight?.(pos[0], pos[2]);
+      if (Number.isFinite(g)) {
+        const agl = pos[1] - (g as number);
+        if (agl < 1.2) {
+          console.warn(
+            `[debug] setView is ${agl.toFixed(2)} m above ground (${(g as number).toFixed(2)} m) `
+            + 'at this position: the frame will show the void under the world. '
+            + 'Raise the camera.',
+          );
+        }
+      }
     },
     setTime(hour, dayOfYear) {
       ctx.timeOfDay = hour;
@@ -122,6 +146,10 @@ export function installDebugApi(app: App): void {
         });
       }
       return {
+        agl: (() => {
+          const g = ctx.sampleHeight?.(ctx.camera.position.x, ctx.camera.position.z);
+          return Number.isFinite(g) ? +(ctx.camera.position.y - (g as number)).toFixed(2) : -1;
+        })(),
         exposure: ctx.exposure,
         exposureBase: ctx.renderer.toneMappingExposure,
         sunIntensity: ctx.sun.intensity,
