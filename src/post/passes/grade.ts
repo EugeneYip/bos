@@ -176,7 +176,20 @@ void main() {
   //
   // A power about the same pivot has the same slope there, so the look through
   // the midtones is unchanged, but it only reaches zero at zero.
-  graded = uContrastPivot * pow(max(graded, vec3(1e-6)) / uContrastPivot, vec3(uContrast));
+  //
+  // But a power about the pivot lifts the *very* bottom proportionally the
+  // most, and water needs genuinely dark values to read as water at all: the
+  // Charles lost its mirrored bank and its sky streaks when its darkest
+  // pixels went from 0 to 12, because those streaks were reading against
+  // black. So the line is kept wherever it was never the problem -- from
+  // about 0.04 up, which is everything from the deep midtones to the
+  // highlights -- and the power only takes over underneath it, where the line
+  // used to cross zero and clip. Blended on luma rather than per channel, or
+  // the crossover tints the deepest shadows.
+  vec3 line = (graded - uContrastPivot) * uContrast + uContrastPivot;
+  vec3 curve = uContrastPivot * pow(max(graded, vec3(1e-6)) / uContrastPivot, vec3(uContrast));
+  graded = mix(curve, line, smoothstep(0.0, 0.04, luma(graded)));
+  graded = max(graded, vec3(0.0));
 
   // Split toning.
   float lum = luma(graded);
