@@ -34,6 +34,9 @@ export class App {
    * four shadow cascades can afford their own screen's resolution.
    */
   private resolution: number | null = null;
+  /** One second of frame times at 60 Hz, for a frame rate that means something. */
+  private frameTimes = new Float32Array(60);
+  private frameCursor = 0;
 
   constructor(readonly canvas: HTMLCanvasElement, tierOverride?: QualityTier) {
     const renderer = new THREE.WebGLRenderer({
@@ -186,7 +189,19 @@ export class App {
     if (this.renderOverride) this.renderOverride(dt);
     else renderer.render(this.ctx.scene, this.ctx.camera);
 
-    this.ctx.stats.fps = Math.round(1 / Math.max(dt, 1e-4));
+    // A single frame's reciprocal is not a frame rate. Reported raw, this stat
+    // gave 10 and 60 for the same viewpoint on consecutive runs and sent me
+    // chasing performance regressions that were not there. Track the mean and
+    // the worst of a rolling second instead: `fps` is what it feels like, and
+    // `fps.low` is the hitch you actually notice.
+    const f = this.frameTimes;
+    f[this.frameCursor++ % f.length] = Math.max(dt, 1e-4);
+    const n = Math.min(this.frameCursor, f.length);
+    let sum = 0;
+    let worst = 0;
+    for (let i = 0; i < n; i++) { sum += f[i]; if (f[i] > worst) worst = f[i]; }
+    this.ctx.stats.fps = Math.round(n / sum);
+    this.ctx.stats['fps.low'] = Math.round(1 / worst);
     this.ctx.stats.calls = renderer.info.render.calls;
     this.ctx.stats.tris = renderer.info.render.triangles;
   };

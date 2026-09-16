@@ -58,12 +58,19 @@ export class GpuTimer {
   }
 
   begin(): void {
+    // One TIME_ELAPSED query per context, and the post chain has its own timer
+    // bracketing the whole scene render — which this sits inside. Without the
+    // shared lock this query is refused and the post chain's `end` closes
+    // whichever one happens to be open, corrupting both.
+    const busy = (this.gl as WebGL2RenderingContext & { __bosTimerBusy?: boolean }).__bosTimerBusy;
+    if (busy) return;
     const gl = this.gl;
     if (!gl || !this.ext || this.active) return;
     if (this.inFlight.length >= this.budget) return;
     const q = this.pool.pop() ?? gl.createQuery();
     if (!q) return;
     gl.beginQuery(this.ext.TIME_ELAPSED_EXT, q);
+    (gl as WebGL2RenderingContext & { __bosTimerBusy?: boolean }).__bosTimerBusy = true;
     this.inFlight.push({ query: q, frame: this.frame });
     this.openThisFrame++;
     this.active = true;
@@ -73,6 +80,7 @@ export class GpuTimer {
     const gl = this.gl;
     if (!gl || !this.ext || !this.active) return;
     gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    (gl as WebGL2RenderingContext & { __bosTimerBusy?: boolean }).__bosTimerBusy = false;
     this.active = false;
   }
 

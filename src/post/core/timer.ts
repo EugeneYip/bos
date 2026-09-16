@@ -28,6 +28,8 @@ export class GpuTimer {
   readonly ms = new Map<string, number>();
   private cpuStart = 0;
   private cpuLabel = '';
+  /** Nesting depth, so an inner `end` cannot close an outer query. */
+  private depth = 0;
   readonly cpuMs = new Map<string, number>();
 
   constructor(renderer: THREE.WebGLRenderer) {
@@ -40,10 +42,21 @@ export class GpuTimer {
   begin(label: string): void {
     this.cpuLabel = label;
     this.cpuStart = performance.now();
-    if (!this.ext || this.active) return;
-    const q = this.pool.pop() ?? this.gl.createQuery();
+    this.depth++;
+    if (!this.ext || this.depth > 1) return;
+    // WebGL2 allows exactly one TIME_ELAPSED query in flight per context, and
+    // this app has two timers on one context: this one and the water module's,
+    // which brackets its own draws from `onBeforeRender`. Nested begins used to
+    // silently no-op while their matching `end` closed the *outer* query, so
+    // labels measured other passes' spans and the sum came out at 125 ms of
+    // "passes" inside a 50 ms frame. The lock lives on the context because the
+    // two timers are in different modules and must not import each other.
+    const gl = this.gl as WebGL2RenderingContext & { __bosTimerBusy?: boolean };
+    if (gl.__bosTimerBusy) return;
+    const q = this.pool.pop() ?? gl.createQuery();
     if (!q) return;
-    this.gl.beginQuery(this.ext.TIME_ELAPSED_EXT, q);
+    gl.beginQuery(this.ext.TIME_ELAPSED_EXT, q);
+    gl.__bosTimerBusy = true;
     this.active = { label, query: q, frame: this.frame };
   }
 
@@ -54,8 +67,11 @@ export class GpuTimer {
       this.cpuMs.set(this.cpuLabel, prev + (dt - prev) * 0.1);
       this.cpuLabel = '';
     }
-    if (!this.ext || !this.active) return;
-    this.gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    this.depth = Math.max(0, this.depth - 1);
+    if (!this.ext || this.depth > 0 || !this.active) return;
+    const gl = this.gl as WebGL2RenderingContext & { __bosTimerBusy?: boolean };
+    gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    gl.__bosTimerBusy = false;
     this.pending.push(this.active);
     this.active = null;
   }
@@ -87,6 +103,12 @@ export class GpuTimer {
     }
   }
 
+  /**
+   * Sum of the per-pass timings. This is *not* frame time: the passes do not
+   * cover the whole frame, and a pass that never got a query because another
+   * timer held the context contributes nothing. Read it as "what the passes
+   * we measured cost between them", and distrust it against a frame budget.
+   */
   total(exclude: string[] = []): number {
     let t = 0;
     for (const [k, v] of this.ms) if (!exclude.includes(k)) t += v;
