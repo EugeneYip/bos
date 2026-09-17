@@ -1,0 +1,30 @@
+#!/bin/sh
+# Refuse a commit that does not compile.
+#
+# A backtick inside a GLSL comment inside a TypeScript template literal is a
+# TS1005 syntax error. It has broken this repo's build SIX times, and once
+# reached GitHub Pages as a failed deploy, because the check that was supposed
+# to catch it was written as:
+#
+#     npx tsc --noEmit | head -3 && git commit ...
+#
+# which takes `head`'s exit status -- always 0 -- and commits anyway. A hook
+# cannot be bypassed by pipeline-ordering mistakes, so the check lives here
+# instead of in everyone's muscle memory. Use single quotes in shader comments.
+#
+# Skips itself when no TypeScript is staged, so doc and QA-tool commits stay
+# fast. `git commit --no-verify` still overrides, for a deliberate WIP commit.
+
+if ! git diff --cached --name-only --diff-filter=ACM | grep -qE '\.tsx?$'; then
+  exit 0
+fi
+
+echo "pre-commit: npx tsc --noEmit"
+if ! npx tsc --noEmit; then
+  echo ""
+  echo "pre-commit: REFUSED -- the tree does not typecheck (see errors above)."
+  echo "pre-commit: a stray backtick in a GLSL comment inside a template"
+  echo "pre-commit: literal is the usual cause; use single quotes there."
+  echo "pre-commit: to commit anyway: git commit --no-verify"
+  exit 1
+fi
