@@ -61,19 +61,41 @@ eviction fixed, that transient is on the wrong side of a phone's ceiling.
 
 So buildings are probably not the leak, or not all of it.
 
+## Eliminated by inspection (no machine needed)
+
+- **CDLOD terrain.** `Terrain.dispose` frees `this.geometry` — singular. This
+  implementation draws ONE grid patch many times with different uniforms,
+  which is the standard CDLOD arrangement, so it creates no per-tile
+  geometries at all. It was my first suspect and it is wrong.
+- **Roads.** `evict(map, budget)` removes the group from its parent AND calls
+  `disposeGroup(g)`, and it is budget-bounded per tier (`BASE_BUDGET`,
+  `DETAIL_BUDGET`, `MICRO_BUDGET`). Correct.
+- **Water.** Chunks are built once in `init` from the OSM rings; there is no
+  streaming path, so the set is fixed and cannot grow.
+
 ## Where to look next
 
 `geometries` is a renderer-wide count, and at `?safe=1` Vegetation, Props and
 Traffic are all still registered (only level 2 drops them). Candidates, in
 order:
 
-1. **CDLOD terrain tiles.** A quadtree that builds tiles as the camera moves
-   and caches them without a bound is the classic shape of exactly this graph.
-2. **Roads base tiles** — `Roads` has `plan`/`evict` on mobile with
-   `BASE_RANGE = 1600` and `BASE_BUDGET = 16`; check `evict` actually disposes.
-3. **Water chunks** — `water:chunk` / `water:skirt` meshes.
-4. Vegetation and Props, which at safe 1 are present and are the two modules
-   whose instanced meshes are rebuilt rather than streamed.
+With terrain, roads and water cleared above, what is left is:
+
+1. **Buildings.** `reconcile` and `unloadShard` both read correctly, but each
+   shard assembles into MANY tile meshes (18 shards produced 142 tiles at
+   boot), and the tile count is what grows. Worth checking that `unloadShard`
+   is reached at all on this camera path: `reconcile` only runs when
+   `streamCountdown` has expired AND the camera has moved 150 m, and the
+   keep-radius at safe 1 is `0.65 * 1600 + 700 = 1740 m` against a flight that
+   puts the far side of the circle 2400 m away. It should evict. Verify rather
+   than assume — that pair of conditions is the only place a correct-looking
+   `unloadShard` never gets called.
+2. **Traffic**, present at safe 1, with 28,517 lane edges and vehicles in
+   instanced meshes.
+3. **Vegetation and Props**, present at safe 1; both build instanced meshes
+   once rather than streaming, so they are a weaker fit for growth over time.
+
+Do not guess between these — `_retainwho.mjs` names the module in one run.
 
 `qa/_retainwho.mjs` is written and ready: it groups resident geometry by the
 mesh-name prefix before the first `:` (this repo's convention — `buildings:`,
