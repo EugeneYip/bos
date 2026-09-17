@@ -370,7 +370,7 @@ export class Water implements WorldModule {
         // (body, reflection+sky, specular, foam) and
         // (city glow, aerial perspective, false-colour view, spare).
         uDbg: { value: new THREE.Vector4(1, 1, 1, 1) },
-        uDbg2: { value: new THREE.Vector4(1, 1, 0, 0) },
+        uDbg2: { value: new THREE.Vector4(1, 1, 0, 1) },
       },
     });
     // Opt into the shared atmosphere. A ShaderMaterial gets none of three's

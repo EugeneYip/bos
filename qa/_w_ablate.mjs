@@ -9,7 +9,7 @@
  * is printed with every shot: divide out, or compare regions inside one arm.
  *
  *   POSE='{"pos":[...],"target":[...],"hour":21.5}' \
- *   ARMS='[["base",{}],["noglow",{"uDbg2":[0,1,0,0]}]]' \
+ *   ARMS='[["base",{}],["noglow",{"uDbg2":[0,1,0,0.78]}]]' \
  *   QA_OUTDIR=dist-w QA_PORT=4413 TIER=high OUT=/tmp/ab node qa/_w_ablate.mjs
  */
 import { spawn } from 'node:child_process';
@@ -57,7 +57,7 @@ await pg.evaluate(() => window.__debug.settle(60));
 for (const [name, sets] of ARMS) {
   await pg.evaluate((s) => {
     window.__water.set('uDbg', [1, 1, 1, 1]);
-    window.__water.set('uDbg2', [1, 1, 0, 0]);
+    window.__water.set('uDbg2', [1, 1, 0, 1]);
     window.__water.set('uReflStrength', 1);
     for (const [k, v] of Object.entries(s)) window.__water.set(k, v);
   }, sets);

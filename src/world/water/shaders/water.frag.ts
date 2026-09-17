@@ -378,6 +378,69 @@ void main() {
   // hour the water matters most and it was the hour that was wrong.
   float authored = clamp(uEnvIntensity, 0.04, 1.25);
 
+  // ------------------------------------------------------------- body ----
+  //
+  // Computed before the reflection, not after, because the reflection needs
+  // it: at a grazing angle most of what a wave face mirrors is *other water*,
+  // and the only honest colour for that is the body colour of the water it
+  // is looking at. See the inter-reflection term below.
+  //
+  // Path length through the water for the refracted ray, clamped so a
+  // grazing view does not integrate kilometres of absorption.
+  float dclamp = max(depth, 0.05);
+  float path = min(dclamp / max(NoV, 0.12), 26.0);
+
+  vec3 absorb = mix(uAbsorbA, uAbsorbB, murk);
+  vec3 scatter = mix(uScatterA, uScatterB, murk);
+  vec3 bedCol = mix(uBedA, uBedB, murk);
+  vec3 siltCol = mix(uSiltA, uSiltB, murk);
+
+  vec3 trans = exp(-absorb * path);
+  float sunUp = clamp(uSunDir.y, 0.0, 1.0);
+  // Downwelling *irradiance*. Everything below scatters it back diffusely, so
+  // it converts to radiance the same way every other Lambertian surface in the
+  // city does — rho * E / PI, three's 'BRDF_Lambert'. This shader was written
+  // without the 1/PI, which made the water PI times brighter than the land for
+  // the same nominal albedo. At a grazing angle Fresnel hides that; from the
+  // air, where the body is ninety-seven per cent of the pixel, it does not,
+  // and the Charles read as a sheet of pale sage paint laid over the basin.
+  vec3 down = (uSunColor * sunUp + uSkyAmbient) * RECIPROCAL_PI;
+  vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
+
+  // Depth reads as colour, not just as darkness: the channel is deep and
+  // green, the margins are a shallow, silty, distinctly browner band. On the
+  // Charles that band is tannin; in the harbour it is mud stirred by the tide.
+  // The onset has to sit below the bed the terrain actually carves: the
+  // Charles bottoms out near 3.6 m, so a 2.6 m threshold made the entire
+  // basin silt and it read as pale tan from the air instead of green.
+  float shallow = smoothstep(mix(1.1, 4.0, fetch), 0.3, dclamp);
+  body = mix(body, siltCol * down, shallow * 0.72);
+  // A slow silt plume so the shallows are not a clean contour line — and, at a
+  // fifth of the strength, everywhere else as well. Suspended sediment is
+  // patchy across a whole basin, and from altitude that patchiness is the only
+  // structure the water has: the ripples are long since sub-pixel and Fresnel
+  // is down at two per cent, so without it the river is a solid fill.
+  float silty = smoothstep(0.55, 1.0, shallow);
+  if (silty > 0.002) {
+    float plume = texture2D(uNoise, p * 0.00055 + wind * uTime * 0.0004).b;
+    body = mix(body, siltCol * down * 1.12, silty * plume * 0.45);
+  }
+  // Across the open basin the patchiness rides on 'swell' — the wind field's
+  // ~1.4 km octave, already computed above and otherwise unused here. It costs
+  // nothing and, unlike another tap into the ripple atlas, it does not tile:
+  // that atlas repeats every 1.8 km at the frequency this wants, and laid a
+  // visible chequerboard the length of the Charles.
+  body *= 1.0 + (wf.z - 0.5) * 0.36 * (1.0 - 0.45 * fetch);
+
+  // Sunlight that made it through a crest and back out toward the eye. Only a
+  // thin, back-lit, raised crest does this, which is why it reads as the wave
+  // *shape* rather than as a wash: it picks out the top few centimetres of
+  // whatever is between you and a low sun.
+  vec3 L = normalize(uSunDir);
+  float back = pow(clamp(dot(V, -normalize(L + N * 0.45)), 0.0, 1.0), 3.0);
+  float lift = clamp(0.35 + 0.65 * vCrest, 0.0, 1.0) * clamp(1.0 - 2.4 * uSunDir.y, 0.0, 1.0);
+  body += scatter * uSunColor * (back * lift * 1.6);
+
   // -------------------------------------------------------- reflection ----
   vec3 Rraw = reflect(-V, N);
   vec3 R = Rraw;
@@ -436,9 +499,39 @@ void main() {
   // dark, streaky matte it is. Because the occluded fraction is driven by
   // roughness, it also hands the gust cells the internal structure they were
   // missing: the rough patches go matte and dark, the slicks stay bright.
-  float cone = 0.75 * rough + 0.015;
+  // How much of the lobe that is. The Beckmann rms facet slope is about
+  // 0.9 * rough and tilting a facet by s turns the mirror ray by 2s, so the
+  // reflected lobe has an rms angular spread near 1.8 * rough; approximating
+  // its cumulative by a linear ramp of half-width 1.25 sigma puts the ramp at
+  // 2.25 * rough, plus a floor so a dead-flat slick still has a width. The
+  // old 0.75 * rough was a third of that and had no derivation behind it.
+  float cone = 2.25 * rough + 0.02;
   float below = clamp(0.5 - Rraw.y * (0.5 / cone), 0.0, 1.0);
-  sky *= 1.0 - 0.55 * below;
+
+  // What that part of the cone actually sees is the *next wave*, and a wave
+  // seen from above is its own body colour with a little sky in it. Scaling
+  // the sky down by (1 - 0.55 * below), which is what this used to do, gets
+  // the darkening right and the hue wrong: it leaves a grey-blue wash where
+  // the water is olive-green.
+  //
+  // It matters most where there is no planar pass to overrule it. At 'low'
+  // the Charles had nothing in its mirror but horizon sky, and measured
+  // *brighter* than the same view at 'high' — 76.9 against 66.5 mean luma
+  // with the sky pinned at 93 in both — because the mirror at 'high' is full
+  // of dark far bank and the analytic sky is not. A grey plate, in other
+  // words, and the env probe cannot help: it is the sky dome's own radiance
+  // function rendered to an equirect (see 'EnvProbe'), so it contains no
+  // ground at all. One bounce of the water against itself is the only thing
+  // available, and it is also the physically right one.
+  //
+  // Where the planar pass does have geometry this is replaced by 'cov'
+  // below, so no tier is paying for it twice.
+  vec3 inter = body * authored + sky * 0.12;
+  float interW = 1.0;
+#ifdef WATER_DEBUG
+  interW = uDbg2.w;
+#endif
+  sky = mix(sky, inter, interW * below);
 
 #if WATER_PLANAR == 1
   if (uReflStrength > 0.001) {
@@ -475,63 +568,6 @@ void main() {
     sky = sky * (1.0 - cov) + refl.rgb * w;
   }
 #endif
-
-  // ------------------------------------------------------------- body ----
-  // Path length through the water for the refracted ray, clamped so a
-  // grazing view does not integrate kilometres of absorption.
-  float dclamp = max(depth, 0.05);
-  float path = min(dclamp / max(NoV, 0.12), 26.0);
-
-  vec3 absorb = mix(uAbsorbA, uAbsorbB, murk);
-  vec3 scatter = mix(uScatterA, uScatterB, murk);
-  vec3 bedCol = mix(uBedA, uBedB, murk);
-  vec3 siltCol = mix(uSiltA, uSiltB, murk);
-
-  vec3 trans = exp(-absorb * path);
-  float sunUp = clamp(uSunDir.y, 0.0, 1.0);
-  // Downwelling *irradiance*. Everything below scatters it back diffusely, so
-  // it converts to radiance the same way every other Lambertian surface in the
-  // city does — rho * E / PI, three's 'BRDF_Lambert'. This shader was written
-  // without the 1/PI, which made the water PI times brighter than the land for
-  // the same nominal albedo. At a grazing angle Fresnel hides that; from the
-  // air, where the body is ninety-seven per cent of the pixel, it does not,
-  // and the Charles read as a sheet of pale sage paint laid over the basin.
-  vec3 down = (uSunColor * sunUp + uSkyAmbient) * RECIPROCAL_PI;
-  vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
-
-  // Depth reads as colour, not just as darkness: the channel is deep and
-  // green, the margins are a shallow, silty, distinctly browner band. On the
-  // Charles that band is tannin; in the harbour it is mud stirred by the tide.
-  // The onset has to sit below the bed the terrain actually carves: the
-  // Charles bottoms out near 3.6 m, so a 2.6 m threshold made the entire
-  // basin silt and it read as pale tan from the air instead of green.
-  float shallow = smoothstep(mix(1.1, 4.0, fetch), 0.3, dclamp);
-  body = mix(body, siltCol * down, shallow * 0.72);
-  // A slow silt plume so the shallows are not a clean contour line — and, at a
-  // fifth of the strength, everywhere else as well. Suspended sediment is
-  // patchy across a whole basin, and from altitude that patchiness is the only
-  // structure the water has: the ripples are long since sub-pixel and Fresnel
-  // is down at two per cent, so without it the river is a solid fill.
-  float silty = smoothstep(0.55, 1.0, shallow);
-  if (silty > 0.002) {
-    float plume = texture2D(uNoise, p * 0.00055 + wind * uTime * 0.0004).b;
-    body = mix(body, siltCol * down * 1.12, silty * plume * 0.45);
-  }
-  // Across the open basin the patchiness rides on 'swell' — the wind field's
-  // ~1.4 km octave, already computed above and otherwise unused here. It costs
-  // nothing and, unlike another tap into the ripple atlas, it does not tile:
-  // that atlas repeats every 1.8 km at the frequency this wants, and laid a
-  // visible chequerboard the length of the Charles.
-  body *= 1.0 + (wf.z - 0.5) * 0.36 * (1.0 - 0.45 * fetch);
-
-  // Sunlight that made it through a crest and back out toward the eye. Only a
-  // thin, back-lit, raised crest does this, which is why it reads as the wave
-  // *shape* rather than as a wash: it picks out the top few centimetres of
-  // whatever is between you and a low sun.
-  vec3 L = normalize(uSunDir);
-  float back = pow(clamp(dot(V, -normalize(L + N * 0.45)), 0.0, 1.0), 3.0);
-  float lift = clamp(0.35 + 0.65 * vCrest, 0.0, 1.0) * clamp(1.0 - 2.4 * uSunDir.y, 0.0, 1.0);
-  body += scatter * uSunColor * (back * lift * 1.6);
 
   // ----------------------------------------------------------- fresnel ----
   float fres = fresnelWater(NoV, rough);
