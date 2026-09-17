@@ -7,6 +7,8 @@ import { buildLaneGraph, sampleEdge, LANE_W, type LaneGraph, type NoDrive } from
 import {
   vehicleTypes, pedestrianGeometry, CAR_COLORS, CLOTHES,
   WHEEL_VERT_PARS, WHEEL_VERT_POS, WHEEL_VERT_NRM, WALK_VERT_PARS, WALK_VERT_POS,
+  SHELL_FRAG_PARS, SHELL_FRAG_COLOR, SHELL_FRAG_ROUGH, SHELL_FRAG_METAL,
+  SHELL_FRAG_LIGHT, GLASS_FRAG_PARS, GLASS_FRAG_LIGHT,
   type Part, type VehicleDef,
 } from './traffic/vehicles';
 import {
@@ -291,6 +293,33 @@ export class Traffic implements WorldModule {
   private lampUniforms = {
     uNight: { value: 0 }, uBrake: { value: 0 }, uTime: { value: 0 }, uIndicator: { value: 0 },
   };
+  /**
+   * How much sky and how much street lamp the clear coat over a car's paint
+   * throws back. Shared by every shell material so one write reaches the
+   * whole fleet, and separate from each other because the two are wrong in
+   * opposite directions: the sky tap sits on top of an image-based
+   * reflection that already exists by day, so it stays small, while the lamp
+   * tap is the only specular a car gets after dark and carries the whole of
+   * the night-time fix.
+   *
+   * 2.5 is an effective normal-incidence reflectance of 0.10 against paint's
+   * true 0.04, and it is deliberate. `skyStreetLight` is a *pool*: one number
+   * for the whole hemisphere, with the lamp head, the lit shopfront and the
+   * dark sky above all averaged into it. A real highlight is a small bright
+   * source and reads several times the average, so a physically exact
+   * coefficient against an averaged field gives a car that is still mostly
+   * unlit. Swept at 0/1/2/4/8/16 against a fixed maroon pickup at 9 m under
+   * the Washington Street shopfronts: the share of its pixels with a dead
+   * green and blue channel went 70 / 59 / 5.6 / 0.04 / 0 / 0, and its
+   * brightness relative to the road beside it went 0.19 / 0.75 / 1.19 / 2.0 /
+   * 3.0 / 4.0. Past 4 the paint loses its colour (saturation 0.52 and
+   * falling) and the car reads as a white block, which is the same defect
+   * from the other side.
+   */
+  private coatUniforms = {
+    uCoatSky: { value: 0.45 }, uCoatLamp: { value: 2.5 },
+    uGlassSky: { value: 1.3 }, uGlassLamp: { value: 3.4 },
+  };
 
   private materials: THREE.Material[] = [];
   private nightLit: THREE.MeshStandardMaterial[] = [];
@@ -481,9 +510,28 @@ export class Traffic implements WorldModule {
       return m;
     };
     switch (part) {
-      case 'glass':
-        return mk({ name: 'car:glass', color: 0x0d1318, roughness: 0.08, metalness: 0.55,
-          envMapIntensity: 1.6 });
+      case 'glass': {
+        // A windscreen is not a black rectangle. The stock path gave it one
+        // because the only thing that could have lit it is image-based
+        // lighting, and after dark the environment probe is the night sky —
+        // near enough black. So the glazing on every car in the city rendered
+        // as its own base colour and nothing else, which is 0x0d1318, which
+        // is black. The sky-view table and the street-lamp field are both
+        // right there in the fragment stage; a Fresnel-weighted tap of each
+        // is the whole of the fix.
+        const m = mk({ name: 'car:glass', color: 0x0b0f14, roughness: 0.055, metalness: 0.0,
+          envMapIntensity: 2.0 });
+        m.onBeforeCompile = (sh) => {
+          sh.uniforms.uGlassSky = this.coatUniforms.uGlassSky;
+          sh.uniforms.uGlassLamp = this.coatUniforms.uGlassLamp;
+          sh.fragmentShader = sh.fragmentShader
+            .replace('#include <common>', `#include <common>\n${GLASS_FRAG_PARS}`)
+            .replace('#include <lights_fragment_end>',
+              `#include <lights_fragment_end>\n${GLASS_FRAG_LIGHT}`);
+        };
+        m.customProgramCacheKey = () => 'car-glass';
+        return m;
+      }
       case 'light': {
         // One mesh for both ends. `aTail` splits them in the fragment stage so
         // headlamps read warm-white, tail lamps red, and the reds flare under
@@ -537,18 +585,44 @@ export class Traffic implements WorldModule {
         // Painted bodywork, with trim and tyres baked dark into the vertex
         // colour so the per-instance tint only reaches the panels. The wheels
         // roll and steer from `aRoll`/`aSteer`.
+        //
+        // `metalness` was 0.35 here, uniformly, for paint and rubber and
+        // alloy alike. Painted steel is a dielectric under a clear coat: a
+        // third of a metal's behaviour makes its specular reflection take the
+        // body colour, so every highlight a car could have had came back the
+        // same red as the paint. Put that together with there being no
+        // specular response to street lighting at all — the sky module adds
+        // its lamp field to the diffuse gather and nothing else — and a
+        // maroon van at night has a red diffuse term, a red specular term,
+        // and nothing achromatic anywhere. It measured (50-66, 1, 1).
+        //
+        // So: metalness and roughness now come off `aSurf` per vertex, the
+        // material's own values are only the fallback, and the coat adds a
+        // Fresnel-weighted tap of the sky-view table and of the street-lamp
+        // field to the indirect specular.
         {
           const m = mk({
             name: 'car:shell',
             color: fixed ?? 0xffffff,
-            roughness: 0.28, metalness: 0.35, envMapIntensity: 1.3,
+            roughness: 0.34, metalness: 0.04, envMapIntensity: 1.5,
             vertexColors: true,
           });
           m.onBeforeCompile = (sh) => {
+            sh.uniforms.uCoatSky = this.coatUniforms.uCoatSky;
+            sh.uniforms.uCoatLamp = this.coatUniforms.uCoatLamp;
             sh.vertexShader = sh.vertexShader
               .replace('#include <common>', `#include <common>\n${WHEEL_VERT_PARS}`)
               .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>\n${WHEEL_VERT_NRM}`)
               .replace('#include <begin_vertex>', `#include <begin_vertex>\n${WHEEL_VERT_POS}`);
+            sh.fragmentShader = sh.fragmentShader
+              .replace('#include <common>', `#include <common>\n${SHELL_FRAG_PARS}`)
+              .replace('#include <color_fragment>', `#include <color_fragment>\n${SHELL_FRAG_COLOR}`)
+              .replace('#include <roughnessmap_fragment>',
+                `#include <roughnessmap_fragment>\n${SHELL_FRAG_ROUGH}`)
+              .replace('#include <metalnessmap_fragment>',
+                `#include <metalnessmap_fragment>\n${SHELL_FRAG_METAL}`)
+              .replace('#include <lights_fragment_end>',
+                `#include <lights_fragment_end>\n${SHELL_FRAG_LIGHT}`);
           };
           m.customProgramCacheKey = () => 'car-shell';
           return m;

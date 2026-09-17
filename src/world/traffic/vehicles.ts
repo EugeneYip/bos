@@ -76,6 +76,74 @@ function markWheel(g: THREE.BufferGeometry, kind: number, cx: number, cy: number
   return g;
 }
 
+/** What the one shell material should do with a vertex; see {@link surf}. */
+export const enum Kind {
+  /** Sprayed bodywork: takes the per-instance colour, the clear coat, and
+   *  the procedural shut lines. */
+  paint = 0,
+  /** Bumpers, sills, arch lips, underbody: matte and unlit by the coat. */
+  trim = 1,
+  /** Tyre carcass and tread. */
+  tyre = 2,
+  /** The outward face of a wheel, where the rim pattern is drawn. */
+  rim = 3,
+  /** Livery bands and roof bars: painted, but no panel gaps across them. */
+  accent = 4,
+}
+
+/**
+ * Per-vertex surface description: `(metalness, roughness, clearcoat, kind)`.
+ *
+ * One material draws the whole shell, so the difference between wet paint, a
+ * rubber tyre and an alloy rim has to travel on the geometry. Metalness is the
+ * important one and it used to be a single 0.35 for all of it: painted steel
+ * is a *dielectric* under a clear coat, and giving it a third of a metal's
+ * behaviour tints its specular with its own body colour. That is what made a
+ * maroon car under warm street lighting come out with no green and no blue in
+ * it at all — every path that could have put an achromatic highlight on it was
+ * either off (there is no specular response to the street-lamp field) or
+ * painted the same red as the paint.
+ */
+function surf(
+  g: THREE.BufferGeometry, metal: number, rough: number, coat: number, kind: Kind,
+): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count;
+  const a = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    a[i * 4] = metal; a[i * 4 + 1] = rough; a[i * 4 + 2] = coat; a[i * 4 + 3] = kind;
+  }
+  g.setAttribute('aSurf', new THREE.Float32BufferAttribute(a, 4));
+  return g;
+}
+
+/**
+ * Where a body vertex sits inside the vehicle's own bounding box, as
+ * (-1..1 along, 0..1 up, -1..1 across).
+ *
+ * It rides in `aWheelC`, which body vertices otherwise leave at zero, because
+ * a fifth attribute stream on a mesh drawn a thousand times is not free and
+ * this one is only ever read where the other is not written. It buys the shut
+ * lines, the waist crease and the rocker shading in the fragment stage, at no
+ * triangles and no texture — and panel gaps were the first thing named in the
+ * list of what a vehicle here does not have.
+ */
+function markBody(
+  g: THREE.BufferGeometry, halfLen: number, totalH: number, halfWid: number,
+): THREE.BufferGeometry {
+  const p = g.getAttribute('position');
+  const n = p.count;
+  const k = new Float32Array(n);
+  const c = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    c[i * 3] = p.getX(i) / halfLen;
+    c[i * 3 + 1] = p.getY(i) / totalH;
+    c[i * 3 + 2] = p.getZ(i) / halfWid;
+  }
+  g.setAttribute('aWheel', new THREE.Float32BufferAttribute(k, 1));
+  g.setAttribute('aWheelC', new THREE.Float32BufferAttribute(c, 3));
+  return g;
+}
+
 /**
  * Give a lamp cluster its end tag (0 = headlamp, 1 = tail lamp) and which
  * side of the vehicle it sits on (-1 left, 0 on the centreline, +1 right, in
@@ -158,37 +226,30 @@ const skirtW = (wid: number, r: number): number =>
  * The outer sidewall is a full-radius disc, because it is the only face of a
  * wheel you ever see: the inner one is inside the bodywork.
  */
-function wheel(x: number, z: number, r: number, kind: number, tyre: number, hub: number): THREE.BufferGeometry[] {
+function wheel(x: number, z: number, r: number, kind: number, tyre: number): THREE.BufferGeometry[] {
   const w = r * TYRE_W;
   const out = z > 0 ? 1 : -1;
   const outer = z + out * w * 0.5;
   const parts: THREE.BufferGeometry[] = [];
 
-  const t = new THREE.CylinderGeometry(r, r, w, 12, 1, true);
+  // Sixteen sides, not twelve: a 0.32 m wheel ten metres away is fifty pixels
+  // across and a dodecagon shows its flats along the top of the tyre.
+  const t = new THREE.CylinderGeometry(r, r, w, 16, 1, true);
   t.rotateX(Math.PI / 2);
   t.translate(x, r, z);
-  parts.push(markWheel(tint(t, tyre), kind, x, r, z));
+  parts.push(markWheel(surf(tint(t, tyre), 0, 0.93, 0, Kind.tyre), kind, x, r, z));
 
-  // Sidewall, facing outboard.
-  const side = new THREE.CircleGeometry(r, 12);
+  // Sidewall, facing outboard. The rim, its spokes and the hub used to be a
+  // pale disc with two dark bars laid across it — the thing the review called
+  // 'a black wheel with an X drawn in it'. They are drawn in the fragment
+  // stage now, from wheel-fixed coordinates this disc carries, which costs no
+  // triangles, turns with the tyre because the disc does, and can afford five
+  // spokes and a rim lip instead of two bars.
+  const side = new THREE.CircleGeometry(r, 16);
   if (out < 0) side.rotateY(Math.PI);
   side.translate(x, r, outer);
-  parts.push(markWheel(tint(side, tyre), kind, x, r, z));
+  parts.push(markWheel(surf(tint(side, 0x2a2c30), 0.55, 0.32, 0, Kind.rim), kind, x, r, z));
 
-  // Hub face, a little proud of the sidewall.
-  const h = new THREE.CircleGeometry(r * 0.52, 10);
-  if (out < 0) h.rotateY(Math.PI);
-  h.translate(x, r, outer + out * 0.006);
-  parts.push(markWheel(tint(h, hub), kind, x, r, z));
-
-  // Two spokes across the hub: the rotation cue at any distance where the
-  // wheel is more than a couple of pixels across.
-  for (const a of [0, Math.PI / 2]) {
-    const s = new THREE.BoxGeometry(r * 0.94, r * 0.16, 0.014);
-    s.rotateZ(a);
-    s.translate(x, r, outer + out * 0.013);
-    parts.push(markWheel(tint(s, 0x15171a), kind, x, r, z));
-  }
   return parts;
 }
 
@@ -196,8 +257,8 @@ function wheel(x: number, z: number, r: number, kind: number, tyre: number, hub:
 function axles(axleF: number, axleR: number, track: number, r: number, steerFront = true): THREE.BufferGeometry[] {
   const out: THREE.BufferGeometry[] = [];
   for (const z of [-track / 2, track / 2]) {
-    out.push(...wheel(axleF, z, r, steerFront ? 2 : 1, 0x121316, 0x8f949a));
-    out.push(...wheel(axleR, z, r, 1, 0x121316, 0x8f949a));
+    out.push(...wheel(axleF, z, r, steerFront ? 2 : 1, 0x121316));
+    out.push(...wheel(axleR, z, r, 1, 0x121316));
   }
   return out;
 }
@@ -240,10 +301,12 @@ function car(
     }
     body.push(taper(0.09, bedH, wid * 0.91, wid * 0.90, -len * 0.5 + 0.06, sill + bodyH));
   }
+  const glassY = sill + bodyH + roofH * 0.20;
+  const glassH = roofH * 0.50;
   const glass: THREE.BufferGeometry[] = [
     // Side glass, windscreen and backlight as one band standing 1 cm proud of
     // the cabin, between a painted belt line and a painted roof.
-    taper(cabLen * 0.955, roofH * 0.50, wid * 0.935, wid * 0.845, cabX - len * 0.005, sill + bodyH + roofH * 0.20),
+    taper(cabLen * 0.955, glassH, wid * 0.935, wid * 0.845, cabX - len * 0.005, glassY),
   ];
   const dark: THREE.BufferGeometry[] = [
     // Underbody, inboard of the tyres and low to the road.
@@ -253,6 +316,28 @@ function car(
     box(wheelR * 2.5, 0.055, wid * 1.012, -len * 0.31, sill + 0.005),
     box(0.15, 0.17, wid * 0.90, len * 0.475, sill + 0.06),   // bumpers
     box(0.15, 0.17, wid * 0.90, -len * 0.475, sill + 0.06),
+    // Grille: a dark inset across the nose above the bumper. One box, and
+    // without it the front of every car in the city was a blank painted wall.
+    box(0.06, bodyH * 0.30, wid * 0.62, len * 0.5 + 0.03, sill + bodyH * 0.58),
+  ];
+  // A B-pillar through the glazing. The window band was one continuous slot
+  // from windscreen to backlight, which is the single strongest reason a car
+  // at 10 m read as a box with a stripe painted on it.
+  const pillars: THREE.BufferGeometry[] = [
+    box(0.055, glassH * 1.04, wid * 0.95, cabX - cabLen * 0.06, glassY + glassH * 0.5),
+  ];
+  // Door mirrors. Small, but they are the only part of a car that breaks its
+  // own silhouette, and a shape with no bits sticking out of it does not read
+  // as a machine.
+  const mirrors: THREE.BufferGeometry[] = [];
+  for (const s of [-1, 1]) {
+    mirrors.push(box(0.055, 0.075, 0.13, cabX + cabLen * 0.44, glassY + glassH * 0.62, s * wid * 0.56));
+    mirrors.push(box(0.03, 0.045, 0.075, cabX + cabLen * 0.44, glassY + glassH * 0.62, s * wid * 0.615));
+  }
+  // Number plates, at both ends, above the bumper.
+  const plates: THREE.BufferGeometry[] = [
+    box(0.035, 0.105, 0.44, len * 0.5 + 0.045, sill + 0.19),
+    box(0.035, 0.105, 0.44, -len * 0.5 - 0.045, sill + 0.19),
   ];
   // Head and tail lamps carry both their end (0/1) and which side of the
   // vehicle they sit on, so a shared material can blink an indicator on just
@@ -270,18 +355,22 @@ function car(
     ? box(0.05, 0.05, wid * 0.28, cabX - cabLen * 0.5, sill + bodyH + roofH * 0.80)
     : box(0.05, 0.05, wid * 0.30, -len * 0.5 + 0.02, sill + bodyH + roofH * 0.55), 1, 0));
 
+  const totalH = sill + bodyH + roofH + (lightbar ? 0.09 : 0);
   const bodyParts = [
-    ...body.map((g) => tint(g, 0xffffff)),
-    ...dark.map((g) => tint(g, 0x24262a)),
+    ...body.map((g) => surf(tint(g, 0xffffff), 0.02, 0.30, 1, Kind.paint)),
+    ...pillars.map((g) => surf(tint(g, 0xffffff), 0.02, 0.32, 1, Kind.accent)),
+    ...mirrors.map((g) => surf(tint(g, 0xffffff), 0.02, 0.34, 1, Kind.accent)),
+    ...plates.map((g) => surf(tint(g, 0xdfe0dc), 0.0, 0.55, 0, Kind.accent)),
+    ...dark.map((g) => surf(tint(g, 0x24262a), 0.05, 0.62, 0.15, Kind.trim)),
     // A roof light bar reads as a police car at any distance a badge would
     // not. Painted, not emissive — it shares the shell's one draw call
     // rather than costing the light material a special case.
     ...(lightbar ? [
-      tint(box(0.30, 0.065, wid * 0.62, cabX, sill + bodyH + roofH + 0.01), 0x17181b),
-      tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, -wid * 0.16), 0xb0242a),
-      tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, wid * 0.16), 0x1c3f8f),
+      surf(tint(box(0.30, 0.065, wid * 0.62, cabX, sill + bodyH + roofH + 0.01), 0x17181b), 0.1, 0.5, 0.2, Kind.accent),
+      surf(tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, -wid * 0.16), 0xb0242a), 0, 0.2, 0.6, Kind.accent),
+      surf(tint(box(0.26, 0.075, wid * 0.28, cabX, sill + bodyH + roofH + 0.045, wid * 0.16), 0x1c3f8f), 0, 0.2, 0.6, Kind.accent),
     ] : []),
-  ].map((g) => markWheel(g, 0, 0, 0, 0));
+  ].map((g) => markBody(g, len * 0.5, totalH, wid * 0.5));
 
   // White bodywork takes the per-instance tint; everything else is baked dark
   // so the same instance colour leaves it essentially black.
@@ -336,11 +425,29 @@ function boxVehicle(
   }
   lamps.push(markLamp(box(0.05, 0.06, wid * 0.34, -len * 0.5 + 0.02, sill + h * 0.92), 1, 0));
 
+  // Mirrors stand well out from a van or a bus, and a grille and a plate sit
+  // under the windscreen. Same reasoning as on the cars: three small boxes
+  // are what stop the front of a box vehicle being a blank painted wall.
+  const fittings: THREE.BufferGeometry[] = [
+    box(0.05, h * 0.18, wid * 0.58, len * 0.5 + 0.03, sill + h * 0.42),
+  ];
+  const mirrorArms: THREE.BufferGeometry[] = [];
+  for (const s of [-1, 1]) {
+    mirrorArms.push(box(0.05, 0.30, 0.10, len * 0.5 - 0.10, sill + h * 0.70, s * wid * 0.58));
+  }
+  const plates: THREE.BufferGeometry[] = [
+    box(0.035, 0.11, 0.46, len * 0.5 + 0.05, sill + 0.24),
+    box(0.035, 0.11, 0.46, -len * 0.5 - 0.035, sill + 0.30),
+  ];
+  const totalH = sill + h;
   const bodyParts = [
-    ...body.map((g) => tint(g, 0xffffff)),
-    ...accent.map((g) => tint(g, 0xffc72c)),
-    ...dark.map((g) => tint(g, 0x24262a)),
-  ].map((g) => markWheel(g, 0, 0, 0, 0));
+    ...body.map((g) => surf(tint(g, 0xffffff), 0.02, 0.36, 0.85, Kind.paint)),
+    ...accent.map((g) => surf(tint(g, 0xffc72c), 0.02, 0.40, 0.7, Kind.accent)),
+    ...mirrorArms.map((g) => surf(tint(g, 0x2c2e32), 0.05, 0.45, 0.5, Kind.accent)),
+    ...plates.map((g) => surf(tint(g, 0xdfe0dc), 0.0, 0.55, 0, Kind.accent)),
+    ...fittings.map((g) => surf(tint(g, 0x1e2024), 0.2, 0.5, 0.2, Kind.trim)),
+    ...dark.map((g) => surf(tint(g, 0x24262a), 0.05, 0.62, 0.15, Kind.trim)),
+  ].map((g) => markBody(g, len * 0.5, totalH, wid * 0.5));
 
   return {
     shell: merge([
@@ -348,8 +455,8 @@ function boxVehicle(
       ...axles(len * 0.34, -len * (tandem ? 0.25 : 0.32), track, r),
       // Second rear axle on the heavy types; a panel van has four wheels.
       ...(tandem ? [
-        ...wheel(-len * 0.37, -track * 0.5, r, 1, 0x121316, 0x8f949a),
-        ...wheel(-len * 0.37, track * 0.5, r, 1, 0x121316, 0x8f949a),
+        ...wheel(-len * 0.37, -track * 0.5, r, 1, 0x121316),
+        ...wheel(-len * 0.37, track * 0.5, r, 1, 0x121316),
       ] : []),
     ]),
     glass: merge(glass),
@@ -409,8 +516,11 @@ export const CAR_COLORS: number[] = [
 export const WHEEL_VERT_PARS = /* glsl */ `
 attribute float aWheel;
 attribute vec3 aWheelC;
+attribute vec4 aSurf;
 attribute float aRoll;
 attribute float aSteer;
+varying vec4 vBhSurf;
+varying vec4 vBhLocal;
 void bhWheelSpin(inout vec3 v, float roll, float steer, bool translate) {
   float c = cos(roll), s = sin(roll);
   v.xy = vec2(v.x * c + v.y * s, -v.x * s + v.y * c);
@@ -423,14 +533,158 @@ void bhWheelSpin(inout vec3 v, float roll, float steer, bool translate) {
 `;
 
 export const WHEEL_VERT_POS = /* glsl */ `
+vBhSurf = aSurf;
 if (aWheel > 0.5) {
+  // Wheel-fixed coordinates, normalised by the rolling radius -- which is the
+  // wheel centre's own height above the road, so no extra attribute is needed
+  // to carry it. The rim pattern painted in these turns with the tyre because
+  // the vertices carrying them do.
+  vBhLocal = vec4((transformed - aWheelC) / max(aWheelC.y, 0.05), 0.0);
   transformed -= aWheelC;
   bhWheelSpin(transformed, aRoll, aSteer, true);
+} else {
+  // Body vertices: where they sit in the vehicle's own box, plus how
+  // side-facing they are, which is what selects a flank for a shut line.
+  vBhLocal = vec4(aWheelC, abs(objectNormal.z));
 }
 `;
 
 export const WHEEL_VERT_NRM = /* glsl */ `
 if (aWheel > 0.5) bhWheelSpin(objectNormal, aRoll, aSteer, false);
+`;
+
+/** Declarations the shell's fragment stage needs. */
+export const SHELL_FRAG_PARS = /* glsl */ `
+varying vec4 vBhSurf;
+varying vec4 vBhLocal;
+uniform float uCoatSky;
+uniform float uCoatLamp;
+`;
+
+/** …and the glazing's. */
+export const GLASS_FRAG_PARS = /* glsl */ `
+uniform float uGlassSky;
+uniform float uGlassLamp;
+`;
+
+/**
+ * Roughness and metalness per vertex rather than per material.
+ *
+ * One `InstancedMesh` draws the paint, the bumpers, the alloys and the tyres,
+ * so a single `metalness` on the material has to be wrong for three of them.
+ * It was 0.35 for all of it: too metallic for paint, which is what tinted
+ * every highlight with the body colour, and far too metallic for rubber.
+ */
+export const SHELL_FRAG_ROUGH = /* glsl */ `
+roughnessFactor = vBhSurf.y;
+`;
+export const SHELL_FRAG_METAL = /* glsl */ `
+metalnessFactor = vBhSurf.x;
+`;
+
+/**
+ * Everything the shell's albedo gets that is finer than a vertex.
+ *
+ * Two patterns, both free of triangles and of texture memory, both driven by
+ * coordinates the vertex stage already had to compute:
+ *
+ *   *The wheel face.* Five spokes, a rim lip and a hub, drawn in polar
+ *   coordinates on the outboard sidewall disc. This replaces a pale disc with
+ *   two dark bars laid over it — 34 triangles per wheel that read, accurately,
+ *   as an X scrawled on a black circle.
+ *
+ *   *Panel gaps.* Two door shuts, a waist crease and a darker rocker down
+ *   each flank. A car's flank is otherwise one flat quadrilateral of paint
+ *   several metres long, and nothing else in this model says where the doors
+ *   are.
+ */
+export const SHELL_FRAG_COLOR = /* glsl */ `
+// Kind.rim only: 'greater than 2.5' also caught Kind.accent, which is 4,
+// and painted the alloy pattern across every B-pillar, mirror, plate and
+// livery band on the fleet.
+if (vBhSurf.w > 2.5 && vBhSurf.w < 3.5) {
+  float bhR = length(vBhLocal.xy);
+  float bhA = atan(vBhLocal.y, vBhLocal.x);
+  float bhLobe = abs(cos(bhA * 2.5));
+  float bhDish = smoothstep(0.66, 0.60, bhR) * smoothstep(0.13, 0.17, bhR);
+  float bhSpoke = smoothstep(0.42, 0.72, bhLobe) * bhDish;
+  float bhLip = smoothstep(0.80, 0.72, bhR) - smoothstep(0.68, 0.60, bhR);
+  float bhHub = smoothstep(0.20, 0.15, bhR);
+  vec3 bhAlloy = vec3(0.335, 0.350, 0.372);
+  vec3 bhFace = vec3(0.0105, 0.0112, 0.0125);
+  bhFace = mix(bhFace, bhAlloy * 0.80, clamp(bhSpoke + bhHub, 0.0, 1.0));
+  bhFace = mix(bhFace, bhAlloy, clamp(bhLip, 0.0, 1.0));
+  bhFace = mix(bhFace, vec3(0.016, 0.017, 0.019), smoothstep(0.085, 0.050, bhR));
+  diffuseColor.rgb = bhFace;
+} else if (vBhSurf.w > 1.5) {
+  // Rubber, not a dark shade of the body colour: the tyre used to take the
+  // per-instance tint like everything else, so a red car rolled on red tyres.
+  diffuseColor.rgb = vec3(0.0135, 0.0140, 0.0152);
+} else if (vBhSurf.w < 0.5) {
+  float bhSide = smoothstep(0.52, 0.86, vBhLocal.w);
+  float bhGap = 1.0 - smoothstep(0.004, 0.016,
+    min(abs(vBhLocal.x - 0.10), abs(vBhLocal.x + 0.30)));
+  float bhCrease = 1.0 - smoothstep(0.010, 0.032, abs(vBhLocal.y - 0.46));
+  float bhRocker = 1.0 - smoothstep(0.26, 0.33, vBhLocal.y);
+  diffuseColor.rgb *= 1.0 - bhSide * (0.70 * bhGap + 0.13 * bhCrease + 0.26 * bhRocker);
+}
+`;
+
+/**
+ * The clear coat, and the specular response to Boston's street lighting.
+ *
+ * Both are missing from the stock path and between them they are the whole of
+ * defect #6. Painted steel is a dielectric under a transparent coat: its
+ * highlight is the colour of the *light*, not of the paint. The material used
+ * to ask for `metalness: 0.35`, which tints the highlight with the body
+ * colour, and the only light after dark is `skyStreetLight`, which the sky
+ * module adds to the diffuse gather and nothing else. So a maroon van at
+ * night had a red diffuse term, a red specular term, and nothing achromatic
+ * anywhere — and ACES maps a colour with no green or blue in it to a colour
+ * with none out, which is how its paint measured (67, 1, 1).
+ *
+ * `skyApRadiance` is the same sky-view table the dome is drawn from, so what
+ * a windscreen reflects at noon is the sky that is actually above it.
+ */
+export const SHELL_FRAG_LIGHT = /* glsl */ `
+#if defined( SKY_AERIAL ) && defined( USE_FOG )
+{
+  float bhCoat = vBhSurf.z;
+  if (bhCoat > 0.001) {
+    vec3 bhNw = normalize(uApViewToWorld * geometryNormal);
+    vec3 bhVw = normalize(uApViewToWorld * geometryViewDir);
+    float bhFres = 0.04 + 0.96 * pow(1.0 - saturate(dot(geometryNormal, geometryViewDir)), 5.0);
+    vec3 bhSky = skyApRadiance(reflect(-bhVw, bhNw), vBhSurf.y * 0.6);
+    // 'skyStreetLight' answers an irradiance, because every other caller adds
+    // it to the diffuse gather where three divides by pi on the way out. A
+    // specular lobe fed the same number unconverted is pi times too bright,
+    // which turned a pickup under a shop window into a white cut-out.
+    vec3 bhLamp = skyStreetLight(cameraPosition + skyApOffset(vFogViewPos), bhNw)
+                * RECIPROCAL_PI;
+    reflectedLight.indirectSpecular +=
+      bhCoat * bhFres * (bhSky * uCoatSky + bhLamp * uCoatLamp);
+  }
+}
+#endif
+`;
+
+/**
+ * Glass, lit the same way. A window is not a black rectangle: by day it
+ * mirrors the sky, by night it picks up the lamps, and either way the Fresnel
+ * ramp across a curved screen is most of what says 'glass' at 10 m.
+ */
+export const GLASS_FRAG_LIGHT = /* glsl */ `
+#if defined( SKY_AERIAL ) && defined( USE_FOG )
+{
+  vec3 bhNw = normalize(uApViewToWorld * geometryNormal);
+  vec3 bhVw = normalize(uApViewToWorld * geometryViewDir);
+  float bhFres = 0.04 + 0.96 * pow(1.0 - saturate(dot(geometryNormal, geometryViewDir)), 5.0);
+  vec3 bhSky = skyApRadiance(reflect(-bhVw, bhNw), 0.035);
+  vec3 bhLamp = skyStreetLight(cameraPosition + skyApOffset(vFogViewPos), bhNw)
+              * RECIPROCAL_PI;
+  reflectedLight.indirectSpecular += bhFres * (bhSky * uGlassSky + bhLamp * uGlassLamp);
+}
+#endif
 `;
 
 /* --------------------------------------------------------------- people */
