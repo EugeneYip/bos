@@ -599,9 +599,12 @@ metalnessFactor = vBhSurf.x;
  *   are.
  */
 export const SHELL_FRAG_COLOR = /* glsl */ `
-// Kind.rim only: 'greater than 2.5' also caught Kind.accent, which is 4,
-// and painted the alloy pattern across every B-pillar, mirror, plate and
-// livery band on the fleet.
+// Every test here is a closed interval on 'Kind', because 'Kind.accent' is 4
+// and sits above both of the others: an open 'greater than 2.5' painted the
+// alloy pattern over every B-pillar, mirror, number plate and livery band on
+// the fleet, and an open 'greater than 1.5' then painted the survivors black
+// rubber. A plate is off-white and a cruiser's light bar is red and blue;
+// both were coming out the colour of a tyre.
 if (vBhSurf.w > 2.5 && vBhSurf.w < 3.5) {
   float bhR = length(vBhLocal.xy);
   float bhA = atan(vBhLocal.y, vBhLocal.x);
@@ -616,7 +619,7 @@ if (vBhSurf.w > 2.5 && vBhSurf.w < 3.5) {
   bhFace = mix(bhFace, bhAlloy, clamp(bhLip, 0.0, 1.0));
   bhFace = mix(bhFace, vec3(0.016, 0.017, 0.019), smoothstep(0.085, 0.050, bhR));
   diffuseColor.rgb = bhFace;
-} else if (vBhSurf.w > 1.5) {
+} else if (vBhSurf.w > 1.5 && vBhSurf.w < 2.5) {
   // Rubber, not a dark shade of the body colour: the tyre used to take the
   // per-instance tint like everything else, so a red car rolled on red tyres.
   diffuseColor.rgb = vec3(0.0135, 0.0140, 0.0152);
@@ -690,18 +693,25 @@ export const GLASS_FRAG_LIGHT = /* glsl */ `
 /* --------------------------------------------------------------- people */
 
 /**
- * A pedestrian, as a dozen merged boxes the shader articulates.
+ * A pedestrian, as twenty-one merged boxes the shader articulates, colours
+ * and draws a face on.
  *
  * At the distance people are actually visible — a few tens of metres — the
  * silhouette and the walk cycle are the whole read, so the triangles go into
  * the things that carry a silhouette: a tapered torso with real shoulders, a
  * head on a neck, arms that hang beside the body rather than jutting from it,
- * thighs that meet at the hip, and shoes. Modelling a face would be triangles
- * spent where no pixel lands.
+ * thighs that meet at the hip, and shoes. The face is the exception and it is
+ * not modelled: at eight metres a head is forty-five pixels and eyes are the
+ * difference between a person and a mannequin, so they are drawn in the
+ * fragment stage, where they cost no triangles and can fade themselves out
+ * when the head is too small to carry them.
  *
- * `stride` drives the swing: 0 on the torso, +/-1 on the legs, +/-0.62 on the
- * arms so they counter-swing, and +/-1.6 on the feet so they trail the shin.
- * `aBob` is 1 on everything that rises and falls with the gait.
+ * `stride` drives the swing: 0 on the torso, +/-1 on the thighs, +/-1.05
+ * below the knee so the shin and shoe fold back, and +/-0.62 on the arms so
+ * they counter-swing. `aBob` is 1 on everything that rises and falls with the
+ * gait. `aSkin` says what a vertex is wearing, and carries head-local
+ * coordinates for the face; see {@link WALK_VERT_COLOR} and
+ * {@link WALK_FRAG_COLOR}.
  */
 export function pedestrianGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
@@ -711,7 +721,8 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
    *   or a trouser leg. It is not the colour itself: clothing takes the
    *   per-instance tint and skin takes a per-instance skin tone, and both
    *   arrive after this.
-   * @param mask   0 clothing, 1 skin, 2 hair. See {@link WALK_VERT_COLOR}.
+   * @param mask   0 coat, 1 skin, 2 hair, 3 trousers. See
+   *   {@link WALK_VERT_COLOR}.
    */
   const tag = (
     g: THREE.BufferGeometry, stride: number, shade: number, mask = 0, bob = 1,
@@ -766,8 +777,8 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
   // Hair: a cap over the crown and a slab down the back of the skull, left
   // as its own tone rather than the coat's. A bare skin-coloured cube is the
   // thing that made these read as dolls more than anything else about them.
-  parts.push(tag(box(0.197, 0.072, 0.170, -0.006, 1.732), 0, 0xffffff, 2));
-  parts.push(tag(box(0.055, 0.150, 0.170, -0.077, 1.640), 0, 0xd2d2d2, 2));
+  parts.push(tag(box(0.197, 0.068, 0.170, -0.006, 1.700), 0, 0xffffff, 2));
+  parts.push(tag(box(0.055, 0.150, 0.170, -0.077, 1.638), 0, 0xd2d2d2, 2));
   // Arms hanging against the ribs, counter-swinging. Set a shade below the
   // chest and a centimetre further out: same cloth, but a sleeve that is
   // exactly the value of the chest behind it has no edge, and the arm and the
@@ -779,15 +790,16 @@ export function pedestrianGeometry(): THREE.BufferGeometry {
     parts.push(tag(box(0.08, 0.115, 0.085, 0.01, 0.815, z), s, 0xf2f2f2, 1)); // hand
   }
   // Legs, hinged at the hip. 1.0 above the knee, 1.05 below it, so the shin
-  // and shoe can fold back through the swing. Trousers keep their own dark
-  // neutral rather than taking the coat colour — nobody's trousers match
-  // their coat, and a figure in one colour from collar to ankle is a doll.
+  // and shoe can fold back through the swing. Trousers get their own tone
+  // rather than a dark shade of the coat: nobody's trousers match their coat,
+  // and a figure in one hue from collar to ankle is a doll however many
+  // values it is broken into.
   for (const z of [-0.085, 0.085]) {
     const s = z > 0 ? 1 : -1;
-    parts.push(tag(box(0.135, 0.42, 0.145, 0, 0.66, z), s, 0x565c66));        // thigh
-    parts.push(tag(box(0.115, 0.46, 0.125, 0, 0.25, z), s * 1.05, 0x4b515a)); // shin
-    parts.push(tag(box(0.235, 0.062, 0.115, 0.045, 0.045, z), s * 1.05, 0x2c2f35)); // shoe
-    parts.push(tag(box(0.245, 0.018, 0.122, 0.048, 0.010, z), s * 1.05, 0x6a6f77)); // sole
+    parts.push(tag(box(0.135, 0.42, 0.145, 0, 0.66, z), s, 0xffffff, 3));        // thigh
+    parts.push(tag(box(0.115, 0.46, 0.125, 0, 0.25, z), s * 1.05, 0xeeeeee, 3)); // shin
+    parts.push(tag(box(0.235, 0.062, 0.115, 0.045, 0.045, z), s * 1.05, 0x3c4046, 3)); // shoe
+    parts.push(tag(box(0.245, 0.018, 0.122, 0.048, 0.010, z), s * 1.05, 0x8c9299, 3)); // sole
   }
   return merge(parts)!;
 }
@@ -820,15 +832,34 @@ vec3 bhSkinTone(float t) {
   return t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, (t - 0.5) * 2.0);
 }
 
-/** Hair. Mostly dark; the top of the ramp is grey rather than blond. */
+/**
+ * Hair. Most of the range is black to dark brown, the top of it is grey
+ * rather than blond, and the light-brown control point sits high up because
+ * under a July sun at this latitude anything above it reads platinum.
+ */
 vec3 bhHairTone(float t) {
   vec3 a = vec3(0.0108, 0.0079, 0.0060);
   vec3 b = vec3(0.0426, 0.0231, 0.0125);
-  vec3 c = vec3(0.253, 0.145, 0.055);
+  vec3 c = vec3(0.148, 0.082, 0.032);
   vec3 d = vec3(0.324, 0.306, 0.281);
-  if (t < 0.45) return mix(a, b, t / 0.45);
-  if (t < 0.82) return mix(b, c, (t - 0.45) / 0.37);
-  return mix(c, d, (t - 0.82) / 0.18);
+  if (t < 0.58) return mix(a, b, t / 0.58);
+  if (t < 0.90) return mix(b, c, (t - 0.58) / 0.32);
+  return mix(c, d, (t - 0.90) / 0.10);
+}
+
+/**
+ * Trousers, skirts and boots: five dark neutrals plus a denim, picked rather
+ * than blended, because a continuous ramp through them passes through colours
+ * nobody wears on the way.
+ */
+vec3 bhLegTone(float t) {
+  int i = int(floor(t * 6.0));
+  if (i <= 0) return vec3(0.0152, 0.0170, 0.0206);   // black
+  if (i == 1) return vec3(0.0331, 0.0372, 0.0447);   // charcoal
+  if (i == 2) return vec3(0.0331, 0.0508, 0.0865);   // denim
+  if (i == 3) return vec3(0.0865, 0.0908, 0.0995);   // mid grey
+  if (i == 4) return vec3(0.1274, 0.1096, 0.0762);   // khaki
+  return vec3(0.0422, 0.0561, 0.0410);               // olive
 }
 `;
 
@@ -846,8 +877,11 @@ vec3 bhHairTone(float t) {
 export const WALK_VERT_COLOR = /* glsl */ `
 vPedSkin = aSkin;
 if (aSkin.x > 0.5) {
-  vec3 bhTone = aSkin.x > 1.5
-    ? bhHairTone(fract(aTone * 7.13 + 0.37))
+  // One per-instance float feeds all three, decorrelated by different
+  // multiples of it, so a crowd is not fifteen copies of one person with
+  // fifteen coats on.
+  vec3 bhTone = aSkin.x > 2.5 ? bhLegTone(fract(aTone * 3.41 + 0.68))
+    : aSkin.x > 1.5 ? bhHairTone(fract(aTone * 7.13 + 0.37))
     : bhSkinTone(aTone);
   vColor.rgb = color.rgb * bhTone;
 }

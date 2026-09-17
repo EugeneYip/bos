@@ -5,8 +5,11 @@
  * Absolute fps on this machine is useless for an A/B: several agents build and
  * shoot concurrently, and the same build measured twice came back 20 and 23.
  * So this measures the *difference* the traffic makes inside one session —
- * hide it, measure, show it, measure, alternating several times — which is
- * robust to load because both halves of every pair share it.
+ * hide it, measure, show it, measure, alternating several times — and reports
+ * the *fastest* frame of each arm rather than the mean. External load only
+ * ever makes a frame slower, so the left edge of the distribution is the one
+ * statistic that survives a load average of 174; the mean of the same samples
+ * swung by 30 ms and once made the traffic look free.
  *
  *   QA_PORT=4447 QA_OUTDIR=dist-v node qa/_trafficperf.mjs --view downtown-traffic \
  *     [--tier ultra] [--reps 4] [--ms 2200]
@@ -75,8 +78,10 @@ const sample = (ms) => page.evaluate((d) => new Promise((resolve) => {
       t.sort((a, b) => a - b);
       const keep = t.slice(0, Math.max(1, Math.floor(t.length * 0.97)));
       const mean = keep.reduce((s, v) => s + v, 0) / keep.length;
+      const lo = t.slice(0, Math.max(1, Math.ceil(t.length * 0.1)));
+      const p10 = lo.reduce((s, v) => s + v, 0) / lo.length;
       const r = window.__boston.ctx.renderer.info.render;
-      resolve({ mean, p50: t[(t.length * 0.5) | 0], n: t.length, calls: r.calls, tris: r.triangles });
+      resolve({ mean, p10, min: t[0], n: t.length, calls: r.calls, tris: r.triangles });
     }
   };
   requestAnimationFrame(step);
@@ -99,15 +104,16 @@ for (let i = 0; i < REPS; i++) {
 }
 await browser.close(); srv.kill();
 
-const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[(s.length / 2) | 0]; };
-const onMs = med(on.map((s) => s.mean));
-const offMs = med(off.map((s) => s.mean));
+const best = (a) => Math.min(...a);
+const onMs = best(on.map((s) => s.p10));
+const offMs = best(off.map((s) => s.p10));
 console.log(JSON.stringify({
   view: VIEW, hour, tier: TIER, outdir: OUTDIR, reps: REPS,
-  frameMsWithTraffic: +onMs.toFixed(2),
-  frameMsWithoutTraffic: +offMs.toFixed(2),
+  fastestFrameWithTraffic: +onMs.toFixed(2),
+  fastestFrameWithoutTraffic: +offMs.toFixed(2),
   trafficMs: +(onMs - offMs).toFixed(2),
   callsWith: on[0].calls, callsWithout: off[0].calls,
   trisWith: on[0].tris, trisWithout: off[0].tris,
-  onAll: on.map((s) => +s.mean.toFixed(2)), offAll: off.map((s) => +s.mean.toFixed(2)),
+  onP10: on.map((s) => +s.p10.toFixed(2)), offP10: off.map((s) => +s.p10.toFixed(2)),
+  onMean: on.map((s) => +s.mean.toFixed(2)), offMean: off.map((s) => +s.mean.toFixed(2)),
 }, null, 2));

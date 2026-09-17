@@ -143,6 +143,63 @@ const placed = await page.evaluate((type, hex, dist, yawDeg) => {
 }, TYPE, COLOR, DIST, YAW);
 if (!placed) { await browser.close(); server.kill(); throw new Error(`no traffic:${TYPE}:* meshes`); }
 
+/**
+ * Frame cost of the shell and glazing shaders, per screen of coverage.
+ *
+ * The obvious measurement — fps with the whole fleet on against the fleet off
+ * — is hopeless here: several agents share this machine and the same build
+ * measured twice came back 0.0 ms and 1.1 ms for a layer that submits 115
+ * draw calls. This instead parks one vehicle close enough to fill a large,
+ * *known* share of the frame and alternates it on and off, so the signal is
+ * fill rate rather than submission and is large against the noise; and it
+ * reports the fastest frame of each arm, because load can only ever make a
+ * frame slower.
+ */
+if (argv.includes('--perf')) {
+  await page.evaluate(() => { window.__boston.running = true; });
+  await page.evaluate(() => window.__debug.settle(30));
+  const sample = (ms) => page.evaluate((d) => new Promise((resolve) => {
+    const t = [];
+    let last = performance.now();
+    const stop = last + d;
+    const step = () => {
+      const now = performance.now();
+      t.push(now - last); last = now;
+      if (now < stop) requestAnimationFrame(step);
+      else {
+        t.sort((a, b) => a - b);
+        const lo = t.slice(0, Math.max(1, Math.ceil(t.length * 0.12)));
+        resolve(lo.reduce((s, v) => s + v, 0) / lo.length);
+      }
+    };
+    requestAnimationFrame(step);
+  }), ms);
+  // The traffic module rewrites instance matrices every frame while running,
+  // so the pose is not held here — but coverage is what is being measured and
+  // a car 3 m from the lens covers the frame wherever the module puts it.
+  const show = (k) => page.evaluate((type, n) => {
+    window.__boston.ctx.scene.traverse((o) => {
+      if (!o.isInstancedMesh) return;
+      const nm = o.name || '';
+      if (nm.startsWith('traffic:') || nm === 'pedestrians') o.count = 0;
+      if (nm.startsWith(`traffic:${type}:`)) o.count = n;
+    });
+  }, TYPE, k);
+  const on = [], off = [];
+  for (let i = 0; i < 6; i++) {
+    await show(24); on.push(await sample(1400));
+    await show(0); off.push(await sample(1400));
+  }
+  const best = (a) => Math.min(...a);
+  console.log(JSON.stringify({
+    outdir: OUTDIR, view: VIEW, hour, type: TYPE, mode: 'perf',
+    fastestWith: +best(on).toFixed(2), fastestWithout: +best(off).toFixed(2),
+    deltaMs: +(best(on) - best(off)).toFixed(2), on, off,
+  }, null, 2));
+  await browser.close(); server.kill();
+  process.exit(0);
+}
+
 const setUniform = (name, value) => page.evaluate((n, v) => {
   const mods = window.__boston.modules || [];
   const t = mods.find((m) => m.name === 'Traffic');
