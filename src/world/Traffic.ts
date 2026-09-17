@@ -597,9 +597,26 @@ export class Traffic implements WorldModule {
               // permanently glowing bar across the back of every cab in the
               // city, and on a pickup it stands clear of the bodywork, so it
               // read as a bar hanging in mid-air beside the pedestrians.
-              // The corner lamps keep the running drive they were tuned to:
-              // the review's complaint about the lights was that they emitted
-              // nothing, and nothing here measured them as too bright.
+              // KNOWN DEFECT, left alone deliberately. At 0.42 this puts
+              // about 2.0 into the red channel, and a lens of (1, 0.055,
+              // 0.02) driven that far past the display range comes back
+              // measuring green-over-red 0.65 to 0.82 against 0.055 at the
+              // source — the tone mapper has taken the hue out, so a red
+              // tail lamp renders orange. Measured on two dark vehicles:
+              // (239, 196, 154) and (251, 164, 115).
+              //
+              // Dropping it to 0.18 was tried and taken back out, because it
+              // could not be *shown* to help: 'qa/_lampcore.mjs' isolates a
+              // lamp by thresholding on red, which works against dark
+              // bodywork and fails completely against a white van, and
+              // whether any given frame offers a dark car showing its rear
+              // with the brakes off is a lottery. Fixing this properly needs
+              // a probe that selects lamp pixels by saturation rather than by
+              // brightness, and then a drive low enough to keep the hue at
+              // whatever brightness the lamps are wanted at. Note that
+              // braking is a separate case and is fine as it is: a brake
+              // light really does flare to an orange-white core inside a red
+              // halo in a photograph at this range.
               float bhRun = uNight * 0.42 * (1.0 - vChmsl);
               vec3 bhTail = vec3(1.0, 0.055, 0.02) * (bhRun + vBrakeAmt * uBrake);
               vec3 bhAmber = vec3(1.0, 0.56, 0.05) * (vBlinkOn * uIndicator);

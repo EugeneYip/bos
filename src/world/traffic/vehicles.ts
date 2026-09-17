@@ -212,6 +212,22 @@ function taper(
  * bonnet really are nearly flat, and bowing them only makes the shading
  * disagree with the silhouette.
  *
+ * This is applied to the glazing only. It was tried on the paint as well,
+ * where it is just as physically right and just as free, and taken back out
+ * because it could not be shown to do anything: over three runs a bowed dark
+ * flank profiled at a span of 0.20 of its own mean against 0.18 for a flat
+ * one, which is inside what the panel-gap shading and the screen-space
+ * occlusion already put there. Glazing is a different case because it is the
+ * smoothest surface on the vehicle, so its Fresnel term is the steepest and
+ * the same tilt moves it by a factor of four.
+ *
+ * Note for anyone measuring this: a crowned *painted* panel peaks in the
+ * middle of its height rather than ramping, because the crown is where the
+ * normal points most nearly at the light. Glazing ramps monotonically
+ * instead, from grazing incidence to normal incidence down the panel, which
+ * is why `rows`' monotonicity flag is a fair test for glass and the wrong
+ * test for paint.
+ *
  * @param kY     Tilt in radians per metre of height away from the crown.
  * @param kS     Tilt per metre *along* the panel, which is what sweeps a
  *               reflection front-to-back down a flank or around a screen.
@@ -338,10 +354,13 @@ function car(
   const cabX = bed ? len * 0.17 : -len * 0.04;
   const track = trackZ(wid, wheelR) * 2;
 
+  // The bodywork is deliberately *not* bowed. See `bow`: crowning the paint
+  // is physically right and free, but it could not be shown to do anything
+  // measurable, and an effect that cannot be measured is not kept here.
   const body: THREE.BufferGeometry[] = [
-    bow(taper(len, bodyH, wid, wid * 0.955, 0, sill), 0.75, 0.08),
+    taper(len, bodyH, wid, wid * 0.955, 0, sill),
     // Cabin, set back and narrower — this is what makes it read as a car.
-    bow(taper(cabLen, roofH, wid * 0.915, wid * 0.79, cabX, sill + bodyH), 0.70, 0.10),
+    taper(cabLen, roofH, wid * 0.915, wid * 0.79, cabX, sill + bodyH),
   ];
   if (bed) {
     // A pickup without bed walls is a saloon with the roof sawn off. Three
@@ -451,12 +470,9 @@ function boxVehicle(
 ): VehicleDef['parts'] {
   const sill = r * 1.12;
   const track = trackZ(wid, r) * 2;
+  // Not bowed, for the same reason as the cars' bodywork; see `bow`.
   const body = [
-    // A van or a bus flank is the largest single painted panel in the city
-    // and it is also the flattest, which is why the review's measurement
-    // landed on a van. Less crown per metre than a car — a box body really is
-    // closer to a slab — but over this height it still sweeps.
-    bow(taper(len, h, wid, wid * 0.98, 0, sill), 0.42, 0.05),
+    taper(len, h, wid, wid * 0.98, 0, sill),
   ];
   // Side glass runs the length of a bus and stops at the cab on a van or a
   // box truck — glazing all three the same way is what made them read as one
