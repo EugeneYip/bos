@@ -189,6 +189,59 @@ function taper(
   return g;
 }
 
+/**
+ * Bow a flat panel's shading normals so it reads as a crowned one.
+ *
+ * A bodyside here is one tapered box and the whole window band is another, so
+ * each flank is four coplanar corners sharing a single normal across two or
+ * three metres. Every pixel of such a flank shades identically, and that is
+ * what the review measured on the van: paint with a standard deviation of
+ * 1.24 over 3600 pixels, and glazing whose mean was the same as the paint
+ * beside it — 'one black rectangle for the whole window band'. No amount of
+ * extra light fixes it, because the surface has only one answer to give.
+ *
+ * Real bodywork is crowned: the flank rolls out at the shoulder and tucks
+ * back under at the sill, so the reflected direction sweeps from sky to road
+ * down the height of the panel and from nose to tail along it. Tilting the
+ * corner normals reproduces that sweep on flat geometry for no extra
+ * triangles and no runtime cost — the interpolator does the work, and it is
+ * the same trick the Hancock's panes got.
+ *
+ * Bounds come from the panel itself so there is no vehicle dimension to keep
+ * in sync here. Horizontal panels are deliberately left alone: a roof and a
+ * bonnet really are nearly flat, and bowing them only makes the shading
+ * disagree with the silhouette.
+ *
+ * @param kY     Tilt in radians per metre of height away from the crown.
+ * @param kS     Tilt per metre *along* the panel, which is what sweeps a
+ *               reflection front-to-back down a flank or around a screen.
+ * @param crown  Where up the panel it is most nearly vertical, 0..1.
+ */
+function bow(
+  g: THREE.BufferGeometry, kY: number, kS = 0, crown = 0.62,
+): THREE.BufferGeometry {
+  g.computeBoundingBox();
+  const bb = g.boundingBox!;
+  const yMid = bb.min.y + (bb.max.y - bb.min.y) * crown;
+  const xMid = (bb.min.x + bb.max.x) * 0.5;
+  const zMid = (bb.min.z + bb.max.z) * 0.5;
+  const p = g.getAttribute('position') as THREE.BufferAttribute;
+  const n = g.getAttribute('normal') as THREE.BufferAttribute;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    const nx = n.getX(i), ny = n.getY(i), nz = n.getZ(i);
+    const flank = Math.abs(nz) > 0.7;
+    const ends = Math.abs(nx) > 0.7;
+    if (!flank && !ends) continue;
+    v.set(nx, ny + (p.getY(i) - yMid) * kY, nz);
+    if (flank) v.x += (p.getX(i) - xMid) * kS;
+    else v.z += (p.getZ(i) - zMid) * kS;
+    n.setXYZ(i, ...v.normalize().toArray() as [number, number, number]);
+  }
+  n.needsUpdate = true;
+  return g;
+}
+
 /** Tyre width as a fraction of the rolling radius. */
 const TYRE_W = 0.52;
 
@@ -286,9 +339,9 @@ function car(
   const track = trackZ(wid, wheelR) * 2;
 
   const body: THREE.BufferGeometry[] = [
-    taper(len, bodyH, wid, wid * 0.955, 0, sill),
+    bow(taper(len, bodyH, wid, wid * 0.955, 0, sill), 0.75, 0.08),
     // Cabin, set back and narrower — this is what makes it read as a car.
-    taper(cabLen, roofH, wid * 0.915, wid * 0.79, cabX, sill + bodyH),
+    bow(taper(cabLen, roofH, wid * 0.915, wid * 0.79, cabX, sill + bodyH), 0.70, 0.10),
   ];
   if (bed) {
     // A pickup without bed walls is a saloon with the roof sawn off. Three
@@ -305,8 +358,12 @@ function car(
   const glassH = roofH * 0.50;
   const glass: THREE.BufferGeometry[] = [
     // Side glass, windscreen and backlight as one band standing 1 cm proud of
-    // the cabin, between a painted belt line and a painted roof.
-    taper(cabLen * 0.955, glassH, wid * 0.935, wid * 0.845, cabX - len * 0.005, glassY),
+    // the cabin, between a painted belt line and a painted roof. Bowed harder
+    // than the paint: glazing is the smoothest thing on a car, so its Fresnel
+    // ramp is the steepest, and a sweep along the band is what reads as a
+    // screen wrapping into the A-pillar rather than a slot cut in a box.
+    bow(taper(cabLen * 0.955, glassH, wid * 0.935, wid * 0.845, cabX - len * 0.005, glassY),
+      1.10, 0.24, 0.55),
   ];
   const dark: THREE.BufferGeometry[] = [
     // Underbody, inboard of the tyres and low to the road.
@@ -395,7 +452,11 @@ function boxVehicle(
   const sill = r * 1.12;
   const track = trackZ(wid, r) * 2;
   const body = [
-    taper(len, h, wid, wid * 0.98, 0, sill),
+    // A van or a bus flank is the largest single painted panel in the city
+    // and it is also the flattest, which is why the review's measurement
+    // landed on a van. Less crown per metre than a car — a box body really is
+    // closer to a slab — but over this height it still sweeps.
+    bow(taper(len, h, wid, wid * 0.98, 0, sill), 0.42, 0.05),
   ];
   // Side glass runs the length of a bus and stops at the cab on a van or a
   // box truck — glazing all three the same way is what made them read as one
@@ -403,10 +464,12 @@ function boxVehicle(
   const gLen = len * glazed;
   const gMid = len * 0.5 - cabLen * 0.1 - gLen * 0.5;
   const glass: THREE.BufferGeometry[] = [
-    box(0.08, h * 0.30, wid * 0.88, len * 0.5, sill + h * 0.72),           // windscreen
+    // A coach screen wraps hard into its corners, so this one gets the
+    // steepest sweep across the vehicle of anything here.
+    bow(box(0.08, h * 0.30, wid * 0.88, len * 0.5, sill + h * 0.72), 1.00, 0.48, 0.55),
     box(gLen, h * 0.26, 0.06, gMid, sill + h * 0.70, wid * 0.5),
     box(gLen, h * 0.26, 0.06, gMid, sill + h * 0.70, -wid * 0.5),
-  ];
+  ].map((g, i) => (i === 0 ? g : bow(g, 0.90, 0.045, 0.55)));
   const dark = [
     box(len * 0.94, sill - 0.16, skirtW(wid, r), 0, (sill + 0.16) * 0.5),  // skirt
     box(len, 0.10, wid * 1.012, 0, sill + 0.01),                           // arch line
