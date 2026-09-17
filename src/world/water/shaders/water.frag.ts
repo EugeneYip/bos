@@ -631,8 +631,23 @@ void main() {
   vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * RECIPROCAL_PI * 0.55) * authored;
   color = mix(color, foamLit, foam);
 
-  // At night the city is the brightest thing the water can reflect.
-  color += uCityGlow * fres * 0.55 * uNight * authored;
+  // At night the city is the brightest thing the water can reflect -- but it
+  // is only bright where the city actually is.
+  //
+  // This was a blanket add of 0.55, and 'fres' is close to 1 across any
+  // harbour seen at a grazing angle, so every square metre out to the horizon
+  // got the same half-unit of sodium orange. The seaport at 9:30 pm came out
+  // as a flat sepia sheet at 148 mean luma -- brighter than mid-grey, for
+  // water that should be nearly black between the reflections. It read as wet
+  // sand rather than a harbour.
+  //
+  // The planar reflection already carries the lit city, so most of this was
+  // double-counting it. What is left is the part a mirror cannot supply: the
+  // diffuse skyglow bouncing off low cloud and haze, which is real but faint,
+  // and which is also all the low tier has, since it renders no reflection at
+  // all. Weighted toward the shore, because that is where the city is.
+  float glowNear = 1.0 - smoothstep(120.0, 1400.0, shoreD);
+  color += uCityGlow * fres * uNight * authored * (0.05 + 0.30 * glowNear);
 
   // Distance. Not a fade toward somebody's idea of the horizon colour — the
   // same physical aerial perspective the buildings, the hills and the dome all
