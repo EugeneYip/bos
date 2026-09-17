@@ -124,6 +124,7 @@ export class App {
     };
 
     window.addEventListener('resize', this.onResize);
+    this.installContextHandlers();
   }
 
   /** Modules initialise in registration order, so declare dependencies first. */
@@ -152,7 +153,48 @@ export class App {
     this.onResize();
   }
 
+  /**
+   * Called when the GPU takes the WebGL context away, with a short reason.
+   *
+   * There was no handler at all until a visitor reported the site 'kept
+   * jumping out'. A lost context does not throw and does not stop
+   * `requestAnimationFrame` -- every draw call simply becomes a no-op, so the
+   * canvas freezes on its last frame or goes black and the page sits there
+   * looking broken with nothing in the console. Safari drops the context
+   * readily under memory pressure, and this scene asks for a lot: about
+   * 900 MB of JS heap, 386 MB of which is the CPU-side copy three.js keeps of
+   * every geometry attribute.
+   */
+  onContextLost: ((restorable: boolean) => void) | null = null;
+  private contextLost = false;
+
+  /** Whether the GPU context is currently gone. */
+  get lost(): boolean {
+    return this.contextLost;
+  }
+
+  private installContextHandlers(): void {
+    this.canvas.addEventListener('webglcontextlost', (e) => {
+      // Without preventDefault the browser will not even try to restore it.
+      e.preventDefault();
+      this.contextLost = true;
+      this.stop();
+      console.error('[App] WebGL context lost');
+      this.onContextLost?.(true);
+    });
+    this.canvas.addEventListener('webglcontextrestored', () => {
+      // three.js re-uploads geometry and textures from their CPU copies, but
+      // everything baked once into a render target at boot -- the atmosphere
+      // LUTs, the terrain's surface array, the material atlases -- is gone,
+      // and re-running that is a bigger job than it looks. Say so plainly
+      // rather than resume into a half-built world.
+      console.warn('[App] WebGL context restored; a reload is needed to rebuild the baked targets');
+      this.onContextLost?.(false);
+    });
+  }
+
   start(): void {
+    if (this.contextLost) return;
     if (this.running) return;
     this.running = true;
     this.ctx.clock.start();
