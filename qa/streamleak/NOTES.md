@@ -119,3 +119,40 @@ Also: measurements taken while other agents are building are worthless. A
 concurrent ultra run produced a phantom 2.4x fps regression that fell
 uniformly across viewpoints with no pedestrians in them, which no pedestrian
 shader can do.
+
+## Attributed (qa/_retainwho.mjs, iPhone viewport, safe=1)
+
+Resident geometry grouped by mesh-name prefix. Flight is a 1200 m circle,
+1.3 turns, then parked back at the opening pose for 15 s.
+
+| group | boot | after flight | back at start +15s |
+|---|---|---|---|
+| **buildings** | 37 / 29.5 MB | 89 / 56.5 MB | **93 / 70.7 MB** |
+| **road-t1** | 48 / 7.1 MB | 222 / 38.4 MB | 222 / 38.4 MB |
+| road-t0 | 75 / 13.2 MB | 99 / 18.6 MB | 99 / 18.6 MB |
+| road-t2 | 23 / 7.3 MB | 56 / 14.2 MB | 56 / 14.2 MB |
+| parks | 2 / 20.2 MB | unchanged | unchanged |
+| water | 130 / 9.9 MB | 130 / 10.8 MB | 130 / 10.8 MB |
+| **total geometries** | **866** | **1149** | **1153** |
+
+**Buildings is the defect.** It more than doubles, and it is still climbing on
+the last sample -- 89 -> 93 meshes and 56.5 -> 70.7 MB while parked back at the
+opening pose, where most of what it holds is far outside the keep radius of
+`0.65 * 1600 + 700 = 1740 m` against a far side 2400 m away. Nothing is ever
+given back.
+
+**Correction to the section above.** I had cleared Roads by reading `evict`,
+and that was too strong. The road tiers do grow -- t1 by 4.6x, t0 by 1.3x,
+t2 by 2.4x -- and then sit on a plateau. A plateau is what hitting a per-tier
+budget looks like, so `evict` is probably working as written and the bound is
+simply high: 377 geometries and 71.2 MB across the three tiers. Bounded but
+expensive is a different problem from leaking, and worth revisiting on its own
+terms once buildings is fixed. Terrain and water are still cleanly cleared:
+terrain draws one grid patch many times, and water's 130 chunks do not move.
+
+Next step: `qa/_shardtrace.mjs` reads `Buildings`' own private state
+(`streaming`, `radius`, `loadedShards`, `loadingShards`, `streamCountdown`)
+plus `stats.buildingShards`/`buildingTiles` at each step of the same flight.
+`reconcile` is gated on TWO conditions at the call site -- a 30-frame
+countdown AND the camera having moved 150 m from `lastStreamAt` -- and that
+pair is the one place correct-looking eviction code silently never fires.
