@@ -175,7 +175,7 @@ export function emitMarkings(
     }
   }
 
-  if (hasBusLane(road.rec.name, cls) && hw > 4.5) {
+  if (hasBusLane(road.name, cls) && hw > 4.5) {
     emitBusLane(out, rib, tile, -1);
     if (!oneway) emitBusLane(out, rib, tile, 1);
   }

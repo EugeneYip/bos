@@ -25,7 +25,18 @@ const BRIDGE_RAMP = 16;
 
 export interface PreparedRoad {
   id: string;
-  rec: RoadRecord;
+  /**
+   * The way's name, and only the name.
+   *
+   * This used to be the whole `RoadRecord`, which meant every one of the
+   * city's 56,655 parsed records -- each with a `path` and an `elevation`
+   * array -- stayed reachable for the life of the session, through 36,755
+   * prepared roads. Exactly one consumer ever touched it, `paint.ts` asking
+   * whether the name suggests a bus lane. Holding a hundred megabytes of
+   * polyline to answer that is not a trade worth making on a phone, where
+   * the whole page has to fit in what iOS will spare.
+   */
+  name?: string;
   cls: RoadClass;
   spec: ClassSpec;
   pts: V2[];
@@ -269,7 +280,7 @@ export function buildNetwork(
     const tunnel = isTunnelRecord(rec);
     prepared.push({
       id: rec.id,
-      rec,
+      name: rec.name,
       cls,
       spec: CLASS[cls],
       pts: sm.pts,
