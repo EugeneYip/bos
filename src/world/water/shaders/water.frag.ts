@@ -92,6 +92,18 @@ uniform vec3 uSiltA;
 uniform vec3 uSiltB;
 uniform vec3 uFoamColor;
 
+#ifdef WATER_DEBUG
+// QA only, compiled in behind '?wdbg' (see Water.ts). Per-term gains so a
+// single page session can ablate one contribution at a time -- the only way
+// to attribute brightness, since auto-exposure moves under any rebuild and
+// makes absolute luma incomparable between builds.
+//   uDbg  = (body, reflection, specular, foam)
+//   uDbg2 = (city glow, aerial perspective, view mode, spare)
+// View modes: 1 fetch/murk/shallow, 2 depth/20, 3 roughness, 4 fresnel.
+uniform vec4 uDbg;
+uniform vec4 uDbg2;
+#endif
+
 varying vec3  vWorld;
 varying vec3  vGN;
 varying float vShore;
@@ -352,6 +364,20 @@ void main() {
               + clamp(vLostVar, 0.0, 0.15);
   rough = clamp(rough, 0.016, 0.55);
 
+  // The sky module winds exposure up after sunset so the dim sky still reads.
+  // Everything *authored* here — the bed, the backscatter, the silt, the foam,
+  // the city's glow — is display-referred and has to come down by the same
+  // factor or the river is the brightest thing in a night frame. The reflected
+  // sky and the sun's glitter need no such correction: they come from the
+  // atmosphere and from 'ctx.sun', which are already as dim as the real thing.
+  //
+  // 'uEnvIntensity' is the *measured* compensation, 2.5 / exposure. It used to
+  // be a proxy for daylight — 0.05 + 0.95 * day^2 — which at five in the
+  // afternoon reads 0.46 and halved the body of the river four hours before
+  // the exposure it was compensating for moves at all. The golden hour is the
+  // hour the water matters most and it was the hour that was wrong.
+  float authored = clamp(uEnvIntensity, 0.04, 1.25);
+
   // -------------------------------------------------------- reflection ----
   vec3 Rraw = reflect(-V, N);
   vec3 R = Rraw;
@@ -371,6 +397,36 @@ void main() {
   vec3 probe = textureCubeUV(envMap, R, clamp(rough * 1.6, 0.02, 1.0)).rgb;
   sky = mix(sky, probe, 0.35);
 #endif
+
+  // Boston's own skyglow: sodium and LED spill scattered by the air over the
+  // city. The atmosphere's sky-view table is physical and knows nothing about
+  // it, so after dark it has to be added by hand -- but it belongs *in the
+  // reflected radiance*, not bolted onto the shaded colour, and that is what
+  // it was: a flat add after the Fresnel mix. Three things were wrong with
+  // that, and together they painted the seaport at 9:30 pm as a sheet of wet
+  // sand at 126 mean luma against a 16-luma sky.
+  //
+  //  - It double-counted the city. The planar pass already mirrors every lit
+  //    window; adding an untextured wash on top of it is the same light
+  //    twice. Here it goes under 'cov' below, so the mirror *replaces* it
+  //    exactly where it has the real thing, and survives only where the
+  //    mirror has nothing -- which is also the whole of the low tier, where
+  //    there is no planar pass at all.
+  //  - It escaped the roughness cone. A rough grazing surface reflects mostly
+  //    other water, and the 'below' term downweights the sky for that; the
+  //    glow was exempt. It no longer is.
+  //  - It was far too strong. 'uCityGlow' is authored at (0.95, 0.62, 0.30)
+  //    and the shore weight took 35% of it, i.e. a third of a unit of sodium
+  //    orange on water that should be nearly black. Measured against the
+  //    ablation sweep at 'seaport-night' -- glow at 100/50/25/12/6/0 per cent
+  //    gives a harbour band of 126/85/51/32/24/11 mean luma against a sky of
+  //    17 -- the honest number is about an eighth of what was there.
+  float glowNear = 1.0 - smoothstep(120.0, 1400.0, shoreD);
+  vec3 cityGlow = uCityGlow * uNight * authored * (0.008 + 0.040 * glowNear);
+#ifdef WATER_DEBUG
+  cityGlow *= uDbg2.x;
+#endif
+  sky += cityGlow;
 
   // A rough surface reflects a *cone*, and at a grazing angle a good half of
   // that cone points below the horizon — at the water in between, at the far
@@ -443,20 +499,6 @@ void main() {
   vec3 down = (uSunColor * sunUp + uSkyAmbient) * RECIPROCAL_PI;
   vec3 body = bedCol * down * trans + scatter * down * (1.0 - trans);
 
-  // The sky module winds exposure up after sunset so the dim sky still reads.
-  // Everything *authored* here — the bed, the backscatter, the silt, the foam,
-  // the city's glow — is display-referred and has to come down by the same
-  // factor or the river is the brightest thing in a night frame. The reflected
-  // sky and the sun's glitter need no such correction: they come from the
-  // atmosphere and from 'ctx.sun', which are already as dim as the real thing.
-  //
-  // 'uEnvIntensity' is the *measured* compensation, 2.5 / exposure. It used to
-  // be a proxy for daylight — 0.05 + 0.95 * day^2 — which at five in the
-  // afternoon reads 0.46 and halved the body of the river four hours before
-  // the exposure it was compensating for moves at all. The golden hour is the
-  // hour the water matters most and it was the hour that was wrong.
-  float authored = clamp(uEnvIntensity, 0.04, 1.25);
-
   // Depth reads as colour, not just as darkness: the channel is deep and
   // green, the margins are a shallow, silty, distinctly browner band. On the
   // Charles that band is tannin; in the harbour it is mud stirred by the tide.
@@ -493,6 +535,11 @@ void main() {
 
   // ----------------------------------------------------------- fresnel ----
   float fres = fresnelWater(NoV, rough);
+
+#ifdef WATER_DEBUG
+  body *= uDbg.x;
+  sky  *= uDbg.y;
+#endif
 
   vec3 color = mix(body * authored, sky, fres);
 
@@ -538,8 +585,12 @@ void main() {
   // false, so this contributes nothing for one, whereas 'min(spec, 7.0)' would
   // pass it straight through on any driver that returns its NaN argument.
   // 'beckmannAniso' is NaN-free at the source now; this is the second line.
-  color += uSunColor * (spec > 0.0 ? min(spec, 7.0) : 0.0)
-         * smoothstep(-0.04, 0.09, uSunDir.y);
+  float specOut = (spec > 0.0 ? min(spec, 7.0) : 0.0)
+                * smoothstep(-0.04, 0.09, uSunDir.y);
+#ifdef WATER_DEBUG
+  specOut *= uDbg.z;
+#endif
+  color += uSunColor * specOut;
 
   // -------------------------------------------------------------- foam ----
   float cov = 0.0;
@@ -629,31 +680,31 @@ void main() {
   // the night exposure lift a constant floor here clips the whole channel to
   // white.
   vec3 foamLit = uFoamColor * (down * 0.80 + uSkyAmbient * RECIPROCAL_PI * 0.55) * authored;
+#ifdef WATER_DEBUG
+  foam *= uDbg.w;
+#endif
   color = mix(color, foamLit, foam);
-
-  // At night the city is the brightest thing the water can reflect -- but it
-  // is only bright where the city actually is.
-  //
-  // This was a blanket add of 0.55, and 'fres' is close to 1 across any
-  // harbour seen at a grazing angle, so every square metre out to the horizon
-  // got the same half-unit of sodium orange. The seaport at 9:30 pm came out
-  // as a flat sepia sheet at 148 mean luma -- brighter than mid-grey, for
-  // water that should be nearly black between the reflections. It read as wet
-  // sand rather than a harbour.
-  //
-  // The planar reflection already carries the lit city, so most of this was
-  // double-counting it. What is left is the part a mirror cannot supply: the
-  // diffuse skyglow bouncing off low cloud and haze, which is real but faint,
-  // and which is also all the low tier has, since it renders no reflection at
-  // all. Weighted toward the shore, because that is where the city is.
-  float glowNear = 1.0 - smoothstep(120.0, 1400.0, shoreD);
-  color += uCityGlow * fres * uNight * authored * (0.05 + 0.30 * glowNear);
 
   // Distance. Not a fade toward somebody's idea of the horizon colour — the
   // same physical aerial perspective the buildings, the hills and the dome all
   // use, so at twenty kilometres the sea *is* the sky it sits in front of, at
   // every azimuth and every sun elevation, and there is nothing left to seam.
+#ifdef WATER_DEBUG
+  if (uDbg2.y > 0.5) color = skyApplyOffset(color, vWorld - cameraPosition);
+#else
   color = skyApplyOffset(color, vWorld - cameraPosition);
+#endif
+
+#ifdef WATER_DEBUG
+  // Flat false-colour readouts. Written straight to the framebuffer with no
+  // tone map, so the byte value in a screenshot is the quantity itself.
+  int vm = int(uDbg2.z + 0.5);
+  if (vm == 1) { gl_FragColor = vec4(fetch, murk, shallow, 1.0); return; }
+  if (vm == 2) { gl_FragColor = vec4(depth / 20.0, geoDepth / 20.0, ramp / 20.0, 1.0); return; }
+  if (vm == 3) { gl_FragColor = vec4(rough * 2.0, windiness, clamp(vLostVar, 0.0, 1.0), 1.0); return; }
+  if (vm == 4) { gl_FragColor = vec4(fres, NoV, clamp(cov, 0.0, 1.0), 1.0); return; }
+  if (vm == 5) { gl_FragColor = vec4(clamp(shoreD / 300.0, 0.0, 1.0), clamp(foam, 0.0, 1.0), 0.0, 1.0); return; }
+#endif
 
   // Bound the HDR output, and do it with a comparison rather than a bare
   // 'min'.

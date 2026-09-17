@@ -61,9 +61,22 @@ import { GpuTimer } from './water/timing';
 
 /** Field resolution: ~6 m per texel over the city keeps shorelines crisp. */
 const FIELD_TEXEL = 6;
+
 /** Water is clipped a little past the data so the Mystic doesn't end mid-air. */
 const FIELD_PAD = 1200;
 const CHUNK = 700;
+/**
+ * QA instrumentation, compiled in only when the page is loaded with `?wdbg`.
+ *
+ * Auto-exposure moves under any change, so absolute luma is not comparable
+ * between two builds; the only sound way to attribute the brightness of a
+ * term is to switch it off and back on inside one page session. That needs a
+ * per-term gain in the shader, and a production shader should not carry six
+ * dead multiplies, so the whole thing sits behind a define.
+ */
+const WATER_DEBUG = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).has('wdbg');
+
 
 export class Water implements WorldModule {
   readonly name = 'Water';
@@ -212,6 +225,21 @@ export class Water implements WorldModule {
 
     this.material.uniforms.uDetail.value = ctx.quality.anisotropy >= 8 ? 1 : 0.55;
 
+    if (WATER_DEBUG) {
+      const u = this.material.uniforms;
+      (window as unknown as Record<string, unknown>).__water = {
+        /** `set('uDbg', [body, refl, spec, foam])`, or any water uniform. */
+        set: (name: string, v: number | number[]): void => {
+          const t = u[name]?.value as { set?: (...a: number[]) => void } | number | undefined;
+          if (t === undefined) throw new Error(`no water uniform ${name}`);
+          if (typeof v === 'number') u[name].value = v;
+          else (t as { set: (...a: number[]) => void }).set(...v);
+        },
+        get: (name: string): unknown => u[name]?.value,
+        list: (): string[] => Object.keys(u),
+      };
+    }
+
     ctx.on('quality-changed', () => {
       this.material!.uniforms.uDetail.value = ctx.quality.anisotropy >= 8 ? 1 : 0.55;
       const want = ctx.quality.waterReflections;
@@ -261,6 +289,7 @@ export class Water implements WorldModule {
         CUBEUV_TEXEL_HEIGHT: '0.0009765625',
         CUBEUV_MAX_MIP: '8.0',
         WATER_PLANAR: this.reflectEnabled ? 1 : 0,
+        ...(WATER_DEBUG ? { WATER_DEBUG: '' } : {}),
         ...(skirt ? { WATER_SKIRT: '' } : {}),
         // Only the skirt reaches past the shoreline field, so only the skirt
         // has any use for the coarse bathymetry out there.
@@ -337,6 +366,11 @@ export class Water implements WorldModule {
         uReflBlur: { value: 9 },
         uReflSmear: { value: 1 },
         uReflDistort: { value: new THREE.Vector2(0.030, 0.085) },
+
+        // (body, reflection+sky, specular, foam) and
+        // (city glow, aerial perspective, false-colour view, spare).
+        uDbg: { value: new THREE.Vector4(1, 1, 1, 1) },
+        uDbg2: { value: new THREE.Vector4(1, 1, 0, 0) },
       },
     });
     // Opt into the shared atmosphere. A ShaderMaterial gets none of three's
