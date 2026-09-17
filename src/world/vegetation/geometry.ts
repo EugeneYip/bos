@@ -246,6 +246,13 @@ interface Detail {
   cards: number;
   /** Card size multiplier. */
   cardSize: number;
+  /**
+   * Share of `cards` again, added as sprays along the primary limbs. A share
+   * rather than a count per limb, because limb *counts* differ by a factor of
+   * three between a four-limbed maple and a twelve-limbed whorled pine, and
+   * the budget should follow the crown rather than the armature.
+   */
+  limbShare: number;
 }
 
 function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
@@ -259,6 +266,8 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
   const high = sp.shape === 'vase' || sp.shape === 'goblet';
   const centre = new THREE.Vector3(0, cb + crownH * (high ? 0.62 : 0.45), 0);
   const anchors: Anchor[] = [];
+  /** Centreline of each primary limb, kept for the foliage pass. */
+  const limbPaths: THREE.Vector3[][] = [];
 
   // --- trunk ---------------------------------------------------------------
   // A goblet elm carries a single clean bole to the crotch and then stops; a
@@ -335,6 +344,7 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
       }
       const phase = r();
       tube(bark, pts, rad, d.radial[1], cb, phase, 0.9, 6.0);
+      limbPaths.push(pts);
 
       const tipDir = new THREE.Vector3().subVectors(pts[nS], pts[nS - 1]).normalize();
       anchors.push({ p: tip.clone(), d: tipDir.clone(), order: 0 });
@@ -392,6 +402,15 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
 
   // Two thirds hang off real branch tips; the rest fill the envelope so the
   // silhouette closes up without the interior turning solid.
+  //
+  // The draw is with replacement, so about 1/e of the tips get no card at
+  // all. That looks like the cause of the bare branches and is not: walking
+  // the anchors in order instead, which covers every tip with exactly the
+  // same number of cards, measured *worse* -- visible wood 0.1244 -> 0.1269
+  // of the canopy band at `common-street`. Two or three cards landing on one
+  // tip make an opaque clump that reads as foliage; spread one apiece they
+  // are thin enough that the alpha test eats their edges. Recorded so that it
+  // is not tried a third time.
   const fromAnchors = Math.min(anchors.length, Math.round(total * 0.62));
   for (let i = 0; i < fromAnchors; i++) {
     const a = anchors[Math.floor(r() * anchors.length)];
@@ -428,6 +447,47 @@ function buildTree(sp: Species, d: Detail, seed: number): TreeGeometry {
     p.addScaledVector(dir, -cardH * 0.45);
     const scale = 0.7 + r() * 0.6;
     card(leaf, p, dir, r() * Math.PI * 2, cardW * scale, cardH * scale, centre, cb, r(), bend);
+  }
+
+  // --- sprays along the limbs ----------------------------------------------
+  //
+  // The crown above is deliberately hollow, so that light gets into it. What
+  // runs *through* that hollow is a red oak's five primaries: eight metres of
+  // twenty-centimetre wood apiece, and nothing was hanging on any of it. Paint
+  // every trunk red and every leaf card green at `common-street` and the oaks
+  // come out as clean red skeletons standing in a July canopy, which is
+  // exactly the complaint. It is worst for the wide habits — `spreading` and
+  // `goblet`, i.e. oak and elm — because their limbs are longest and the
+  // camera on the Common is *underneath* them; a conical white pine, whose
+  // limbs are short and whose crown is solid, never showed it.
+  //
+  // These cards are added rather than reallocated. Taking them out of the
+  // envelope's budget instead was measured at 9 % *more* visible wood: the
+  // envelope is what closes the silhouette, and thinning it to clothe the
+  // interior loses more than it gains.
+  const sprays = limbPaths.length
+    ? Math.max(1, Math.round((total * d.limbShare) / limbPaths.length))
+    : 0;
+  for (const path of limbPaths) {
+    const nP = path.length - 1;
+    if (nP < 1) continue;
+    for (let k = 0; k < sprays; k++) {
+      // Outer two thirds only: the inner third is the crotch, where a real
+      // tree carries no leaves either, and a card there would only be seen
+      // from outside as a blob in the middle of an otherwise open crown.
+      const u = 0.36 + 0.6 * ((k + r() * 0.9) / sprays);
+      const fi = Math.min(nP - 1e-3, u * nP);
+      const i0 = Math.min(nP - 1, Math.floor(fi));
+      const q = new THREE.Vector3().lerpVectors(path[i0], path[i0 + 1], fi - i0);
+      // A spray hangs off the side and underside of the limb it grows on.
+      const out = new THREE.Vector3(q.x, 0, q.z);
+      if (out.lengthSq() < 1e-6) out.set(r() - 0.5, 0, r() - 0.5);
+      out.normalize().multiplyScalar(0.5 + r() * 0.6);
+      out.y += yBias(q.y) - 0.3;
+      out.normalize();
+      const scale = 0.6 + r() * 0.4;
+      card(leaf, q, out, r() * Math.PI * 2, cardW * scale, cardH * scale, centre, cb, r(), bend);
+    }
   }
 
   return assemble(bark, leaf);
@@ -536,7 +596,9 @@ function buildImpostor(sp: Species): TreeGeometry {
  * or the crown opens up into a scaffold. The near card is authored at about
  * 1.5 m (see `textures.cardMeters`) and the mid card at 2.8x that.
  */
-const NEAR: Detail = { radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards: 155, cardSize: 1.0 };
+const NEAR: Detail = {
+  radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards: 155, cardSize: 1.0, limbShare: 0.42,
+};
 /**
  * The mid card used to be 2.8x the near card and there used to be 34 of them,
  * which is 2133 m² of card over a 24 m elm against the near tier's 1241 — a
@@ -550,7 +612,9 @@ const NEAR: Detail = { radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards
  * silhouettes in a crown, for 68 more triangles on a tier that draws a
  * couple of thousand instances.
  */
-const MID: Detail = { radial: [5, 3, 3], segs: [2, 2, 1], secondaries: 2, cards: 68, cardSize: 1.9 };
+const MID: Detail = {
+  radial: [5, 3, 3], segs: [2, 2, 1], secondaries: 2, cards: 68, cardSize: 1.9, limbShare: 0.25,
+};
 
 /** Physical size in metres of the mid tier's clump card for a species. */
 export function midCardMeters(sp: Species): number {
