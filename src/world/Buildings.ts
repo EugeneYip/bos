@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Ctx, WorldModule } from '../core/Context';
 import type { CityManifest } from '../core/types';
 import { dataUrl, loadManifest } from '../core/data';
+import { MOBILE } from '../core/gpu';
 import { TILE, tileOrigin, type TilePayload } from './buildings/build';
 import { mergeChunks, type PackedChunk } from './buildings/mesh';
 import { buildFacadeAtlas, type FacadeAtlas } from './buildings/atlas';
@@ -37,7 +38,27 @@ interface Tile {
   radius: number;
   /** True while the trim range is being drawn. */
   detailed: boolean;
+  /** Which shard produced it, so unloading one can find its tiles. */
+  shard: number;
 }
+
+/**
+ * How far from the camera a building shard is kept, metres.
+ *
+ * Only mobile streams. A desktop loads the whole city up front as it always
+ * has -- it is the memory ceiling that forces this, not the frame rate, and
+ * a laptop has the headroom. An iPad does not: building all 61,574 buildings
+ * at once is what makes iOS Safari reload the tab, which is what 'it kept
+ * jumping out' turned out to be.
+ *
+ * 2.6 km covers the whole downtown peninsula from a street-level pose and
+ * still leaves the skyline standing when you fly. Shards are spatially
+ * bucketed by the build tool and carry their bounds in the manifest, so this
+ * is a rectangle test rather than a guess.
+ */
+const STREAM_RADIUS = 2600;
+/** Extra margin before a loaded shard is thrown away, metres. Stops churn. */
+const STREAM_HYSTERESIS = 700;
 
 export class Buildings implements WorldModule {
   readonly name = 'Buildings';
@@ -57,6 +78,15 @@ export class Buildings implements WorldModule {
   private lastLod = new THREE.Vector3(1e9, 1e9, 1e9);
   private built = 0;
   private skipped = 0;
+  /** Streaming state; empty bounds means 'load everything, once'. */
+  private shardUrls: string[] = [];
+  private shardBounds: Array<[number, number, number, number]> = [];
+  private skipLandmarks: string[] = [];
+  private loadedShards = new Set<number>();
+  private loadingShards = new Set<number>();
+  private streaming = false;
+  private streamCountdown = 0;
+  private lastStreamAt = new THREE.Vector3(1e9, 1e9, 1e9);
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'buildings';
@@ -86,14 +116,32 @@ export class Buildings implements WorldModule {
       ...((ctx as unknown as { landmarkSlugs?: Set<string> }).landmarkSlugs ?? []),
     ];
 
-    const payloads = await this.runWorkers(manifest, skipLandmarks);
+    // Streaming needs three things from the manifest: the shard list, their
+    // world bounds, and a device that cannot hold all of them at once.
+    this.shardUrls = manifest.files.buildings.map((f) => dataUrl(f));
+    this.shardBounds = manifest.shardBounds?.buildings ?? [];
+    this.skipLandmarks = skipLandmarks;
+    this.streaming = MOBILE && this.shardBounds.length === this.shardUrls.length;
+
+    const first = this.streaming
+      ? this.shardsNear(ctx.camera.position)
+      : this.shardUrls.map((_, i) => i);
+    const payloads = await this.runWorkers(first);
 
     this.atlas = await atlasPromise;
     this.uniforms = createShellUniforms(this.atlas);
     this.shell = createShellMaterial(this.uniforms, ctx.envMap);
 
-    this.assembleTiles(payloads.tiles);
+    this.assembleTiles(payloads.tiles, payloads.shardOf);
     this.assembleClutter(ctx, payloads.clutter);
+    for (const i of first) this.loadedShards.add(i);
+    if (this.streaming) {
+      this.lastStreamAt.copy(ctx.camera.position);
+      console.info(
+        `[Buildings] streaming: ${first.length} of ${this.shardUrls.length} shards within `
+        + `${STREAM_RADIUS} m`,
+      );
+    }
 
     ctx.stats.buildings = this.built;
     ctx.stats.buildingTiles = this.tiles.length;
@@ -113,12 +161,15 @@ export class Buildings implements WorldModule {
    * main thread if workers are unavailable (older Safari, blob-URL policies).
    */
   private async runWorkers(
-    manifest: CityManifest,
-    skipLandmarks: string[],
-  ): Promise<{ tiles: Map<number, PackedChunk[]>; clutter: Float32Array[][] }> {
-    const urls = manifest.files.buildings.map((f) => dataUrl(f));
+    want: number[],
+  ): Promise<{ tiles: Map<number, PackedChunk[]>; clutter: Float32Array[][]; shardOf: Map<number, number> }> {
+    const skipLandmarks = this.skipLandmarks;
+    const urls = want.map((i) => this.shardUrls[i]);
     const tiles = new Map<number, PackedChunk[]>();
     const clutter: Float32Array[][] = [];
+    // Which shard each tile key came from. Spatial sharding packs whole
+    // tiles, so a tile has exactly one owner and unloading is unambiguous.
+    const shardOf = new Map<number, number>();
 
     const absorb = (reply: WorkerReply): void => {
       this.built += reply.built ?? 0;
@@ -127,6 +178,7 @@ export class Buildings implements WorldModule {
         const arr = tiles.get(t.key);
         if (arr) arr.push(t.chunk);
         else tiles.set(t.key, [t.chunk]);
+        shardOf.set(t.key, want[reply.index] ?? want[0]);
       }
       if (reply.clutter) clutter.push(reply.clutter);
     };
@@ -149,7 +201,7 @@ export class Buildings implements WorldModule {
         absorb({ type: 'done', index: i, tiles: out.tiles, clutter: out.clutter, built: out.built, skipped: out.skipped });
         await new Promise((r) => setTimeout(r, 0));
       }
-      return { tiles, clutter };
+      return { tiles, clutter, shardOf };
     }
 
     let next = 0;
@@ -173,11 +225,11 @@ export class Buildings implements WorldModule {
       send();
     })));
 
-    return { tiles, clutter };
+    return { tiles, clutter, shardOf };
   }
 
   /** One mesh per 500 m tile, silhouette indices first and trim after. */
-  private assembleTiles(byKey: Map<number, PackedChunk[]>): void {
+  private assembleTiles(byKey: Map<number, PackedChunk[]>, shardOf?: Map<number, number>): void {
     for (const [key, parts] of byKey) {
       const chunk = parts.length === 1 ? parts[0] : mergeChunks(parts);
       if (!chunk || !chunk.vertexCount) continue;
@@ -225,7 +277,84 @@ export class Buildings implements WorldModule {
         center: bs ? bs.center.clone() : new THREE.Vector3(ox + TILE / 2, 0, oz + TILE / 2),
         radius: bs ? bs.radius : TILE,
         detailed: true,
+        shard: shardOf?.get(key) ?? -1,
       });
+    }
+  }
+
+  /**
+   * Shards whose bounds come within `reach` of a point, nearest first.
+   *
+   * Nearest first matters: the loader works through them in order, so the
+   * ground under the camera appears before the far side of the river.
+   */
+  private shardsNear(p: THREE.Vector3, reach = STREAM_RADIUS): number[] {
+    const out: Array<{ i: number; d: number }> = [];
+    for (let i = 0; i < this.shardBounds.length; i++) {
+      const [x0, z0, x1, z1] = this.shardBounds[i];
+      // Distance from the point to the rectangle, zero when inside it.
+      const dx = Math.max(x0 - p.x, 0, p.x - x1);
+      const dz = Math.max(z0 - p.z, 0, p.z - z1);
+      const d = Math.hypot(dx, dz);
+      if (d <= reach) out.push({ i, d });
+    }
+    out.sort((a, b) => a.d - b.d);
+    return out.map((e) => e.i);
+  }
+
+  /** Drop every tile a shard owns, and the GPU buffers behind them. */
+  private unloadShard(index: number): number {
+    let dropped = 0;
+    for (let i = this.tiles.length - 1; i >= 0; i--) {
+      const t = this.tiles[i];
+      if (t.shard !== index) continue;
+      this.root.remove(t.mesh);
+      t.mesh.geometry.dispose();
+      this.tiles.splice(i, 1);
+      dropped++;
+    }
+    this.loadedShards.delete(index);
+    return dropped;
+  }
+
+  /**
+   * Bring the loaded set in line with where the camera is.
+   *
+   * Loading is asynchronous and unloading is not, so the two are deliberately
+   * asymmetric: a shard is loaded as soon as it comes within the radius, and
+   * only dropped once it is a further {@link STREAM_HYSTERESIS} out. Without
+   * that margin a camera sitting on a boundary would load and free the same
+   * shard forever.
+   */
+  private async reconcile(ctx: Ctx): Promise<void> {
+    const cam = ctx.camera.position;
+    const want = new Set(this.shardsNear(cam));
+    const keep = new Set(this.shardsNear(cam, STREAM_RADIUS + STREAM_HYSTERESIS));
+
+    for (const i of [...this.loadedShards]) {
+      if (!keep.has(i)) this.unloadShard(i);
+    }
+
+    const missing = [...want].filter((i) => !this.loadedShards.has(i) && !this.loadingShards.has(i));
+    if (!missing.length) return;
+
+    // One shard at a time: each is a worker spin-up and a few thousand
+    // extrusions, and doing four at once on a phone is a visible hitch.
+    const next = missing[0];
+    this.loadingShards.add(next);
+    try {
+      const payload = await this.runWorkers([next]);
+      // The camera may have moved on while that was in flight.
+      if (this.shardsNear(ctx.camera.position, STREAM_RADIUS + STREAM_HYSTERESIS).includes(next)) {
+        this.assembleTiles(payload.tiles, payload.shardOf);
+        this.loadedShards.add(next);
+      }
+    } catch (err) {
+      console.warn(`[Buildings] shard ${next} failed to stream`, err);
+    } finally {
+      this.loadingShards.delete(next);
+      ctx.stats.buildingTiles = this.tiles.length;
+      ctx.stats.buildingShards = this.loadedShards.size;
     }
   }
 
@@ -291,6 +420,17 @@ export class Buildings implements WorldModule {
   }
 
   update(_dt: number, ctx: Ctx): void {
+    if (this.streaming && --this.streamCountdown <= 0) {
+      this.streamCountdown = 30;
+      // Only when the camera has actually gone somewhere. A rectangle test
+      // against a dozen shards is cheap, but a worker spin-up is not.
+      if (ctx.camera.position.distanceToSquared(this.lastStreamAt) > 150 * 150
+        || this.loadingShards.size > 0) {
+        this.lastStreamAt.copy(ctx.camera.position);
+        void this.reconcile(ctx);
+      }
+    }
+
     const u = this.uniforms;
     if (!u || !this.tiles.length) return;
 

@@ -140,4 +140,10 @@ export interface CityManifest {
     areas: string[];
     props: string[];
   };
+  /**
+   * Axis-aligned world bounds of each shard, `[x0, z0, x1, z1]`, for the
+   * families that are sharded spatially. Absent on data built before that
+   * existed, in which case the client has to load everything.
+   */
+  shardBounds?: { buildings?: Array<[number, number, number, number]> };
 }

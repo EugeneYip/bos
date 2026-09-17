@@ -18,6 +18,14 @@ await pg.waitForFunction('window.__ready === true',{timeout:300000});
 await pg.evaluate(()=>window.__debug.settle(400));
 await new Promise(r=>setTimeout(r,8000));
 await pg.evaluate(()=>window.__debug.settle(200));
+// Force collection before reading: usedJSHeapSize counts garbage that has
+// simply not been swept yet, and this scene generates a lot of it while
+// streaming. Without this the figure over-reports badly.
+const cdp = await pg.target().createCDPSession();
+await cdp.send('HeapProfiler.enable');
+await cdp.send('HeapProfiler.collectGarbage');
+await cdp.send('HeapProfiler.collectGarbage');
+await new Promise(r=>setTimeout(r,1500));
 const r=await pg.evaluate(()=>{
   let bytes=0, nulled=0, kept=0; const seen=new Set();
   window.__boston.ctx.scene.traverse(o=>{const g=o.geometry; if(!g||seen.has(g))return; seen.add(g);

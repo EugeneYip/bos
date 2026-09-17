@@ -114,6 +114,84 @@ function writeJson(name, data) {
 }
 
 /** Split a record array across files of at most `per` records each. */
+/**
+ * Shard spatially, on whole tiles, and report each shard's bounds.
+ *
+ * `shard` above slices the record array in the order it happens to be in,
+ * which puts a building in Charlestown and one in Roslindale in the same
+ * file. That is fine when the client loads every shard, and useless the
+ * moment it wants to load only what is near the camera -- which is what an
+ * iPad needs, since building all 61,574 of them at once is what makes iOS
+ * Safari reload the tab.
+ *
+ * Records are bucketed into the same 500 m tiles the runtime uses, the tiles
+ * are walked in Morton order so consecutive shards stay compact, and whole
+ * tiles are packed into shards. A tile therefore belongs to exactly one
+ * shard, which is what makes unloading one a matter of dropping its tiles
+ * rather than rebuilding a neighbour's.
+ */
+const SHARD_TILE = 500;
+
+function mortonKey(ix, iz) {
+  let k = 0;
+  for (let b = 0; b < 16; b++) {
+    k |= ((ix >> b) & 1) << (2 * b);
+    k |= ((iz >> b) & 1) << (2 * b + 1);
+  }
+  return k;
+}
+
+function shardSpatial(prefix, records, per, clean, centroid) {
+  const buckets = new Map();
+  for (const r of records) {
+    const [cx, cz] = centroid(r);
+    const ix = Math.floor(cx / SHARD_TILE);
+    const iz = Math.floor(cz / SHARD_TILE);
+    const key = `${ix},${iz}`;
+    const b = buckets.get(key);
+    if (b) b.recs.push(r);
+    else buckets.set(key, { ix, iz, m: mortonKey(ix + 512, iz + 512), recs: [r] });
+  }
+
+  const tiles = [...buckets.values()].sort((a, b) => a.m - b.m);
+  const names = [];
+  const bounds = [];
+  let batch = [];
+  let box = null;
+
+  const flush = () => {
+    if (!batch.length) return;
+    names.push(writeJson(`${prefix}-${String(names.length).padStart(2, '0')}.json`, batch.map(clean)));
+    bounds.push([
+      Math.round(box[0]), Math.round(box[1]), Math.round(box[2]), Math.round(box[3]),
+    ]);
+    batch = [];
+    box = null;
+  };
+
+  for (const t of tiles) {
+    const x0 = t.ix * SHARD_TILE, z0 = t.iz * SHARD_TILE;
+    const x1 = x0 + SHARD_TILE, z1 = z0 + SHARD_TILE;
+    if (batch.length && batch.length + t.recs.length > per) flush();
+    batch.push(...t.recs);
+    box = box
+      ? [Math.min(box[0], x0), Math.min(box[1], z0), Math.max(box[2], x1), Math.max(box[3], z1)]
+      : [x0, z0, x1, z1];
+  }
+  flush();
+
+  const keep = new Set(names);
+  for (const f of fs.readdirSync(OUT)) {
+    if (new RegExp(`^${prefix}-\\d\\d\\.json$`).test(f) && !keep.has(f)) {
+      fs.unlinkSync(path.join(OUT, f));
+      console.log(`      swept stale ${f}`);
+    }
+  }
+  const span = bounds.map((b) => Math.round(Math.max(b[2] - b[0], b[3] - b[1])));
+  console.log(`  ${prefix}: ${names.length} spatial shards, widest ${Math.max(...span)} m`);
+  return { names, bounds };
+}
+
 function shard(prefix, records, per, clean) {
   const names = [];
   const n = Math.max(1, Math.ceil(records.length / per));
@@ -212,7 +290,26 @@ const terrainMeta = {
 };
 const terrainName = writeJson('terrain.json', terrainMeta);
 
-const buildingFiles = shard('buildings', buildings, 9000, cleanBuilding);
+// 1,200 records a shard rather than 9,000. The count is chosen for spatial
+// granularity, not file size: at 9,000 the city came out as seven shards
+// spanning four to ten kilometres each, so a 2.6 km streaming radius reached
+// nearly all of them and nothing was saved.
+const buildingShards = shardSpatial('buildings', buildings, 1200, cleanBuilding, (b) => {
+  // The centre of the outline's bounding box, which is exactly what
+  // `buildShard` buckets on at runtime. The two have to agree: if a record
+  // lands in a tile outside its own shard's reported bounds, the client can
+  // decide that shard is far away and unload a tile that is under the camera.
+  const o = b.outline;
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < o.length; i += 2) {
+    if (o[i] < minX) minX = o[i];
+    if (o[i] > maxX) maxX = o[i];
+    if (o[i + 1] < minZ) minZ = o[i + 1];
+    if (o[i + 1] > maxZ) maxZ = o[i + 1];
+  }
+  return [(minX + maxX) * 0.5, (minZ + maxZ) * 0.5];
+});
+const buildingFiles = buildingShards.names;
 const roadFiles = shard('roads', roads, 12000, cleanRoad);
 const areaFiles = shard('areas', areas, 6000, cleanArea);
 // Trees dwarf everything else, so they get their own shard(s) and the long tail
@@ -253,6 +350,11 @@ const manifest = {
     areas: areaFiles,
     props: propFiles,
   },
+  /**
+   * Axis-aligned world bounds of each building shard, [x0, z0, x1, z1].
+   * Lets the client load only the shards near the camera.
+   */
+  shardBounds: { buildings: buildingShards.bounds },
   // Additive metadata; the runtime may ignore all of it.
   world: {
     minX: Math.round(WORLD_BOUNDS.minX * 100) / 100,
