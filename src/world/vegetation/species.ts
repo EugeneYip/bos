@@ -169,7 +169,25 @@ export const SPECIES: Species[] = [
     leafMeters: 0.19,
     bark: 'mottled', conifer: false, limbs: 4, density: 0.9, cardScale: 0.38,
     trunkRadius: 0.022,
-    summerColor: 0x6b8c4a, autumnColor: 0x9c8451, barkColor: 0x9a9382,
+    // Pale, but not five times paler than every other trunk in the city.
+    //
+    // Every colour in this table is converted from sRGB to linear *twice* on
+    // its way to the shader (`material.ts` says so and declines to change it,
+    // because the whole palette was chosen by eye against the doubled
+    // result). Squaring a conversion squares the ratios between colours as
+    // well: at 0x9a9382 this bark came out at 0.070 linear against the ridged
+    // barks' 0.0138 — a 5.1x spread where the real one is about 2.2 — and
+    // with the trunk's un-occluded skylight gather on top of it (`canopy` is
+    // 1.3 for bark, three times the leaves' share) a London plane standing in
+    // the shade on Boston Common measured *brighter than sunlit foliage*:
+    // 1.55x the frame's mean luma against 0.35x for a red oak's trunk four
+    // metres away. What it read as was a dead tree — a bare white armature
+    // among full crowns, which is exactly how it was first reported.
+    //
+    // 0x817a6c is the same hue at 83 % of the value, which after the doubling
+    // lands at 0.0324 linear: 2.35x the ridged barks, which is about what a
+    // plane's cream-and-olive plates really are against an oak's grey.
+    summerColor: 0x6b8c4a, autumnColor: 0x9c8451, barkColor: 0x817a6c,
     sway: 0.8, turnBias: 0.42,
     habitat: { street: 1.6, park: 0.8, forest: 0.1, lawn: 0.5 },
   },
