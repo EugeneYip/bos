@@ -401,6 +401,9 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
   if (leaf) (mat.defines as Record<string, unknown>).VEG_LEAF = '';
 
   mat.onBeforeCompile = (shader) => {
+    // QA hook: the uniforms below are otherwise unreachable from outside, so
+    // every A/B on one of them would cost a rebuild. Nothing reads this.
+    mat.userData.shader = shader;
     shader.uniforms.uTime = o.shared.time;
     shader.uniforms.uDither = o.shared.dither;
     shader.uniforms.uWind = o.shared.wind;

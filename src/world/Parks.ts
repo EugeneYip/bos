@@ -129,6 +129,35 @@ const STAMP_W = 12;
 const COVER_DIV = (9 * STAMP_W) / (78 / (CANOPY_CELL * CANOPY_CELL));
 /** Un-occluded skylight floor for park ground. See `surfaceMaterial`. */
 const SKY_FLOOR = 0.55;
+/**
+ * Image-based lighting gain for park ground.
+ *
+ * Every other module binds `ctx.envMap` to its own materials; this one never
+ * did, and three.js then *overrides* a standard material's `envMapIntensity`
+ * with `scene.environmentIntensity` whenever `material.envMap` is null
+ * (WebGLRenderer, `refreshMaterialUniforms`). So the city's largest horizontal
+ * surface had no say at all in how much sky it received, and took the scene
+ * default of 1 whatever this file did.
+ *
+ * It needs more than 1, for a reason that is specific to ground under trees.
+ * The canopy is accounted for twice: once by the shadow map, which is correct,
+ * and again by the post chain's screen-space occlusion, whose horizon search
+ * sees the trunks and crowns standing in the depth buffer and drives a lawn's
+ * visibility towards zero. Measured at `common-street`, turning GTAO off lifts
+ * the lawn by half (region luma 49.3 -> 73.6) on ground the shadow map has
+ * already shaded. 2.0 puts back about what the second count takes away.
+ *
+ * It costs almost nothing where it should not apply: from `aerial-city`, where
+ * the Common is open and sunlit, the same change moves it 102.5 -> 108.9 luma
+ * against a roof that does not move at all.
+ */
+const PARK_ENV = 2.0;
+/**
+ * Colour of that floor under a *closed* canopy: light that has come through
+ * leaves is green. In the open there is no canopy to colour it, so the tint
+ * is mixed in by canopy coverage and open lawn keeps the sky's own hue.
+ */
+const CANOPY_TINT = new THREE.Vector3(0.80, 1.0, 0.74);
 
 /**
  * Somewhere to bank a triangle's flat XZ outline while the city is being
@@ -210,6 +239,8 @@ export class Parks implements WorldModule {
   private triCount = 0;
   private canopy?: CanopyField;
   private tileCache = new Map<string, number>();
+  /** Last `ctx.envMap` adopted, so the rebind runs only when it changes. */
+  private envRef: THREE.Texture | null = null;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'parks';
@@ -465,6 +496,7 @@ export class Parks implements WorldModule {
       return new THREE.MeshStandardMaterial({
         name: `park:${surface}`, roughness: 0.95, metalness: 0, vertexColors: true,
         side: THREE.DoubleSide,
+        envMap: ctx.envMap, envMapIntensity: PARK_ENV,
         polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
       });
     }
@@ -499,6 +531,8 @@ export class Parks implements WorldModule {
       normalMap: flat ? null : (src?.normalMap ?? set?.normalMap ?? null),
       roughnessMap: src?.roughnessMap ?? set?.roughnessMap ?? null,
       roughness: 1, metalness: 0, vertexColors: true,
+      // Bound explicitly, and at this module's own intensity: see PARK_ENV.
+      envMap: ctx.envMap, envMapIntensity: PARK_ENV,
       // Ear-clipping in the XZ plane and then treating it as a Y-up surface
       // flips the handedness, so these come out back-facing and FrontSide
       // culls the lot — the same trap the water fell into.
@@ -519,10 +553,15 @@ export class Parks implements WorldModule {
     const prev = mat.onBeforeCompile;
     mat.onBeforeCompile = (shader, renderer) => {
       prev.call(mat, shader, renderer);
+      // The uniform objects below are created here and referenced nowhere
+      // else, so without this there is no way to A/B one of them at runtime:
+      // every experiment costs a rebuild. QA only; nothing reads it in the app.
+      mat.userData.shader = shader;
       shader.uniforms.uSoil = { value: SOIL };
       shader.uniforms.uWear = { value: surface === 'sand' ? 0 : 1 };
       shader.uniforms.uFlat = { value: new THREE.Vector2(60, 260) };
       shader.uniforms.uSky = { value: SKY_FLOOR };
+      shader.uniforms.uSkyTint = { value: CANOPY_TINT.clone() };
       shader.uniforms.uCanopyMap = { value: canopy?.tex ?? null };
       shader.uniforms.uCanopyXf = {
         value: canopy
@@ -536,6 +575,7 @@ export class Parks implements WorldModule {
           uniform float uWear;
           uniform vec2  uFlat;
           uniform float uSky;
+          uniform vec3  uSkyTint;
           uniform vec4  uCanopyXf;
           #ifdef PARK_CANOPY
             uniform sampler2D uCanopyMap;
@@ -612,7 +652,8 @@ export class Parks implements WorldModule {
           #include <lights_fragment_maps>
           #if defined( USE_ENVMAP ) && defined( ENVMAP_TYPE_CUBE_UV )
             iblIrradiance += getIBLIrradiance( vec3( 0.0, 1.0, 0.0 ) )
-              * vec3( 0.80, 1.0, 0.74 ) * uSky * ( 0.30 + 0.70 * parkShade );
+              * mix( vec3( 1.0 ), uSkyTint, parkShade )
+              * uSky * ( 0.30 + 0.70 * parkShade );
           #endif
         `);
     };
@@ -621,6 +662,28 @@ export class Parks implements WorldModule {
     const prevKey = mat.customProgramCacheKey;
     mat.customProgramCacheKey = () => `park|${surface}|${canopy ? 1 : 0}|${prevKey.call(mat)}`;
     return mat;
+  }
+
+  /**
+   * Adopt the IBL when the Sky module publishes it.
+   *
+   * Sky bakes the environment after the world modules initialise, so at
+   * `init` time `ctx.envMap` is still null, and it is replaced again on a
+   * quality change. Without this the explicit binding in `surfaceMaterial`
+   * would never take and three would silently fall back to
+   * `scene.environmentIntensity` — which is exactly the bug PARK_ENV exists
+   * to fix, only harder to see. `Materials` and `Landmarks` do the same.
+   */
+  update(_dt: number, ctx: Ctx): void {
+    if (ctx.envMap === this.envRef) return;
+    this.envRef = ctx.envMap;
+    for (const m of this.materials) {
+      const s = m as THREE.MeshStandardMaterial;
+      if (!('envMap' in s)) continue;
+      s.envMap = this.envRef;
+      s.envMapIntensity = PARK_ENV;
+      s.needsUpdate = true;
+    }
   }
 
   /** Ear-clip a land-use polygon, holes included, into a draped surface. */
