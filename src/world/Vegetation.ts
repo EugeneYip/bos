@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord, PropSet, RoadRecord } from '../core/types';
 import { loadAreas, loadProps, loadRoads } from '../core/data';
+import { MOBILE } from '../core/gpu';
 import { SPECIES, autumnFactor } from './vegetation/species';
 import { buildTreeLods, midCardMeters, type TreeGeometry } from './vegetation/geometry';
 import { createSharedUniforms, createVegMaterial, type Lod, type SharedUniforms } from './vegetation/material';
@@ -57,7 +58,13 @@ interface Tier {
 interface SpeciesTier {
   near: Tier;
   mid: Tier;
-  far: Tier[];
+  /** Live impostor tiles, keyed by tile index. All of them on a desktop. */
+  far: Map<number, Tier>;
+  /** CSR of this species' tree indices by tile, so a tile can be built later. */
+  farStart: Int32Array;
+  farItems: Uint32Array;
+  farGeom: TreeGeometry;
+  farMaterials: THREE.Material[];
   nearCap: number;
   midCap: number;
 }
@@ -90,7 +97,32 @@ const FADE_BAND = 30;
  */
 const NEARMID_BAND = FADE_BAND;
 const GRID_CELL = 64;
-const FAR_TILES = 4;
+/**
+ * Impostor tiles across the city, per axis.
+ *
+ * Four is enough on a desktop, where the only job is to give the frustum
+ * something district-sized to reject. On a phone the tiles are also the unit
+ * of *streaming*, so they have to be small enough that a 1600 m disc is not
+ * most of the city: 8 puts a tile at roughly 1500 x 1120 m, and the twenty or
+ * so tiles a 1600 m disc touches hold about a third of the trees. Finer than
+ * that and the win is eaten by the draw call per tile per species -- at 16 a
+ * tile averaged forty instances.
+ *
+ * Tile granularity does not decide where the canopy *ends*: the impostor
+ * material fades out at STREAM_RADIUS on a phone regardless, so a tile that
+ * straddles the edge draws only the trees inside it.
+ */
+const FAR_TILES = MOBILE ? 8 : 4;
+/**
+ * How far a phone builds impostors, metres. The same radius Buildings and
+ * Roads stream at, deliberately: a canopy that carried on past the edge of
+ * the built city would be far more conspicuous than one that stops with it.
+ */
+const STREAM_RADIUS = 1600;
+/** Extra reach before a built tile is thrown away, so the edge does not thrash. */
+const STREAM_HYSTERESIS = 260;
+/** Tiles a phone may build in one frame. One is about a third of a millisecond. */
+const STREAM_PER_FRAME = 2;
 
 export class Vegetation implements WorldModule {
   readonly name = 'Vegetation';
@@ -120,6 +152,8 @@ export class Vegetation implements WorldModule {
   /** Worst single-frame refill, in ms. A *max*, not an average: see `rebuild`. */
   private worstRebuild = 0;
   private worstGround = 0;
+  private worstStream = 0;
+  private lastStream = new THREE.Vector3(1e9, 1e9, 1e9);
   /** Resumable state for the amortised refill; null when no pass is running. */
   private rb: {
     k: number; ci: number; cj: number;
@@ -160,6 +194,9 @@ export class Vegetation implements WorldModule {
       clump: true,
     });
     const field = this.field;
+    // Placement is the only reader of the mask's park-size hint; see
+    // `dropExtent`. 4.3 MB, every platform.
+    this.mask.dropExtent();
     const tTex = performance.now();
 
     const aniso = Math.min(ctx.quality.anisotropy, ctx.renderer.capabilities.getMaxAnisotropy());
@@ -175,6 +212,7 @@ export class Vegetation implements WorldModule {
     const tGeo = performance.now();
 
     this.buildGrid(field);
+    this.buildFarLayout(field);
 
     // Tier budgets. Near geometry is ~430 triangles a tree and mid ~80, so the
     // near tier is deliberately the smaller of the two.
@@ -192,11 +230,18 @@ export class Vegetation implements WorldModule {
 
       const near = this.makeTier(ctx, s, lods.near, 'near', nearCap);
       const mid = this.makeTier(ctx, s, lods.mid, 'mid', midCap);
-      const far = this.makeFarTiles(ctx, s, lods.far);
-      this.tiers.push({ near, mid, far, nearCap, midCap });
+      this.tiers.push({
+        near, mid, nearCap, midCap,
+        far: new Map(),
+        ...this.indexFarTiles(ctx, s, lods.far),
+      });
       // Yield so the loading bar keeps painting while the crowns are built.
       await new Promise((r) => setTimeout(r, 0));
     }
+    // Desktop builds every tile now; a phone builds the ones it is standing in
+    // and picks up the rest as the camera moves.
+    this.streamFar(ctx, Infinity);
+    this.lastStream.copy(ctx.camera.position);
 
     this.ground = new GroundCover(this.mask, this.root);
     this.ground.build(ctx, this.shared, tex.grass, tex.shrub, tex.mean.grass, tex.mean.shrub);
@@ -246,7 +291,18 @@ export class Vegetation implements WorldModule {
     const fade = {
       near: { in: -1e6, out: NEAR_RADIUS, band: NEARMID_BAND, inBand: NEARMID_BAND },
       mid: { in: NEAR_RADIUS - NEARMID_BAND, out: MID_RADIUS, band: FADE_BAND, inBand: NEARMID_BAND },
-      far: { in: MID_RADIUS - FADE_BAND, out: 1e9, band: FADE_BAND, inBand: FADE_BAND },
+      // A phone stops the canopy where Buildings and Roads stop their own
+      // streaming. The tile grid is far too coarse to place that edge -- a
+      // tile is 1.5 km across -- so the material does it per tree, and the
+      // vertex shader collapses everything past it to zero area. Without this
+      // a phone renders a forest standing on the far side of the edge of the
+      // modelled city, which is a worse artefact than the edge itself.
+      far: {
+        in: MID_RADIUS - FADE_BAND,
+        out: MOBILE ? STREAM_RADIUS : 1e9,
+        band: MOBILE ? 220 : FADE_BAND,
+        inBand: FADE_BAND,
+      },
     }[lod];
 
     // Each tier gets art authored for its own card size: near cards carry
@@ -316,15 +372,41 @@ export class Vegetation implements WorldModule {
   }
 
   /**
-   * Impostors, split into a 4x4 grid of regional meshes. One mesh holding all
-   * 88 000 would have a city-sized bounding sphere and could never be culled;
-   * split, the renderer skips every district behind the camera.
+   * Index this species' trees by impostor tile, without building anything.
+   *
+   * One mesh holding all 88 000 would have a city-sized bounding sphere and
+   * could never be culled; split, the renderer skips every district behind
+   * the camera. On a phone the tiles are also the unit of streaming, so the
+   * membership is kept as a CSR list and the meshes are built on demand --
+   * see `streamFar`.
    */
-  private makeFarTiles(ctx: Ctx, s: number, tg: TreeGeometry): Tier[] {
+  private indexFarTiles(
+    ctx: Ctx, s: number, tg: TreeGeometry,
+  ): Pick<SpeciesTier, 'farStart' | 'farItems' | 'farGeom' | 'farMaterials'> {
     const field = this.field!;
     const idx = field.bySpecies[s];
-    const materials = this.materialsFor(ctx, s, 'far', tg);
+    const n = FAR_TILES * FAR_TILES;
+    const start = new Int32Array(n + 1);
+    for (let k = 0; k < idx.length; k++) start[this.tileOf(idx[k]) + 1]++;
+    for (let t = 0; t < n; t++) start[t + 1] += start[t];
+    const items = new Uint32Array(idx.length);
+    const cursor = start.slice(0, n);
+    for (let k = 0; k < idx.length; k++) items[cursor[this.tileOf(idx[k])]++] = idx[k];
+    return {
+      farStart: start,
+      farItems: items,
+      farGeom: tg,
+      farMaterials: this.materialsFor(ctx, s, 'far', tg),
+    };
+  }
 
+  /** World bounds of the impostor tile grid, set once by `buildFarLayout`. */
+  private fMinX = 0;
+  private fMinZ = 0;
+  private fStepX = 1;
+  private fStepZ = 1;
+
+  private buildFarLayout(field: TreeField): void {
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (let i = 0; i < field.count; i++) {
       if (field.px[i] < minX) minX = field.px[i];
@@ -332,46 +414,44 @@ export class Vegetation implements WorldModule {
       if (field.pz[i] < minZ) minZ = field.pz[i];
       if (field.pz[i] > maxZ) maxZ = field.pz[i];
     }
-    const spanX = Math.max(1, maxX - minX);
-    const spanZ = Math.max(1, maxZ - minZ);
-    const tileOf = (i: number): number => {
-      const tx = Math.min(FAR_TILES - 1, Math.floor(((field.px[i] - minX) / spanX) * FAR_TILES));
-      const tz = Math.min(FAR_TILES - 1, Math.floor(((field.pz[i] - minZ) / spanZ) * FAR_TILES));
-      return tz * FAR_TILES + tx;
-    };
+    this.fMinX = minX;
+    this.fMinZ = minZ;
+    this.fStepX = Math.max(1, maxX - minX) / FAR_TILES;
+    this.fStepZ = Math.max(1, maxZ - minZ) / FAR_TILES;
+  }
 
-    const counts = new Int32Array(FAR_TILES * FAR_TILES);
-    for (let k = 0; k < idx.length; k++) counts[tileOf(idx[k])]++;
+  private tileOf(i: number): number {
+    const field = this.field!;
+    const tx = Math.min(FAR_TILES - 1, Math.max(0, ((field.px[i] - this.fMinX) / this.fStepX) | 0));
+    const tz = Math.min(FAR_TILES - 1, Math.max(0, ((field.pz[i] - this.fMinZ) / this.fStepZ) | 0));
+    return tz * FAR_TILES + tx;
+  }
 
-    const out: Tier[] = [];
-    const cursor = new Int32Array(FAR_TILES * FAR_TILES);
-    const meshes: (THREE.InstancedMesh | null)[] = new Array(FAR_TILES * FAR_TILES).fill(null);
-    for (let t = 0; t < counts.length; t++) {
-      if (!counts[t]) continue;
-      const mesh = new THREE.InstancedMesh(
-        tg.geometry,
-        materials.length === 1 ? materials[0] : materials,
-        counts[t],
-      );
-      mesh.name = `trees:${SPECIES[s].name}:far:${t}`;
-      mesh.userData.noShadow = true;
-      mesh.castShadow = false;
-      mesh.receiveShadow = true;
-      mesh.count = counts[t];
-      meshes[t] = mesh;
-      this.root.add(mesh);
-      out.push({ mesh, materials });
-    }
+  private static _fm = new THREE.Matrix4();
+  private static _fq = new THREE.Quaternion();
 
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const p = new THREE.Vector3();
-    const sc = new THREE.Vector3();
-    for (let k = 0; k < idx.length; k++) {
-      const i = idx[k];
-      const t = tileOf(i);
-      const mesh = meshes[t];
-      if (!mesh) continue;
+  /** Build one species' impostor mesh for one tile. */
+  private makeFarTile(st: SpeciesTier, s: number, t: number): Tier | null {
+    const field = this.field!;
+    const a = st.farStart[t];
+    const b = st.farStart[t + 1];
+    if (b <= a) return null;
+    const mesh = new THREE.InstancedMesh(
+      st.farGeom.geometry,
+      st.farMaterials.length === 1 ? st.farMaterials[0] : st.farMaterials,
+      b - a,
+    );
+    mesh.name = `trees:${SPECIES[s].name}:far:${t}`;
+    mesh.userData.noShadow = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    mesh.count = b - a;
+    const m = Vegetation._fm;
+    const q = Vegetation._fq;
+    const p = Vegetation._p;
+    const sc = Vegetation._s;
+    for (let k = a; k < b; k++) {
+      const i = st.farItems[k];
       const h = field.height[i];
       const w = field.width[i] * h;
       p.set(field.px[i], field.py[i], field.pz[i]);
@@ -379,14 +459,65 @@ export class Vegetation implements WorldModule {
       // No yaw: the shader spins the billboard to face the camera itself, and
       // an instance rotation would fight it.
       m.compose(p, q, sc);
-      mesh.setMatrixAt(cursor[t]++, m);
+      mesh.setMatrixAt(k - a, m);
     }
-    for (const mesh of meshes) {
-      if (!mesh) continue;
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.computeBoundingSphere();
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    this.root.add(mesh);
+    return { mesh, materials: st.farMaterials };
+  }
+
+  /** Shortest distance from the camera to a tile's footprint, metres. */
+  private tileDistance(t: number, cx: number, cz: number): number {
+    const tx = t % FAR_TILES;
+    const tz = (t / FAR_TILES) | 0;
+    const x0 = this.fMinX + tx * this.fStepX;
+    const z0 = this.fMinZ + tz * this.fStepZ;
+    const dx = Math.max(x0 - cx, 0, cx - (x0 + this.fStepX));
+    const dz = Math.max(z0 - cz, 0, cz - (z0 + this.fStepZ));
+    return Math.hypot(dx, dz);
+  }
+
+  /**
+   * Bring the set of live impostor tiles in line with where the camera is.
+   *
+   * A no-op on a desktop after the first call, which builds every tile: the
+   * whole set is 5.6 MB of instance matrices and the frustum handles the rest.
+   * On a phone the tiles outside STREAM_RADIUS are never built, and ones left
+   * behind are thrown away, so the canopy occupies a disc rather than the
+   * county -- and stops at the same distance the buildings and the roads do,
+   * which is the only way the edge of the model does not read as a clearing.
+   *
+   * `budget` caps how many tiles may be *built* in this call, so a phone
+   * spreads the work over frames instead of dropping one. Returns how many
+   * wanted tiles the budget turned away, so the caller knows to come back.
+   */
+  private streamFar(ctx: Ctx, budget: number): number {
+    if (!this.field) return 0;
+    const cam = ctx.camera.position;
+    const nTiles = FAR_TILES * FAR_TILES;
+    let built = 0;
+    let pending = 0;
+    for (let t = 0; t < nTiles; t++) {
+      const d = MOBILE ? this.tileDistance(t, cam.x, cam.z) : 0;
+      const want = d <= STREAM_RADIUS;
+      const drop = d > STREAM_RADIUS + STREAM_HYSTERESIS;
+      for (let s = 0; s < this.tiers.length; s++) {
+        const st = this.tiers[s];
+        const live = st.far.get(t);
+        if (want && !live) {
+          if (built >= budget) { pending++; continue; }
+          const tier = this.makeFarTile(st, s, t);
+          if (tier) st.far.set(t, tier);
+          built++;
+        } else if (drop && live) {
+          this.root.remove(live.mesh);
+          live.mesh.dispose();
+          st.far.delete(t);
+        }
+      }
     }
-    return out;
+    return pending;
   }
 
   // -------------------------------------------------------------------------
@@ -623,6 +754,15 @@ export class Vegetation implements WorldModule {
     }
     this.worstRebuild = Math.max(this.worstRebuild, performance.now() - r0);
 
+    // Impostor tiles follow the camera on a phone; a no-op on a desktop,
+    // where every tile was built at load.
+    if (MOBILE && ctx.camera.position.distanceToSquared(this.lastStream) > 120 * 120) {
+      const s0 = performance.now();
+      const pending = this.streamFar(ctx, STREAM_PER_FRAME);
+      this.worstStream = Math.max(this.worstStream, performance.now() - s0);
+      if (!pending) this.lastStream.copy(ctx.camera.position);
+    }
+
     // Grass is a near-camera effect. Rebuilding it costs a third of a second of
     // terrain sampling, and none of it is visible from a camera moving at forty
     // metres a second — so it waits until the view settles.
@@ -643,21 +783,43 @@ export class Vegetation implements WorldModule {
     ctx.stats['veg.buildMs'] = Math.round(this.buildMs);
     ctx.stats['veg.worstRebuildMs'] = Math.round(this.worstRebuild * 10) / 10;
     ctx.stats['veg.worstGroundMs'] = Math.round(this.worstGround * 10) / 10;
+    if (MOBILE) {
+      let tiles = 0;
+      for (const t of this.tiers) tiles += t.far.size;
+      ctx.stats['veg.farTiles'] = tiles;
+      ctx.stats['veg.worstStreamMs'] = Math.round(this.worstStream * 10) / 10;
+    }
   }
 
   dispose(ctx: Ctx): void {
     ctx.scene.remove(this.root);
     this.ground?.dispose();
     const seen = new Set<THREE.Material>();
+    const seenGeo = new Set<THREE.BufferGeometry>();
     for (const t of this.tiers) {
-      for (const x of [t.near, t.mid, ...t.far]) {
-        x.mesh.geometry.dispose();
+      for (const x of [t.near, t.mid, ...t.far.values()]) {
+        // Every live impostor tile shares one geometry, so this has to be
+        // idempotent rather than once per mesh.
+        if (!seenGeo.has(x.mesh.geometry)) {
+          seenGeo.add(x.mesh.geometry);
+          x.mesh.geometry.dispose();
+        }
+        x.mesh.dispose();
         for (const m of x.materials) {
           if (!seen.has(m)) {
             seen.add(m);
             m.dispose();
           }
         }
+      }
+      // A phone may have no tile of a species live at all; its geometry is
+      // still holding GPU memory.
+      if (!seenGeo.has(t.farGeom.geometry)) {
+        seenGeo.add(t.farGeom.geometry);
+        t.farGeom.geometry.dispose();
+      }
+      for (const m of t.farMaterials) {
+        if (!seen.has(m)) { seen.add(m); m.dispose(); }
       }
     }
     disposeTextures(this.textures);

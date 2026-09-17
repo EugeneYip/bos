@@ -298,6 +298,20 @@ export class LandMask {
     return this.extent[j * this.nx + i] * 4;
   }
 
+  /**
+   * Release the per-cell park-size hint.
+   *
+   * `extent` is a second byte per 5 m cell over the whole city -- 4.3 MB --
+   * and it is read exactly once, by `buildTreeField`, to decide how big a
+   * specimen a park is old enough to have grown. Nothing consults it after
+   * placement, and holding it for the life of the page is 4.3 MB that an
+   * iPad does not have. `extentAt` answers 0 afterwards, which is the same
+   * answer it gives outside the raster.
+   */
+  dropExtent(): void {
+    this.extent = new Uint8Array(0);
+  }
+
   /** True when ground cover may grow here. */
   plantable(x: number, z: number): number {
     const v = this.at(x, z);
