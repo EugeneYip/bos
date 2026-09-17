@@ -167,11 +167,32 @@ await page.evaluate(() => {
       }
     });
   };
+  // Bind the shared IBL to the vegetation materials, so the envMapIntensity
+  // each one declares is actually honoured instead of being replaced by
+  // scene.environmentIntensity. `far` gets its own value so the impostor tier
+  // can be held at what it effectively has today.
+  window.__vegEnv = (farLeaf) => {
+    const ctx = window.__boston.ctx;
+    ctx.scene.traverse((o) => {
+      const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+      for (const m of ms) {
+        const n = (m && m.name) || '';
+        if (!n.startsWith('veg:')) continue;
+        if (farLeaf === 0) { m.envMap = null; m.needsUpdate = true; continue; }
+        m.envMap = ctx.envMap;
+        if (n.includes(':far:')) m.envMapIntensity = farLeaf;
+        m.needsUpdate = true;
+      }
+    });
+  };
   window.__post = (k, v) => window.__boston.get('Post') && window.__boston.get('Post').apply({ key: k, value: v });
 });
 
 const arms = {
   base: { on: () => {}, off: () => {} },
+  vegenv15: { on: () => window.__vegEnv(1.5), off: () => window.__vegEnv(0) },
+  vegenv10: { on: () => window.__vegEnv(1.0), off: () => window.__vegEnv(0) },
+  vegenv07: { on: () => window.__vegEnv(0.7), off: () => window.__vegEnv(0) },
   // Far impostors: the two un-occluded additions to their indirect term.
   farcan0: { on: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0),
     off: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0.26) },

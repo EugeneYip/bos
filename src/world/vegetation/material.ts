@@ -329,6 +329,13 @@ export interface MaterialOptions {
    */
   fadeInBand?: number;
   envMapIntensity: number;
+  /**
+   * The shared IBL. Must be bound: three's `refreshMaterialUniforms`
+   * *replaces* `envMapIntensity` with `scene.environmentIntensity` whenever
+   * `material.envMap` is null, so every value in this file was dead code
+   * until it was. See `Vegetation.materialsFor`.
+   */
+  envMap?: THREE.Texture | null;
   /** Extra un-occluded skylight, standing in for canopy multiple scattering. */
   canopy?: number;
   alphaTest?: number;
@@ -367,6 +374,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
     // at 80 m. 0.36 was tuned for cards holding six huge leaves.
     alphaTest: leaf ? (o.alphaTest ?? (lod === 'far' ? 0.2 : lod === 'mid' ? 0.22 : 0.26)) : 0,
     transparent: false,
+    envMap: o.envMap ?? null,
     envMapIntensity: o.envMapIntensity,
     dithering: true,
   });

@@ -166,6 +166,8 @@ export class Vegetation implements WorldModule {
   private drawnMid = 0;
   private buildMs = 0;
   private updateMs = 0;
+  /** Last `ctx.envMap` bound to this module's materials. */
+  private envRef: THREE.Texture | null = null;
 
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'vegetation';
@@ -322,11 +324,23 @@ export class Vegetation implements WorldModule {
       fadeOut: fade.out,
       fadeBand: fade.band,
       fadeInBand: fade.inBand,
-      envMapIntensity: lod === 'far' ? 1.5 : 1.15,
+      // 1.0 for the impostor, and not the 1.5 this line used to read.
+      //
+      // Nothing in this file's intensities was reaching the shader: three
+      // overrides `envMapIntensity` with `scene.environmentIntensity` for any
+      // standard material whose own `envMap` is null, and none of these bound
+      // one. So the impostor tier has in fact been running at 1.0 for its
+      // whole life. Putting 1.5 into effect brightens the aerial canopy by
+      // 4 % of its foliage luma at `backbay-grid`, in the direction this tier
+      // is already too bright in; 1.0 leaves it exactly where it is. The
+      // detailed tiers' 1.15, and bark's 1.3, are worth having: they lift a
+      // trunk in the shade of its own crown by a fifth, which is what they
+      // were chosen for.
+      envMap: ctx.envMap,
+      envMapIntensity: lod === 'far' ? 1.0 : 1.15,
       canopy: lod === 'far' ? 0.26 : 0.42,
       mapMean,
     }).material;
-    void ctx;
 
     if (!tg.twoGroups) return [leaf];
 
@@ -340,6 +354,7 @@ export class Vegetation implements WorldModule {
       fadeOut: fade.out,
       fadeBand: fade.band,
       fadeInBand: fade.inBand,
+      envMap: ctx.envMap,
       envMapIntensity: 1.3,
       // A trunk stands under its own crown. Nothing in the renderer knows
       // that, and its screen-space occlusion assumes the worst, so without a
@@ -724,6 +739,24 @@ export class Vegetation implements WorldModule {
 
     this.shared.time.value += dt;
     this.shared.season.value = autumnFactor(ctx.dayOfYear);
+
+    // Sky bakes the IBL after the world modules initialise, and replaces it on
+    // a quality change, so the binding made at construction has to be redone
+    // when it appears. Without this every material falls back to
+    // `scene.environmentIntensity` and the intensities in `materialsFor`
+    // mean nothing -- which is the state this module was in until now.
+    if (ctx.envMap !== this.envRef) {
+      this.envRef = ctx.envMap;
+      this.root.traverse((o) => {
+        const mm = (o as THREE.Mesh).material;
+        for (const m of Array.isArray(mm) ? mm : [mm]) {
+          const sm = m as THREE.MeshStandardMaterial | undefined;
+          if (!sm || !('envMap' in sm)) continue;
+          sm.envMap = this.envRef;
+          sm.needsUpdate = true;
+        }
+      });
+    }
 
     // Walk the LOD dither one golden-ratio step per frame so the accumulator
     // has something to average. Held at zero when there is no accumulator:
