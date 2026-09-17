@@ -89,6 +89,13 @@ const BOATS: Record<string, number> = { low: 10, medium: 22, high: 38, ultra: 58
 const BOAT_RADIUS = 1500;
 
 /**
+ * Daytime downwelling sky the wake foam is lit by; the same colour
+ * `Water.update` lerps `uSkyAmbient` toward, so foam on a wake and foam on a
+ * shoreline agree.
+ */
+const WAKE_SKY_DAY = new THREE.Color(0.30, 0.40, 0.55);
+
+/**
  * Intelligent-driver-model constants: comfortable accel/brake, gap, headway.
  * A lone car pulling away on a clear road should be inside 30 mph in
  * something like 3-5 seconds; the free-road term's own asymptote toward
@@ -252,6 +259,10 @@ export class Traffic implements WorldModule {
   private boatStroke: THREE.InstancedBufferAttribute[] = [];
   private wakeMesh: THREE.InstancedMesh | null = null;
   private wakeFade: THREE.InstancedBufferAttribute | null = null;
+  private wakeMat: THREE.MeshBasicMaterial | null = null;
+  /** Scratch for the per-frame foam radiance; see {@link lightWake}. */
+  private wakeLit = new THREE.Color();
+  private wakeSky = new THREE.Color();
   /** Sampled water cells boats are allowed to occupy: [x,z,riverFlag,elevation]. */
   private waterCells: Float32Array = new Float32Array(0);
   /** Scratch for the camera's forward vector; boats spawn out of shot. */
@@ -1466,9 +1477,12 @@ export class Traffic implements WorldModule {
     const fade = new THREE.InstancedBufferAttribute(new Float32Array(this.boats.length), 1);
     geo.setAttribute('aFade', fade);
     const tex = wakeTexture();
+    // White, but not *emissive* white. `color` is re-lit every frame from the
+    // sun and sky in `lightWake`; leaving it at 1.0 is what made a wake at two
+    // kilometres measure 204 luma against harbour water at 53.
     const mat = new THREE.MeshBasicMaterial({
       name: 'wake', map: tex, transparent: true, depthWrite: false,
-      side: THREE.DoubleSide, opacity: 0.88, toneMapped: true,
+      side: THREE.DoubleSide, opacity: 0.80, toneMapped: true,
     });
     mat.onBeforeCompile = (sh) => {
       sh.vertexShader = sh.vertexShader
@@ -1491,6 +1505,7 @@ export class Traffic implements WorldModule {
     this.root.add(wake);
     this.wakeMesh = wake;
     this.wakeFade = fade;
+    this.wakeMat = mat;
 
     for (const b of this.boats) this.placeBoat(b, ctx);
   }
@@ -1603,8 +1618,50 @@ export class Traffic implements WorldModule {
     return from + Math.PI;
   }
 
+  /**
+   * Re-light the wake from the sun and the sky, once a frame.
+   *
+   * A wake is foam: white *material*, not a light source. It was drawn as an
+   * unlit `MeshBasicMaterial` at full white, so every wake in the city sat at
+   * whatever 1.0 tonemaps to whatever the hour -- measured at 204 mean luma
+   * against harbour water at 53 in the 17:00 `dusk-harbour` frame, and it
+   * read as a paper cut-out laid over the water rather than as broken water.
+   *
+   * The radiance below is the same construction the water's own whitecaps
+   * use (see `water.frag`: `foamLit`), deliberately, so a wake and the
+   * shoreline wash it runs into are lit by one rule and cannot disagree:
+   *
+   *   down     = (sun * max(sun.y,0) + skyAmbient) / PI     irradiance -> radiance
+   *   foamLit  = foamColour * (down * 0.80 + skyAmbient / PI * 0.55) * authored
+   *
+   * `authored` is the exposure compensation the sky module's post-sunset
+   * wind-up needs: everything display-referred has to come down by the same
+   * factor or it is the brightest thing in a night frame.
+   */
+  private lightWake(ctx: Ctx): void {
+    const mat = this.wakeMat;
+    if (!mat) return;
+    const sun = ctx.sun;
+    const sunUp = Math.max(sun.direction.y, 0);
+    const day = THREE.MathUtils.clamp((sun.elevation + 0.1) / 0.5, 0, 1);
+    // The same downwelling sky the water builds; see `Water.update`.
+    this.wakeSky.setRGB(0.020, 0.030, 0.055).lerp(WAKE_SKY_DAY, day);
+    const authored = THREE.MathUtils.clamp(2.5 / Math.max(ctx.exposure, 0.1), 0.04, 1.25);
+    const k = authored * (1 / Math.PI);
+    const si = Math.max(sun.intensity, 0) * sunUp;
+    this.wakeLit.setRGB(
+      (sun.color.r * si + this.wakeSky.r * (1 + 0.55 / 0.80)) * 0.80 * k,
+      (sun.color.g * si + this.wakeSky.g * (1 + 0.55 / 0.80)) * 0.80 * k,
+      (sun.color.b * si + this.wakeSky.b * (1 + 0.55 / 0.80)) * 0.80 * k,
+    );
+    // Foam is a bright but not perfectly white bubble raft; the water uses
+    // (0.88, 0.90, 0.90) and so does this.
+    mat.color.setRGB(this.wakeLit.r * 0.88, this.wakeLit.g * 0.90, this.wakeLit.b * 0.90);
+  }
+
   private stepBoats(dt: number, ctx: Ctx): void {
     if (!this.boats.length) return;
+    this.lightWake(ctx);
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const e = new THREE.Euler();
