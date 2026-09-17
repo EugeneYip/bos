@@ -306,6 +306,45 @@ const FRAG_EMISSIVE = /* glsl */ `
     float litMix = mix(lit, 0.52, faraway);
     vec3 lamp = mix(mix(vec3(0.76, 0.86, 1.0), vec3(1.0, 0.72, 0.40), warm),
                     vec3(0.99, 0.82, 0.60), faraway);
+
+    // ---- what is actually behind the glass ---------------------------------
+    //
+    // A lit window is not a panel of light, it is a hole into a room, and the
+    // room has a bright ceiling, a dim floor and something hanging in front of
+    // it. Emitting one constant per pane is what made every shopfront clip to
+    // a solid 255 rectangle with a 1 px frame and nothing inside it.
+    //
+    // Coordinates: gUv.x runs across BAYS bays of the atlas tile, so its
+    // fractional part is the position across one bay with the opening centred
+    // in it; gUv.y runs up one storey. The opening occupies roughly the middle
+    // 74% of the storey in every family (0.16-0.82 upstairs, 0.10-0.66 for a
+    // shopfront, 0.30-0.86 for a parlour), and being a little wrong only
+    // stretches the gradient — gGlass is zero outside the pane either way.
+    float wx = fract(gUv.x * BAYS);
+    float wy = clamp((gUv.y - 0.12) * 1.3514, 0.0, 1.0);
+    // Ceiling and its fittings are the bright part; the cill is in the dark.
+    float room = mix(0.26, 1.0, smoothstep(0.0, 0.78, wy));
+    // Falls off into the reveals rather than meeting the frame at full value.
+    room *= 1.0 - 0.34 * pow(abs(wx - 0.5) * 2.0, 3.0);
+    // Blinds and curtains, drawn to a different height in every window; most
+    // are up, a few are most of the way down. Squaring the hash biases it.
+    float hBlind = shellHash(vec3(gBay * 3.1, gFloor + 11.0, vSeed * 0.0157));
+    float drop = hBlind * hBlind * 1.08;
+    float open = smoothstep(0.0, 0.05, (1.0 - drop) - wy);
+    // Behind a blind the room still glows, dimly, through the slats.
+    float slats = 0.80 + 0.20 * sin(wy * 190.0);
+    room = mix(room * 0.30 * slats + 0.055, room, open);
+    // And a warm lamp or a screen close to the glass in some of them.
+    float hLamp = shellHash(vec3(gBay * 0.7, gFloor * 5.3, vSeed * 0.0211 + 4.1));
+    if (hLamp > 0.72) {
+      vec2 d = vec2(wx, wy)
+        - vec2(mix(0.22, 0.78, fract(hLamp * 37.0)), mix(0.18, 0.50, fract(hLamp * 91.0)));
+      room += 0.55 * open * exp(-14.0 * d.x * d.x - 26.0 * d.y * d.y);
+    }
+    // All of that is pane-scale detail. Once a pane is a couple of pixels it
+    // can only alias, so collapse it to its own average instead — 0.52 is the
+    // mean of the profile above, measured over the unit square.
+    room = mix(room, 0.52, smoothstep(70.0, 420.0, gDist));
     // Glass, and only on a facade. Roofs and rooftop plant carry the same
     // surface atlas, so their depth channel reads as 'glass' too, and handing
     // non-facade geometry a third of the window glow lit every flat roof
@@ -314,7 +353,14 @@ const FRAG_EMISSIVE = /* glsl */ `
     // the metering simply raises exposure to compensate and the picture comes
     // back where it started. What has to change is the ratio.
     float mask = gGlass * gFacade;
-    totalEmissiveRadiance += lamp * (bright * litMix * mask * uNight * uWindowGain);
+    // Shoulder, not a scale. The windows are most of the light in a night
+    // frame, so simply turning them down moves the meter and roughly half of
+    // it comes straight back as exposure. Dividing by (1 + e) instead leaves
+    // a dim window almost untouched and only bites on the bright tail, which
+    // is the part that was clipping, so the mean the meter sees barely moves.
+    float e = bright * litMix * room;
+    e = e / (1.0 + 0.62 * e);
+    totalEmissiveRadiance += lamp * (e * mask * uNight * uWindowGain * 1.35);
   }
 `;
 

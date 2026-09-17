@@ -38,6 +38,26 @@ const REGIONS = {
     pave_3: [1430, 630, 165, 12],
     pave_4: [1430, 668, 165, 12],
   },
+  // Deterministic night poses: same camera as street-night but with `traffic`
+  // and `pedestrians` toggled off, so a van parking in front of a shopfront
+  // cannot move a region's mean by 100 luma between two arms of an A/B. Shot
+  // with qa/_fac_probe.mjs; see the poses files in the scratch directory.
+  'ab-street': {
+    // The right-hand shopfront bank, and the left-hand one.
+    store: [1210, 415, 300, 100],
+    store_l: [190, 415, 330, 105],
+    // Upper-floor window field, well above anything that drives past.
+    upper: [680, 30, 440, 290],
+    // Unlit facade between windows: the exposure-invariant reference.
+    wall: [946, 20, 48, 100],
+    // Carriageway stepping out from the right-hand shopfront. y ascending is
+    // *away* from the wall and towards the camera.
+    pave_1: [1240, 578, 260, 9],
+    pave_2: [1240, 600, 260, 9],
+    pave_3: [1240, 632, 260, 9],
+    pave_4: [1240, 676, 260, 9],
+  },
+  'ab-seaport': {},
   'seaport-night': {},
   'charles-water': {
     // Hancock's long glass face.
@@ -186,6 +206,12 @@ for (const file of process.argv.slice(2)) {
   if (s.bank && s.wall) {
     console.log(`  RATIO  bank/wall ${(s.bank.mean / s.wall.mean).toFixed(2)}`
       + `  bank/frame ${(s.bank.mean / g.mean).toFixed(2)}`);
+  }
+  if (s.store && s.wall) {
+    console.log(`  RATIO  store/wall ${(s.store.mean / s.wall.mean).toFixed(2)}`
+      + `  storeL/wall ${(s.store_l.mean / s.wall.mean).toFixed(2)}`
+      + `  upper/wall ${(s.upper.mean / s.wall.mean).toFixed(2)}`
+      + `  store/frame ${(s.store.mean / g.mean).toFixed(2)}`);
   }
   if (s.pave_1 && s.pave_4) {
     console.log(
