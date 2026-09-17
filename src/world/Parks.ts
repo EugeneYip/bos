@@ -125,6 +125,69 @@ const COVER_DIV = (9 * STAMP_W) / (78 / (CANOPY_CELL * CANOPY_CELL));
 /** Un-occluded skylight floor for park ground. See `surfaceMaterial`. */
 const SKY_FLOOR = 0.55;
 
+/**
+ * Somewhere to bank a triangle's flat XZ outline while the city is being
+ * triangulated, before the final vertex arrays can be sized.
+ *
+ * This used to be four `number[]`s per surface — position, uv, colour and
+ * index, pushed a component at a time — and it was, by a wide margin, the
+ * most expensive object the page ever built. V8 holds a growing array of
+ * doubles at eight bytes a slot and reallocates the backing store
+ * geometrically, so the old and new copies coexist across every growth step;
+ * the city's 160 000 park triangles came to 4.3 million pushed numbers, and
+ * measured on an iPad user agent, *skipping this module entirely* took the
+ * page's peak JS heap from 819 MB to 663. That 156 MB was almost all
+ * transient: the settled figure moved by 3 MB, because `App`'s release sweep
+ * hands the attributes to the GPU and drops them again. Peak is the number
+ * that matters, though — it is what iOS kills the tab on.
+ *
+ * Six floats a triangle in fixed chunks is 3.8 MB for the same city, with no
+ * reallocation and no boxing, and everything else is derived from it in one
+ * pass straight into exactly-sized typed arrays.
+ */
+class TriStore {
+  /** A whole number of triangles, so a chunk is never split across one. */
+  private static readonly CHUNK = 6 * 8192;
+  private chunks: Float32Array[] = [];
+  private at = TriStore.CHUNK;
+  count = 0;
+
+  push(ax: number, az: number, bx: number, bz: number, cx: number, cz: number): void {
+    if (this.at >= TriStore.CHUNK) {
+      this.chunks.push(new Float32Array(TriStore.CHUNK));
+      this.at = 0;
+    }
+    const s = this.chunks[this.chunks.length - 1];
+    const k = this.at;
+    s[k] = ax; s[k + 1] = az; s[k + 2] = bx; s[k + 3] = bz; s[k + 4] = cx; s[k + 5] = cz;
+    this.at += 6;
+    this.count++;
+  }
+
+  forEach(
+    cb: (ax: number, az: number, bx: number, bz: number, cx: number, cz: number, i: number) => void,
+  ): void {
+    let i = 0;
+    for (let c = 0; c < this.chunks.length; c++) {
+      const s = this.chunks[c];
+      const end = c === this.chunks.length - 1 ? this.at : TriStore.CHUNK;
+      for (let k = 0; k < end; k += 6) cb(s[k], s[k + 1], s[k + 2], s[k + 3], s[k + 4], s[k + 5], i++);
+    }
+  }
+
+  /** Let the chunks go as soon as the vertex arrays are built. */
+  release(): void {
+    this.chunks.length = 0;
+    this.at = TriStore.CHUNK;
+  }
+}
+
+/** Per-surface accumulator: triangles, plus a flat [r,g,b,count] colour run list. */
+interface Bucket {
+  tris: TriStore;
+  runs: number[];
+}
+
 interface CanopyField {
   tex: THREE.DataTexture;
   /** World-space origin and 1/(size in metres), for the UV transform. */
@@ -162,7 +225,7 @@ export class Parks implements WorldModule {
     }
 
     // One bucket per surface so the whole city's greenery is a couple of draws.
-    const buckets = new Map<string, { pos: number[]; uv: number[]; col: number[]; idx: number[] }>();
+    const buckets = new Map<string, Bucket>();
     let drawn = 0;
     let area = 0;
 
@@ -213,8 +276,7 @@ export class Parks implements WorldModule {
       if (!tri) continue;
 
       let b = buckets.get(spec.surface);
-      if (!b) { b = { pos: [], uv: [], col: [], idx: [] }; buckets.set(spec.surface, b); }
-      const tile = this.tileMetersFor(ctx, spec.surface);
+      if (!b) { b = { tris: new TriStore(), runs: [] }; buckets.set(spec.surface, b); }
 
       // Deterministic per-polygon shade so neighbouring lawns are not
       // identical. The vertex colour *is* the albedo now — the shader hands it
@@ -233,8 +295,14 @@ export class Parks implements WorldModule {
       // Emit as independent, terrain-sampled triangles: vertices are not
       // shared, which costs a little memory but lets each triangle subdivide
       // without renumbering its neighbours.
+      //
+      // Only the flat XZ outline of each surviving triangle is banked here.
+      // Position, UV, colour and normal are all derived from it in one pass
+      // at the end, straight into exactly-sized typed arrays -- see `TriStore`
+      // for why that matters.
       const budget = Math.max(0, TRI_BUDGET - this.triCount);
       if (budget <= 0) continue;
+      const before = this.triCount;
       const emit = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number): void => {
         // A land-use polygon is not clipped against the harbour, and OSM's
         // 'Charlestown Navy Yard' park covers the whole wharf, basin included.
@@ -253,16 +321,7 @@ export class Parks implements WorldModule {
         const mz = (az + bz + cz) / 3;
         if (waterAt && waterAt(mx, mz) > WATER_TRIM) { overWater++; return; }
         if (onWharf(mx, mz)) { onDeck++; return; }
-        const base = b!.pos.length / 3;
-        for (const [x, z] of [[ax, az], [bx, bz], [cx, cz]] as const) {
-          b!.pos.push(x, ctx.sampleHeight(x, z) + LIFT, z);
-          // World-metre UVs at the surface's own physical tile size, so
-          // texture scale is seamless across polygon boundaries *and* matches
-          // what the family's shader was actually tuned for.
-          b!.uv.push(x / tile, z / tile);
-          b!.col.push(c.r, c.g, c.b);
-        }
-        b!.idx.push(base, base + 1, base + 2);
+        b!.tris.push(ax, az, bx, bz, cx, cz);
         this.triCount++;
       };
       for (let i = 0; i < tri.indices.length; i += 3) {
@@ -274,6 +333,8 @@ export class Parks implements WorldModule {
           emit, 0,
         );
       }
+      // One colour run per polygon, in the order the triangles were banked.
+      if (this.triCount > before) b.runs.push(c.r, c.g, c.b, this.triCount - before);
       drawn++;
       area += tri.area;
     }
@@ -282,15 +343,54 @@ export class Parks implements WorldModule {
     ctx.stats.parksOnWharf = onDeck;
 
     for (const [surface, b] of buckets) {
-      if (!b.idx.length) continue;
+      const n = b.tris.count;
+      if (!n) continue;
+      const tile = this.tileMetersFor(ctx, surface);
+      const pos = new Float32Array(n * 9);
+      const uv = new Float32Array(n * 6);
+      const col = new Float32Array(n * 9);
+      const nor = new Float32Array(n * 9);
+      // Colour runs are consumed in step with the triangles that produced
+      // them, so the per-polygon tint survives the flattening.
+      let run = 0;
+      let left = b.runs[3] ?? n;
+      b.tris.forEach((ax, az, bx, bz, cx, cz, t) => {
+        while (left <= 0 && run + 4 < b.runs.length) { run += 4; left = b.runs[run + 3]; }
+        left--;
+        const p = t * 9;
+        const ay = ctx.sampleHeight(ax, az) + LIFT;
+        const by = ctx.sampleHeight(bx, bz) + LIFT;
+        const cy = ctx.sampleHeight(cx, cz) + LIFT;
+        pos[p] = ax; pos[p + 1] = ay; pos[p + 2] = az;
+        pos[p + 3] = bx; pos[p + 4] = by; pos[p + 5] = bz;
+        pos[p + 6] = cx; pos[p + 7] = cy; pos[p + 8] = cz;
+        // World-metre UVs at the surface's own physical tile size, so texture
+        // scale is seamless across polygon boundaries *and* matches what the
+        // family's shader was actually tuned for.
+        const q = t * 6;
+        uv[q] = ax / tile; uv[q + 1] = az / tile;
+        uv[q + 2] = bx / tile; uv[q + 3] = bz / tile;
+        uv[q + 4] = cx / tile; uv[q + 5] = cz / tile;
+        const cr = b.runs[run], cg = b.runs[run + 1], cb2 = b.runs[run + 2];
+        for (let k = 0; k < 9; k += 3) { col[p + k] = cr; col[p + k + 1] = cg; col[p + k + 2] = cb2; }
+        // Flat face normal, which is what `computeVertexNormals` produced
+        // anyway: no two triangles share a vertex here.
+        const ux = bx - ax, uyy = by - ay, uz = bz - az;
+        const vx = cx - ax, vyy = cy - ay, vz = cz - az;
+        let nx = uyy * vz - uz * vyy;
+        let ny = uz * vx - ux * vz;
+        let nz = ux * vyy - uyy * vx;
+        const len = Math.hypot(nx, ny, nz) || 1;
+        nx /= len; ny /= len; nz /= len;
+        for (let k = 0; k < 9; k += 3) { nor[p + k] = nx; nor[p + k + 1] = ny; nor[p + k + 2] = nz; }
+      });
+      b.tris.release();
+
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
-      g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
-      g.setAttribute('color', new THREE.Float32BufferAttribute(b.col, 3));
-      g.setIndex(b.idx.length > 65535
-        ? new THREE.Uint32BufferAttribute(b.idx, 1)
-        : new THREE.Uint16BufferAttribute(b.idx, 1));
-      g.computeVertexNormals();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
       g.computeBoundingSphere();
 
       const mat = this.surfaceMaterial(ctx, surface);
