@@ -47,9 +47,19 @@ const pose = async () => {
 await pose();
 
 console.log('--- raycast: what owns those pixels ---');
-const picks = await page.evaluate((pts) => pts.map(([x, y]) => ({ at: [x, y], hits: window.__debug.pick(x, y, 4) })), PTS);
+const picks = await page.evaluate((pts) => pts.map(([x, y]) => {
+  const hits = window.__debug.pick(x, y, 4);
+  // Re-cast to recover the world point of the first hit, so the elevation
+  // under it can be checked against the bathymetry.
+  const cam = window.__boston.ctx.camera;
+  const nd = new window.__THREE.Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+  const rc = new window.__THREE.Raycaster(); rc.setFromCamera(nd, cam);
+  const d = hits.length ? hits[0].dist : 0;
+  const p = rc.ray.at(d, new window.__THREE.Vector3());
+  return { at: [x, y], world: [Math.round(p.x), Math.round(p.y), Math.round(p.z)], hits };
+}), PTS);
 for (const p of picks) {
-  console.log(`(${p.at})  ` + (p.hits.length
+  console.log(`(${p.at}) w=${p.world}  ` + (p.hits.length
     ? p.hits.map((h) => `${h.name}@${Math.round(h.dist)}m`).join('  ')
     : '(nothing)'));
 }
