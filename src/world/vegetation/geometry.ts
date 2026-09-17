@@ -537,7 +537,20 @@ function buildImpostor(sp: Species): TreeGeometry {
  * 1.5 m (see `textures.cardMeters`) and the mid card at 2.8x that.
  */
 const NEAR: Detail = { radial: [6, 4, 3], segs: [3, 3, 2], secondaries: 3, cards: 155, cardSize: 1.0 };
-const MID: Detail = { radial: [5, 3, 3], segs: [2, 2, 1], secondaries: 2, cards: 34, cardSize: 2.8 };
+/**
+ * The mid card used to be 2.8x the near card and there used to be 34 of them,
+ * which is 2133 m² of card over a 24 m elm against the near tier's 1241 — a
+ * *denser* crown built from a quarter as many pieces. At the 115-300 m the
+ * tier covers, a card that size is 30 to 50 px across, and a crown made of
+ * eight or ten of them does not read as foliage: from the State House
+ * viewpoint the whole of the Public Garden and the Common came out as a heap
+ * of overlapping ovals the size of a small building, which is the "identical
+ * blobs" the canopy has always been accused of. 1.9x and 68 keeps the same
+ * total card area (to within 8 %) while quadrupling the number of separate
+ * silhouettes in a crown, for 68 more triangles on a tier that draws a
+ * couple of thousand instances.
+ */
+const MID: Detail = { radial: [5, 3, 3], segs: [2, 2, 1], secondaries: 2, cards: 68, cardSize: 1.9 };
 
 /** Physical size in metres of the mid tier's clump card for a species. */
 export function midCardMeters(sp: Species): number {

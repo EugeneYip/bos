@@ -608,21 +608,60 @@ export function barkTexture(kind: BarkKind, size: number, aniso: number): THREE.
 // Impostor
 // ---------------------------------------------------------------------------
 
-/** A ragged dab of leaf mass, used to build the distance silhouette. */
+/**
+ * A ragged dab of leaf mass, used to build the distance silhouette.
+ *
+ * The outline is a closed quadratic spline through the midpoints of a
+ * jittered heptagon, so the vertices act as control points and the edge comes
+ * out curved. It used to be `lineTo` between the vertices with the radius
+ * jittered +-47 %, which at the sizes these are actually drawn at -- 15 to 25
+ * px on a 256 px tile -- is not a soft clump of leaves, it is a paper chip
+ * with straight edges and sharp corners. Forty-seven of them scattered over a
+ * crown is what made the city's canopy read as crumpled litter from the air.
+ */
 function dab(g: G2D, x: number, y: number, rx: number, ry: number, r: () => number, fill: string): void {
   g.fillStyle = fill;
   g.beginPath();
-  const lobes = 9;
-  for (let i = 0; i <= lobes; i++) {
+  const lobes = 7;
+  const px: number[] = [];
+  const py: number[] = [];
+  for (let i = 0; i < lobes; i++) {
     const a = (i / lobes) * Math.PI * 2;
-    const k = 0.5 + r() * 0.9;
-    const px = x + Math.cos(a) * rx * k;
-    const py = y + Math.sin(a) * ry * k;
-    if (i === 0) g.moveTo(px, py);
-    else g.lineTo(px, py);
+    const k = 0.66 + r() * 0.52;
+    px.push(x + Math.cos(a) * rx * k);
+    py.push(y + Math.sin(a) * ry * k);
+  }
+  g.moveTo((px[lobes - 1] + px[0]) * 0.5, (py[lobes - 1] + py[0]) * 0.5);
+  for (let i = 0; i < lobes; i++) {
+    const j = (i + 1) % lobes;
+    g.quadraticCurveTo(px[i], py[i], (px[i] + px[j]) * 0.5, (py[i] + py[j]) * 0.5);
   }
   g.closePath();
   g.fill();
+}
+
+/** Mean of the crown envelope over its height; sets the silhouette's area. */
+function meanCrownRadius(sp: Species): number {
+  let s = 0;
+  const n = 24;
+  for (let i = 0; i < n; i++) s += crownRadius(sp.shape, (i + 0.5) / n);
+  return s / n;
+}
+
+/**
+ * How many dabs of area `dabPx²`-ish it takes to *cover* `areaPx` of crown.
+ *
+ * Coverage, not a density guess, is the number that decides whether an
+ * impostor is a tree or a scatter of chips: random dabs at 1.0x coverage
+ * leave holes over about a third of the area, and the holes are what the
+ * alpha test then widens as the mip chain averages them down. 2.6x is the
+ * point at which the interior of a crown comes out solid and only the rim
+ * stays ragged, which is what a real crown does at 300 m — you are looking
+ * through two crossings of the leaf shell and everything between them.
+ */
+function dabsToCover(areaPx: number, dabPx: number, density: number): number {
+  const perDab = 3.1 * dabPx * dabPx;
+  return Math.round(THREE.MathUtils.clamp((areaPx * 2.6 * Math.min(1.15, density)) / perDab, 60, 1200));
 }
 
 /**
@@ -692,26 +731,47 @@ export function impostorTexture(sp: Species, tile: number, aniso: number): THREE
     g.stroke();
   }
 
-  // Leaf mass: clumps laid on the crown envelope, biased to the rim, with the
-  // dab radius set in *metres* so a 24 m elm is not built from the same size
-  // of clump as a 9 m cherry.
-  const clumpM = 1.5;
-  const dabPx = Math.max(2.5, (clumpM / sp.height) * H);
-  const dabs = Math.round(THREE.MathUtils.clamp((H * halfW * 1.1 * sp.density) / (dabPx * dabPx * 2.4), 40, 420));
+  // Leaf mass: clumps laid over the crown envelope, with the dab radius set
+  // in *metres* so a 24 m elm is not built from the same size of clump as a
+  // 9 m cherry.
+  //
+  // The horizontal placement is uniform across the envelope's *width*, which
+  // is the distribution that gives a uniform projected density — a crown
+  // seen from 300 m is opaque through the middle, where the line of sight
+  // crosses the most leaf. The sqrt() that used to be here is the
+  // uniform-over-a-*disc* rule, which for a side elevation piles everything
+  // on the rim and leaves a hole down the axis; the Emerald Necklace read as
+  // a row of green horseshoes because of it.
+  const clumpM = 0.85;
+  const dabPx = Math.max(2.0, (clumpM / sp.height) * H);
+  const crownArea = 2 * halfW * H * (1 - cb) * meanCrownRadius(sp);
+  const dabs = dabsToCover(crownArea, dabPx, sp.density);
+  interface Blob { x: number; y: number; s: number; v: number }
+  const blobs: Blob[] = [];
   for (let i = 0; i < dabs; i++) {
-    const t = Math.pow(r(), 0.72);
+    const t = Math.pow(r(), 0.8);
     const rr = crownRadius(sp.shape, t);
-    // Bias outwards so the interior stays open and the rim is dense.
-    const q = Math.sqrt(r()) * rr;
-    const sign = r() < 0.5 ? -1 : 1;
-    const x = cx + sign * q * halfW;
+    const u = r() * 2 - 1;
+    const q = u * rr;
+    const x = cx + q * halfW;
     const y = base - H * (cb + (1 - cb) * t);
     const s = dabPx * (0.72 + r() * 0.66) * (sp.conifer ? 0.85 : 1);
-    // Bake form: brighter up and to the left, deep shade underneath.
-    const lift = 0.34 + 0.66 * t;
-    const sideLight = 0.84 + 0.30 * (0.5 - sign * q * 0.5);
-    dab(g, x, y, s * (sp.conifer ? 0.9 : 1.2), s * 0.8, r,
-      leafFill(lift * sideLight * (0.70 + r() * 0.52)));
+    // Bake form: brighter up and to the left, deep shade underneath, and the
+    // core of the crown darker than its rim.
+    const lift = 0.40 + 0.60 * t;
+    const sideLight = 0.86 + 0.26 * (0.5 - u * 0.5);
+    const core = 0.80 + 0.28 * Math.abs(u);
+    // 0.72 keeps the brightest clump just under white. The shader divides the
+    // whole map through by its own mean before it applies the species tint
+    // (see `uMapMean`), so clipping here buys no brightness at all — it only
+    // flattens the sunlit shoulder of the crown into a blank patch.
+    blobs.push({ x, y, s, v: lift * sideLight * core * (0.82 + r() * 0.30) * 0.72 });
+  }
+  // Darkest first, so the lit rim overdraws the shaded interior rather than
+  // being buried under whatever happened to come last.
+  blobs.sort((p, q2) => p.v - q2.v);
+  for (const bl of blobs) {
+    dab(g, bl.x, bl.y, bl.s * (sp.conifer ? 0.9 : 1.2), bl.s * 0.8, r, leafFill(bl.v));
   }
   void crownTop;
 
@@ -719,26 +779,31 @@ export function impostorTexture(sp: Species, tile: number, aniso: number): THREE
   const tx = tile * 1.5;
   const ty = tile * 0.5;
   const tr = tile * 0.48;
-  const topDabPx = Math.max(2.5, (clumpM / (sp.spread * sp.height)) * tile);
-  const topDabs = Math.round(THREE.MathUtils.clamp(
-    (Math.PI * tr * tr * sp.density) / (topDabPx * topDabPx * 2.2), 40, 420,
-  ));
-  // A crown from above is a lobed dome, not a disc: a handful of big limb
-  // masses with gaps between them.
-  const sectors = 4 + Math.floor(r() * 3);
-  const lobeAmp: number[] = [];
-  for (let i = 0; i < sectors; i++) lobeAmp.push(0.74 + r() * 0.3);
+  const topDabPx = Math.max(2.0, (clumpM / (sp.spread * sp.height)) * tile);
+  const topDabs = dabsToCover(Math.PI * tr * tr, topDabPx, sp.density);
+  // A crown from above is a lobed dome, not a disc: limb masses with shallow
+  // bays between them. The modulation is continuous in angle rather than a
+  // set of hard sectors, because a sector boundary is a straight radial step
+  // and at the five or six pixels an impostor covers from 2 km a step reads
+  // as a bite out of the tree.
+  const lobeN = 3 + Math.floor(r() * 3);
+  const lobeA = r() * Math.PI * 2;
+  const lobeB = r() * Math.PI * 2;
+  const lobeAt = (a: number): number =>
+    0.86 + 0.14 * Math.sin(a * lobeN + lobeA) + 0.07 * Math.sin(a * (lobeN * 2 + 1) + lobeB);
+  const tops: { x: number; y: number; s: number; v: number }[] = [];
   for (let i = 0; i < topDabs; i++) {
     const a = r() * Math.PI * 2;
-    const lobe = lobeAmp[Math.floor(((a / (Math.PI * 2)) * sectors)) % sectors];
-    const q = Math.pow(r(), 0.5) * lobe;
+    const q = Math.sqrt(r()) * lobeAt(a);
     const x = tx + Math.cos(a) * q * tr;
     const y = ty + Math.sin(a) * q * tr;
     const s = topDabPx * (0.72 + r() * 0.66);
-    // Lit from the same side as the side view; rim in shadow.
-    const lift = 1.02 - 0.40 * q + 0.14 * (Math.cos(a) * -0.5 - Math.sin(a) * 0.5);
-    dab(g, x, y, s * 1.1, s, r, leafFill(lift * (0.72 + r() * 0.46)));
+    // Lit from the same side as the side view; the far rim falls away.
+    const lift = 1.00 - 0.30 * q + 0.16 * (Math.cos(a) * -0.5 - Math.sin(a) * 0.5);
+    tops.push({ x, y, s, v: lift * (0.78 + r() * 0.36) * 0.74 });
   }
+  tops.sort((p, q2) => p.v - q2.v);
+  for (const bl of tops) dab(g, bl.x, bl.y, bl.s * 1.1, bl.s, r, leafFill(bl.v));
 
   const t = tex(c, true, aniso);
   t.wrapS = THREE.ClampToEdgeWrapping;

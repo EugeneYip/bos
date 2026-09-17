@@ -139,6 +139,7 @@ vCardKind = cardKind;
 vCardMix = 1.0;
 float vegBc = 1.0;
 float vegBs = 0.0;
+float vegSpin = 0.0;
 #ifdef VEG_BILLBOARD
   vec3 vegToCam = cameraPosition - vegOrigin;
   float vegYaw = atan( vegToCam.x, vegToCam.z );
@@ -157,6 +158,27 @@ float vegBs = 0.0;
   // area at 40 degrees, so it keeps everything until 38 and is gone by 62.
   float vegUp = abs( vegToCam.y ) / max( length( vegToCam ), 1e-3 );
   vCardMix = 1.0 - smoothstep( 0.62, 0.88, vegUp );
+  // Per-instance orientation of the impostor's own art. There are eight
+  // paintings of a tree in the whole city and eighty-seven thousand trees.
+  //
+  //  - The horizontal canopy plate is the *whole* of what an aerial camera
+  //    sees, and the billboard yaw turns every one of them through the same
+  //    angle, so from overhead the city was one stamp repeated. A plate seen
+  //    from above has no reason to face the camera: spin it by its own hash
+  //    first.
+  //  - The crossed vertical cards do have to face the camera, but flipping
+  //    the pair end for end is a rotation about the trunk, so the planes are
+  //    unchanged and only the u direction reverses. Free, and it halves how
+  //    often two neighbours are the identical silhouette.
+  //
+  // Both are rotations about Y, which commute with the billboard yaw, so
+  // applying them after it here and before it in VERT_BODY is the same thing.
+  vegSpin = cardKind > 0.5 ? vJitter * 6.2831853
+          : ( fract( vJitter * 61.7 ) > 0.5 ? 3.14159265 : 0.0 );
+  if ( vegSpin != 0.0 ) {
+    float sc = cos( vegSpin ), ss = sin( vegSpin );
+    objectNormal.xz = mat2( sc, -ss, ss, sc ) * objectNormal.xz;
+  }
 #endif
 `;
 
@@ -178,6 +200,10 @@ transformed += foliage * vegAmp * 0.016 * vec3(
   cos( uTime * 2.1 + phase * 23.0 ) );
 
 #ifdef VEG_BILLBOARD
+  if ( vegSpin != 0.0 ) {
+    float sc2 = cos( vegSpin ), ss2 = sin( vegSpin );
+    transformed.xz = mat2( sc2, -ss2, ss2, sc2 ) * transformed.xz;
+  }
   transformed.xz = mat2( vegBc, -vegBs, vegBs, vegBc ) * transformed.xz;
 #endif
 
@@ -217,6 +243,7 @@ uniform vec3  uAutumn;
 uniform vec3  uSenescent;
 uniform float uDistWash;
 uniform float uMapMean;
+uniform float uHueVar;
 // Declared here too (not just in VERT_PARS) because VEG_NEARMID's dither
 // split needs them on the fragment side, to pick which of the two boundaries
 // this fragment is closer to.
@@ -310,6 +337,12 @@ export interface MaterialOptions {
    * the map through by it so the species tint lands on the albedo asked for.
    */
   mapMean?: number;
+  /**
+   * Peak per-instance hue swing along the yellow-green/blue-green axis.
+   * 0.30 for trees; ground cover wants far less, because its `vJitter` is
+   * per *tuft* and a lawn that varies in hue tuft by tuft is confetti.
+   */
+  hueVar?: number;
 }
 
 export interface VegMaterial {
@@ -387,6 +420,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
     shader.uniforms.uMapMean = { value: o.mapMean ?? 1 };
     shader.uniforms.uCanopyTint = { value: new THREE.Vector3(0.78, 1.0, 0.66) };
     shader.uniforms.uDistWash = { value: lod === 'far' ? 1 : lod === 'mid' ? 0.3 : 0 };
+    shader.uniforms.uHueVar = { value: leaf ? (o.hueVar ?? 0.30) : 0 };
 
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${VERT_PARS}`)
@@ -439,20 +473,41 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
 
           vec3 canopy = mix( uSummer, uAutumn, turn );
           canopy = mix( canopy, uSenescent, late * 0.60 );
+          // Per-tree *colour*, not only per-tree brightness. Two elms on the
+          // same street are never the same green, and the species tint is the
+          // centre of a distribution rather than the colour of every
+          // individual: eight tints across eighty-seven thousand trees, each
+          // varied only in luminance, is what makes an aerial read as one
+          // green dimmed at random. The axis is yellow-green to blue-green,
+          // which is the direction real foliage actually varies in, and it is
+          // hashed off 'vJitter' a second time so a tree that came out bright
+          // is not also the yellowest.
+          float hj = fract( vJitter * 47.31 ) - 0.5;
+          canopy *= vec3( 1.0 + uHueVar * hj, 1.0 + uHueVar * 0.16 * hj, 1.0 - uHueVar * 1.12 * hj );
           diffuseColor.rgb *= canopy * ( 0.84 + 0.32 * vJitter );
 
-          // Distant foliage loses contrast and saturation before the haze even
-          // touches it; without this, impostors read as dark specks.
+          // Distant foliage loses contrast before the haze even touches it.
           // Sub-pixel canopy mixing, not haze: once a whole crown is thirty
           // pixels tall every pixel averages lit and shaded leaves together,
           // and the average is much brighter than the shaded side alone. On a
           // 260-2400 m ramp this contributed 3 % at the far edge of the Fens
           // and the whole Emerald Necklace read as a black hole in the city.
+          //
+          // It is a *brightening*, though, and it used to be written as a
+          // half-desaturation plus a flat grey lift of 0.03 linear. Against a
+          // leaf albedo whose channels are 0.012 to 0.053, adding 0.03 of grey
+          // is not a correction, it is a wash of paint: measured on the whole
+          // aerial of the city, it cut the canopy's green excess by a factor
+          // of 2.2 and left Cambridge, Back Bay and Dorchester reading as one
+          // flat olive at any hour. Multiplying keeps the ratio between the
+          // channels -- which *is* the tree's colour -- for the same gain in
+          // luminance, and the genuine loss of contrast is applied where it
+          // belongs, on luminance only.
           float wash = uDistWash * smoothstep( 180.0, 1200.0, vDist );
+          diffuseColor.rgb *= 1.0 + 0.85 * wash;
           float lum = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
           diffuseColor.rgb = mix( diffuseColor.rgb,
-            mix( vec3( lum ), diffuseColor.rgb, 0.5 ) * 1.2 + vec3( 0.028, 0.036, 0.030 ),
-            wash * 0.8 );
+            mix( vec3( lum ), diffuseColor.rgb, 0.85 ), wash * 0.8 );
         }
       `);
 
@@ -543,5 +598,8 @@ export function createGroundMaterial(
     canopy: opts.canopy,
     alphaTest: opts.alphaTest,
     mapMean: opts.mapMean,
+    // `vJitter` is per *tuft* down here, not per tree: at the tree's 0.30 a
+    // lawn comes out as confetti.
+    hueVar: 0.09,
   });
 }
