@@ -21,6 +21,7 @@ import {
 } from './poly';
 import { type RoofJob, buildRoof, cornice } from './roofs';
 import { clamp, hashString, rand } from './rng';
+import { SpillSink, emitSpill } from './spill';
 
 /** Edge length of one spatial tile, metres. */
 export const TILE = 500;
@@ -42,6 +43,8 @@ export interface ShardResult {
   tiles: TilePayload[];
   /** Per-kind instanced clutter, `CLUTTER_STRIDE` floats each. */
   clutter: Float32Array[];
+  /** Ground-floor light pools, `SPILL_STRIDE` floats each. */
+  spill: Float32Array;
   built: number;
   skipped: number;
 }
@@ -157,6 +160,7 @@ function lighten(c: [number, number, number], t: number): [number, number, numbe
 interface Scratch {
   sink: MeshSink;
   clutter: ClutterSink;
+  spill: SpillSink;
 }
 
 function buildOne(rec: BuildingRecord, s: Scratch): boolean {
@@ -281,6 +285,9 @@ function buildOne(rec: BuildingRecord, s: Scratch): boolean {
     chimneys(s.clutter, ring, res.slopeTopY, eaves, rnd, family, area);
   }
 
+  // ---- light out of the ground floor ------------------------------------
+  emitSpill(s.spill, ring, ground, family, area, seed);
+
   sink.section(0);
   return true;
 }
@@ -351,12 +358,13 @@ export function buildShard(records: BuildingRecord[], opts: BuildOptions = {}): 
   }
 
   const clutter = new ClutterSink();
+  const spill = new SpillSink();
   const tiles: TilePayload[] = [];
   let built = 0;
 
   for (const [key, recs] of buckets) {
     const sink = new MeshSink(Math.max(1024, recs.length * 48));
-    const scratch: Scratch = { sink, clutter };
+    const scratch: Scratch = { sink, clutter, spill };
     for (const rec of recs) {
       try {
         if (buildOne(rec, scratch)) built++;
@@ -369,7 +377,7 @@ export function buildShard(records: BuildingRecord[], opts: BuildOptions = {}): 
     if (!sink.empty) tiles.push({ key, chunk: sink.pack() });
   }
 
-  return { tiles, clutter: clutter.pack(), built, skipped };
+  return { tiles, clutter: clutter.pack(), spill: spill.pack(), built, skipped };
 }
 
 /** Every transferable buffer in a result, for `postMessage`. */
@@ -383,5 +391,6 @@ export function shardTransferables(r: ShardResult): ArrayBufferLike[] {
     );
   }
   for (const c of r.clutter) out.push(c.buffer);
+  out.push(r.spill.buffer);
   return out;
 }

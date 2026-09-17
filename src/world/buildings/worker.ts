@@ -27,6 +27,7 @@ export interface WorkerReply {
   index: number;
   tiles?: Array<{ key: number; chunk: unknown }>;
   clutter?: Float32Array[];
+  spill?: Float32Array;
   built?: number;
   skipped?: number;
   message?: string;
@@ -45,6 +46,7 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>): Promise<void> => {
       index: msg.index,
       tiles: out.tiles,
       clutter: out.clutter,
+      spill: out.spill,
       built: out.built,
       skipped: out.skipped,
     };

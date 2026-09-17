@@ -8,10 +8,12 @@ import { mergeChunks, type PackedChunk } from './buildings/mesh';
 import { buildFacadeAtlas, type FacadeAtlas } from './buildings/atlas';
 import {
   createShellUniforms, createShellMaterial, createClutterMaterial, createClutterDepthMaterial,
+  createSpillMaterial, spillGeometry,
   type ShellUniforms,
 } from './buildings/material';
 import { clutterGeometries } from './buildings/clutterGeom';
 import { CLUTTER_STRIDE, CLUTTER_KINDS } from './buildings/clutter';
+import { SPILL_STRIDE } from './buildings/spill';
 import type { WorkerReply, WorkerRequest } from './buildings/worker';
 
 /**
@@ -62,6 +64,17 @@ const STREAM_RADIUS = 1600;
 /** Extra margin before a loaded shard is thrown away, metres. Stops churn. */
 const STREAM_HYSTERESIS = 700;
 
+/**
+ * How many ground-floor light pools can be on screen at once.
+ *
+ * The city produces a few hundred thousand of them, held on the CPU as eight
+ * floats each and compacted into this many instances around the camera when
+ * it moves, exactly as the rooftop clutter is. The shader fades a pool out
+ * between 110 m and 260 m, so the cap only has to cover a couple of blocks;
+ * downtown at street level fills about 1,800 of these.
+ */
+const MAX_SPILL = 6000;
+
 export class Buildings implements WorldModule {
   readonly name = 'Buildings';
 
@@ -74,6 +87,16 @@ export class Buildings implements WorldModule {
   /** Per clutter mesh: prebuilt matrices and instance centres, for culling. */
   private clutterData: Array<{ matrices: Float32Array; px: Float32Array; pz: Float32Array }> = [];
   private lastClutterCull = new THREE.Vector3(1e9, 1e9, 1e9);
+  private spillMesh: THREE.InstancedMesh | null = null;
+  /** Every pool in the loaded city, SPILL_STRIDE floats each. */
+  private spillSrc: Float32Array | null = null;
+  private spillAttr: THREE.InstancedBufferAttribute | null = null;
+  private lastSpillCull = new THREE.Vector3(1e9, 1e9, 1e9);
+  private spillMat = new THREE.Matrix4();
+  private spillQuat = new THREE.Quaternion();
+  private spillUp = new THREE.Vector3(0, 1, 0);
+  private spillPos = new THREE.Vector3();
+  private spillScale = new THREE.Vector3();
   private frustum = new THREE.Frustum();
   private sphere = new THREE.Sphere();
   private projScreen = new THREE.Matrix4();
@@ -139,6 +162,7 @@ export class Buildings implements WorldModule {
 
     this.assembleTiles(payloads.tiles, payloads.shardOf);
     this.assembleClutter(ctx, payloads.clutter);
+    this.assembleSpill(ctx, payloads.spill);
     for (const i of first) this.loadedShards.add(i);
     if (this.streaming) {
       this.lastStreamAt.copy(ctx.camera.position);
@@ -167,11 +191,17 @@ export class Buildings implements WorldModule {
    */
   private async runWorkers(
     want: number[],
-  ): Promise<{ tiles: Map<number, PackedChunk[]>; clutter: Float32Array[][]; shardOf: Map<number, number> }> {
+  ): Promise<{
+    tiles: Map<number, PackedChunk[]>;
+    clutter: Float32Array[][];
+    spill: Float32Array[];
+    shardOf: Map<number, number>;
+  }> {
     const skipLandmarks = this.skipLandmarks;
     const urls = want.map((i) => this.shardUrls[i]);
     const tiles = new Map<number, PackedChunk[]>();
     const clutter: Float32Array[][] = [];
+    const spill: Float32Array[] = [];
     // Which shard each tile key came from. Spatial sharding packs whole
     // tiles, so a tile has exactly one owner and unloading is unambiguous.
     const shardOf = new Map<number, number>();
@@ -186,6 +216,7 @@ export class Buildings implements WorldModule {
         shardOf.set(t.key, want[reply.index] ?? want[0]);
       }
       if (reply.clutter) clutter.push(reply.clutter);
+      if (reply.spill?.length) spill.push(reply.spill);
     };
 
     let pool: Worker[] = [];
@@ -203,10 +234,13 @@ export class Buildings implements WorldModule {
       for (let i = 0; i < urls.length; i++) {
         const recs = await (await fetch(urls[i])).json();
         const out = buildShard(recs, { skipLandmarks });
-        absorb({ type: 'done', index: i, tiles: out.tiles, clutter: out.clutter, built: out.built, skipped: out.skipped });
+        absorb({
+          type: 'done', index: i, tiles: out.tiles, clutter: out.clutter, spill: out.spill,
+          built: out.built, skipped: out.skipped,
+        });
         await new Promise((r) => setTimeout(r, 0));
       }
-      return { tiles, clutter, shardOf };
+      return { tiles, clutter, spill, shardOf };
     }
 
     let next = 0;
@@ -230,7 +264,7 @@ export class Buildings implements WorldModule {
       send();
     })));
 
-    return { tiles, clutter, shardOf };
+    return { tiles, clutter, spill, shardOf };
   }
 
   /** One mesh per 500 m tile, silhouette indices first and trim after. */
@@ -424,6 +458,104 @@ export class Buildings implements WorldModule {
     ctx.stats.roofClutter = this.clutterMesh.reduce((n, m) => n + m.count, 0);
   }
 
+  /**
+   * One instanced quad per lit ground-floor frontage, lying on the pavement.
+   *
+   * See `buildings/spill.ts` for why this is a decal and not a light. The
+   * whole city is one draw call: the pools are held on the CPU as eight
+   * floats each and the nearest {@link MAX_SPILL} are composed into the
+   * instance buffer whenever the camera moves, which is the same trick the
+   * rooftop clutter uses and for the same reason.
+   */
+  private assembleSpill(ctx: Ctx, batches: Float32Array[]): void {
+    if (!this.uniforms) return;
+    let total = 0;
+    for (const b of batches) total += b.length;
+    if (!total) return;
+
+    const src = new Float32Array(total);
+    let at = 0;
+    for (const b of batches) {
+      src.set(b, at);
+      at += b.length;
+    }
+    this.spillSrc = src;
+
+    const count = Math.min(src.length / SPILL_STRIDE, MAX_SPILL);
+    const mesh = new THREE.InstancedMesh(spillGeometry(), createSpillMaterial(this.uniforms), count);
+    mesh.name = 'buildings:spill';
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    // The instance set is rebuilt around the camera, so its bounds are always
+    // 'wherever the camera is'; a stale bounding sphere would cull it away.
+    mesh.frustumCulled = false;
+    // After the opaque city, so the pool is added on top of the road rather
+    // than fighting it for the same depth.
+    mesh.renderOrder = 6;
+    const attr = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    mesh.geometry.setAttribute('aSpill', attr);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    this.spillAttr = attr;
+    this.spillMesh = mesh;
+    this.root.add(mesh);
+    ctx.stats.windowSpill = src.length / SPILL_STRIDE;
+  }
+
+  /**
+   * Compose the nearest pools into the instance buffer.
+   *
+   * Sorted by nothing: the cap is generous enough that downtown never reaches
+   * it, and a pool that does get dropped is one the shader was already fading
+   * out. Recomputed only when the camera has moved far enough to matter, as
+   * with the clutter.
+   */
+  private cullSpill(ctx: Ctx): void {
+    const mesh = this.spillMesh;
+    const src = this.spillSrc;
+    const attr = this.spillAttr;
+    if (!mesh || !src || !attr) return;
+    // Nothing to add by day, and the pools are a thousand additive quads that
+    // would each shade a screenful of fragments to write zero.
+    mesh.visible = (this.uniforms?.uNight.value ?? 0) > 0.003;
+    if (!mesh.visible) return;
+    const cam = ctx.camera.position;
+    if (cam.distanceTo(this.lastSpillCull) < 18) return;
+    this.lastSpillCull.copy(cam);
+
+    // Matches the shader's own fade-out, with a margin so a pool is never
+    // popped in while it is still visible.
+    const r2 = 290 * 290;
+    const cap = mesh.instanceMatrix.count;
+    const m = this.spillMat;
+    const q = this.spillQuat;
+    const up = this.spillUp;
+    const pos = this.spillPos;
+    const scl = this.spillScale;
+    const dst = mesh.instanceMatrix.array as Float32Array;
+    const aux = attr.array as Float32Array;
+
+    let n = 0;
+    for (let o = 0; o + SPILL_STRIDE <= src.length && n < cap; o += SPILL_STRIDE) {
+      const dx = src[o] - cam.x;
+      const dz = src[o + 2] - cam.z;
+      if (dx * dx + dz * dz > r2) continue;
+      pos.set(src[o], src[o + 1], src[o + 2]);
+      q.setFromAxisAngle(up, src[o + 3]);
+      scl.set(src[o + 4], 1, src[o + 5]);
+      m.compose(pos, q, scl);
+      m.toArray(dst, n * 16);
+      aux[n * 2] = src[o + 6];
+      aux[n * 2 + 1] = src[o + 7];
+      n++;
+    }
+    mesh.count = n;
+    mesh.instanceMatrix.needsUpdate = true;
+    attr.needsUpdate = true;
+    ctx.stats.windowSpillDrawn = n;
+  }
+
   update(_dt: number, ctx: Ctx): void {
     if (this.streaming && --this.streamCountdown <= 0) {
       this.streamCountdown = 30;
@@ -504,6 +636,7 @@ export class Buildings implements WorldModule {
     ctx.stats.buildingTilesDetailed = detailed;
 
     this.cullClutter(ctx, trimRange);
+    this.cullSpill(ctx);
   }
 
   /**
@@ -543,6 +676,9 @@ export class Buildings implements WorldModule {
     ctx.scene.remove(this.root);
     for (const t of this.tiles) t.mesh.geometry.dispose();
     for (const m of this.clutterMesh) m.geometry.dispose();
+    this.spillMesh?.geometry.dispose();
+    (this.spillMesh?.material as THREE.Material | undefined)?.dispose();
+    this.spillSrc = null;
     this.shell?.dispose();
     this.atlas?.albedo?.dispose();
     this.atlas?.surface?.dispose();

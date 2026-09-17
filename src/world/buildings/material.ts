@@ -445,3 +445,92 @@ export function createClutterDepthMaterial(uniforms: ShellUniforms): THREE.MeshD
   mat.customProgramCacheKey = () => 'bos-clutter-depth';
   return mat;
 }
+
+// ---------------------------------------------------------------------------
+// Window spill
+// ---------------------------------------------------------------------------
+
+/**
+ * The unit pool: a 1x1 quad lying in the XZ plane, centred on the origin, with
+ * v running 0 to 1 along +Z. `Buildings` scales it to (frontage, 1, reach) and
+ * rotates it so +Z is the wall's outward normal, which puts v = 0 against the
+ * glass and v = 1 at the far edge of the pool.
+ *
+ * Double-sided because the rotation puts the plane's own normal underground,
+ * and the camera goes up on the bridges and down onto the pavement.
+ */
+export function spillGeometry(): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(1, 1);
+  g.rotateX(Math.PI / 2);
+  return g;
+}
+
+/**
+ * Additive pavement light.
+ *
+ * Deliberately not a lit material: there is nothing to light, it *is* the
+ * light. The falloff is the 1/(1 + kd^2) of a source a couple of metres back
+ * from the glass rather than a true inverse square, because a shopfront is a
+ * wall of glass metres across and behaves like an area source at the range
+ * this covers — a true inverse square from a point puts almost everything in
+ * the first metre and reads as a hard rim against the kerb.
+ *
+ * `uNight` is the same uniform the windows above run on, so the pavement
+ * lights up on exactly the same civil-twilight curve as the glass.
+ */
+export function createSpillMaterial(uniforms: ShellUniforms): THREE.ShaderMaterial {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uNight: uniforms.uNight,
+      uWindowGain: uniforms.uWindowGain,
+      uCamPos: uniforms.uCamPos,
+      uSpillGain: { value: 0.075 },
+    },
+    vertexShader: /* glsl */ `
+      attribute vec2 aSpill;
+      varying vec2 vPUv;
+      varying vec2 vSpill;
+      varying float vFade;
+      uniform vec3 uCamPos;
+      void main() {
+        vPUv = uv;
+        vSpill = aSpill;
+        vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+        // Pools are pavement detail. Past a couple of hundred metres a whole
+        // street of them is a few pixels tall and can only turn into a haze
+        // over the roofs of the buildings in front, so take them out.
+        vFade = 1.0 - smoothstep(110.0, 260.0, distance(uCamPos, wp.xyz));
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision highp float;
+      varying vec2 vPUv;
+      varying vec2 vSpill;
+      varying float vFade;
+      uniform float uNight;
+      uniform float uWindowGain;
+      uniform float uSpillGain;
+      void main() {
+        // v = 0 at the glass, 1 at the far edge of the pool.
+        float d = vPUv.y;
+        float f = max(1.0 / (1.0 + 5.0 * d * d) - 0.16667, 0.0) * 1.2;
+        // Taper the ends so a frontage does not stamp a rectangle on the road.
+        float a = vPUv.x;
+        f *= smoothstep(0.0, 0.18, a) * smoothstep(0.0, 0.18, 1.0 - a);
+        // Warm shopfront tungsten through to a colder retail white.
+        vec3 tint = mix(vec3(1.0, 0.74, 0.46), vec3(0.86, 0.90, 1.0), vSpill.x * vSpill.x);
+        gl_FragColor = vec4(tint * (f * vSpill.y * vFade * uNight * uWindowGain * uSpillGain), 1.0);
+      }
+    `,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    fog: false,
+  });
+  mat.name = 'BuildingSpill';
+  return mat;
+}
