@@ -156,3 +156,62 @@ plus `stats.buildingShards`/`buildingTiles` at each step of the same flight.
 `reconcile` is gated on TWO conditions at the call site -- a 30-frame
 countdown AND the camera having moved 150 m from `lastStreamAt` -- and that
 pair is the one place correct-looking eviction code silently never fires.
+
+## CORRECTION: there is no leak. Eviction works.
+
+`qa/_orphan.mjs` checks tile-to-shard membership directly, and it kills the
+leak hypothesis outright:
+
+```
+boot         tiles=32 loaded=[13,20,21,22]                     orphans=0 shardsPresentInTiles=4  duplicateKeys=0
+after flight tiles=94 loaded=[21,22,29,30,40,43,44,51,52,59]   orphans=0 shardsPresentInTiles=10 duplicateKeys=0
+back+15s     tiles=94 loaded=[21,22,29,30,40,43,44,51,52,59]   orphans=0 shardsPresentInTiles=10 duplicateKeys=0
+```
+
+Every tile belongs to a currently-loaded shard. No orphans, so the
+`shard: shardOf?.get(key) ?? -1` hazard is not firing. No duplicate keys, so
+tiles are not being assembled twice. Tiles per shard is steady: 32/4 = 8.0 at
+boot, 94/10 = 9.4 after. And `loadedShards` demonstrably goes DOWN as well as
+up (4, 10, 8, 12, 10 across `_shardtrace.mjs`).
+
+So the growth from 32 to 94 tiles is the working set being legitimately larger
+at the flight's end pose -- 10 shards within 1040 m there against 4 at the
+opening pose -- and not retention. My earlier headline, "nothing is ever
+reclaimed", was wrong, and so was the follow-up that named Buildings as the
+defect. Both are retracted here rather than quietly edited out above.
+
+What made it look like a leak: `_retainwho.mjs` groups by mesh-name prefix and
+shows buildings going 37 -> 93 geometries, which is 9.25 -> 9.3 per shard --
+exactly proportional to the shard count. I read a proportional increase as
+unbounded growth because I was watching the total rather than the ratio.
+
+## What is actually wrong, and it is not geometry
+
+The footprint is still far too high and the device still dies. But the
+dominant term is the **JS heap**, not resident geometry:
+
+| | value |
+|---|---|
+| JS heap, peak during flight | **936 MB** |
+| GPU-resident geometry | 250 MB |
+| render targets | 15 MB |
+
+And the heap SAWTOOTHS across the flight, sampled every 5 s:
+
+    556, 567, 564, 684, 593, 957, 632, 929, 609, 932
+
+The spikes line up with the camera moves that trigger a shard load. That is
+roughly **400 MB of transient allocated and freed per building-shard load**,
+to produce about 7 MB of geometry. On a device with no headroom, the spike is
+the kill: total footprint touches 1201 MB at a spike while settling near 830.
+
+So the mobile fix is to cut the per-load transient, not to fix eviction and
+not primarily to shrink the resident set. Capping the loaded-shard count would
+save on the order of 30 MB of GPU geometry and would not address the spike.
+
+Next: attribute the ~400 MB. `reconcile` calls `runWorkers([next])` for one
+shard, which spins up a worker, transfers packed chunk data, and then
+`assembleTiles` builds `BufferGeometry` from it. Candidates are the worker
+payload's intermediate JS objects, the structured-clone copy, and the
+per-chunk arrays before they reach typed arrays. This is the same shape of
+problem as the boot peak, one shard at a time, at runtime.
