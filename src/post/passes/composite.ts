@@ -72,6 +72,29 @@ void main() {
   if (uHasAO > 0.5) {
     float ao = saturate1(upsampleAO(vUv, viewZ));
     float occ = mix(1.0, ao, uAoIntensity);
+    // KNOWN DEFECT, left deliberately: this multiplies the *composited*
+    // colour, which includes direct sunlight. Ambient occlusion describes how
+    // much of the sky a point can see, so it belongs on the indirect term
+    // only -- a sunlit surface is lit by a source the occlusion says nothing
+    // about, and the shadow map has already decided whether the sun reaches
+    // it. Applying it here darkens sunlight twice.
+    //
+    // It is measurable, not theoretical: switching this pass off lifts a
+    // sunlit lawn on Boston Common from 49.3 to 73.6 luma. A third of the
+    // light on ground the shadow map had already shaded correctly.
+    //
+    // Not fixed here for two reasons. The correct fix needs the direct and
+    // indirect contributions to arrive separately, which means a deferred
+    // shading split this chain does not have -- the G-buffer carries normal,
+    // roughness and depth for SSR and nothing else. And by now three modules
+    // (Parks, Vegetation and the terrain) carry constants tuned by
+    // measurement against exactly this behaviour, so changing its strength in
+    // isolation would silently invalidate all of them and make the city
+    // brighter in three unrelated places at once.
+    //
+    // Doing it properly means splitting the scene pass, fixing this, and
+    // re-deriving those three constants together, in that order.
+    //
     // Treat the pixel's own colour as a stand-in for albedo; it is the best
     // proxy available without a full G-buffer and it behaves well.
     vec3 proxy = saturate3(color * 0.6);
