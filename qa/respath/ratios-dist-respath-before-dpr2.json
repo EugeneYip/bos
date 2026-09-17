@@ -1,0 +1,313 @@
+{
+ "outdir": "dist-respath-before",
+ "W": 1600,
+ "H": 900,
+ "DPR": 2,
+ "mobile": false,
+ "rows": [
+  {
+   "dpr": 2,
+   "tier": "low",
+   "pin": null,
+   "present": 1,
+   "buffer": [
+    1600,
+    900
+   ],
+   "scene": [
+    1152,
+    648
+   ],
+   "rtMB": 36.6,
+   "targets": 23,
+   "mobile": false,
+   "sceneRatio": 0.72,
+   "renderScale": 0.72
+  },
+  {
+   "dpr": 2,
+   "tier": "low",
+   "pin": 0.5,
+   "present": 0.5,
+   "buffer": [
+    800,
+    450
+   ],
+   "scene": [
+    400,
+    225
+   ],
+   "rtMB": 13.6,
+   "targets": 23,
+   "mobile": false,
+   "sceneRatio": 0.25,
+   "renderScale": 0.5
+  },
+  {
+   "dpr": 2,
+   "tier": "low",
+   "pin": 1,
+   "present": 1,
+   "buffer": [
+    1600,
+    900
+   ],
+   "scene": [
+    1600,
+    900
+   ],
+   "rtMB": 59.5,
+   "targets": 23,
+   "mobile": false,
+   "sceneRatio": 1,
+   "renderScale": 1
+  },
+  {
+   "dpr": 2,
+   "tier": "low",
+   "pin": 2,
+   "present": 2,
+   "buffer": [
+    3200,
+    1800
+   ],
+   "scene": [
+    6400,
+    3600
+   ],
+   "rtMB": 778.7,
+   "targets": 23,
+   "mobile": false,
+   "sceneRatio": 4,
+   "renderScale": 2
+  },
+  {
+   "dpr": 2,
+   "tier": "medium",
+   "pin": null,
+   "present": 1.25,
+   "buffer": [
+    2000,
+    1125
+   ],
+   "scene": [
+    2125,
+    1195
+   ],
+   "rtMB": 104.6,
+   "targets": 24,
+   "mobile": false,
+   "sceneRatio": 1.32813,
+   "renderScale": 1.0625
+  },
+  {
+   "dpr": 2,
+   "tier": "medium",
+   "pin": 0.5,
+   "present": 0.5,
+   "buffer": [
+    800,
+    450
+   ],
+   "scene": [
+    400,
+    225
+   ],
+   "rtMB": 21.1,
+   "targets": 24,
+   "mobile": false,
+   "sceneRatio": 0.25,
+   "renderScale": 0.5
+  },
+  {
+   "dpr": 2,
+   "tier": "medium",
+   "pin": 1,
+   "present": 1,
+   "buffer": [
+    1600,
+    900
+   ],
+   "scene": [
+    1600,
+    900
+   ],
+   "rtMB": 67.2,
+   "targets": 24,
+   "mobile": false,
+   "sceneRatio": 1,
+   "renderScale": 1
+  },
+  {
+   "dpr": 2,
+   "tier": "medium",
+   "pin": 2,
+   "present": 2,
+   "buffer": [
+    3200,
+    1800
+   ],
+   "scene": [
+    6400,
+    3600
+   ],
+   "rtMB": 787.1,
+   "targets": 24,
+   "mobile": false,
+   "sceneRatio": 4,
+   "renderScale": 2
+  },
+  {
+   "dpr": 2,
+   "tier": "high",
+   "pin": null,
+   "present": 1.25,
+   "buffer": [
+    2000,
+    1125
+   ],
+   "scene": [
+    2500,
+    1406
+   ],
+   "rtMB": 131.3,
+   "targets": 25,
+   "mobile": false,
+   "sceneRatio": 1.5625,
+   "renderScale": 1.25
+  },
+  {
+   "dpr": 2,
+   "tier": "high",
+   "pin": 0.5,
+   "present": 0.5,
+   "buffer": [
+    800,
+    450
+   ],
+   "scene": [
+    400,
+    225
+   ],
+   "rtMB": 14.5,
+   "targets": 24,
+   "mobile": false,
+   "sceneRatio": 0.25,
+   "renderScale": 0.5
+  },
+  {
+   "dpr": 2,
+   "tier": "high",
+   "pin": 1,
+   "present": 1,
+   "buffer": [
+    1600,
+    900
+   ],
+   "scene": [
+    1600,
+    900
+   ],
+   "rtMB": 61.2,
+   "targets": 25,
+   "mobile": false,
+   "sceneRatio": 1,
+   "renderScale": 1
+  },
+  {
+   "dpr": 2,
+   "tier": "high",
+   "pin": 2,
+   "present": 2,
+   "buffer": [
+    3200,
+    1800
+   ],
+   "scene": [
+    6400,
+    3600
+   ],
+   "rtMB": 783.5,
+   "targets": 25,
+   "mobile": false,
+   "sceneRatio": 4,
+   "renderScale": 2
+  },
+  {
+   "dpr": 2,
+   "tier": "ultra",
+   "pin": null,
+   "present": 1.5,
+   "buffer": [
+    2400,
+    1350
+   ],
+   "scene": [
+    3600,
+    2025
+   ],
+   "rtMB": 403.1,
+   "targets": 26,
+   "mobile": false,
+   "sceneRatio": 2.25,
+   "renderScale": 1.5
+  },
+  {
+   "dpr": 2,
+   "tier": "ultra",
+   "pin": 0.5,
+   "present": 0.5,
+   "buffer": [
+    800,
+    450
+   ],
+   "scene": [
+    400,
+    225
+   ],
+   "rtMB": 19.9,
+   "targets": 25,
+   "mobile": false,
+   "sceneRatio": 0.25,
+   "renderScale": 0.5
+  },
+  {
+   "dpr": 2,
+   "tier": "ultra",
+   "pin": 1,
+   "present": 1,
+   "buffer": [
+    1600,
+    900
+   ],
+   "scene": [
+    1600,
+    900
+   ],
+   "rtMB": 93.2,
+   "targets": 26,
+   "mobile": false,
+   "sceneRatio": 1,
+   "renderScale": 1
+  },
+  {
+   "dpr": 2,
+   "tier": "ultra",
+   "pin": 2,
+   "present": 2,
+   "buffer": [
+    3200,
+    1800
+   ],
+   "scene": [
+    6400,
+    3600
+   ],
+   "rtMB": 1231.2,
+   "targets": 26,
+   "mobile": false,
+   "sceneRatio": 4,
+   "renderScale": 2
+  }
+ ]
+}

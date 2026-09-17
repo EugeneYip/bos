@@ -67,6 +67,15 @@ export class Post implements WorldModule {
   private height = 2;
   private rw = 2;
   private rh = 2;
+  /**
+   * The same size in CSS pixels, which is the unit `resize` takes.
+   *
+   * Kept only because the tier and resolution handlers have to re-run `resize`
+   * themselves, and `width`/`height` are the wrong unit to hand it. See the
+   * note on those handlers in `attach`.
+   */
+  private cssW = 2;
+  private cssH = 2;
 
   private rt: Targets = { scene: null as unknown as THREE.WebGLRenderTarget, gbuffer: null };
   private taaHistory: PingPong | null = null;
@@ -133,12 +142,20 @@ export class Post implements WorldModule {
     r.toneMapping = THREE.NoToneMapping;
     this.app.renderOverride = (dt) => this.present(dt);
 
-    ctx.on('quality-changed', () => { this.applyTier(ctx); this.resize(this.width, this.height, ctx); });
+    // `resize` takes CSS pixels and multiplies by the pixel ratio itself.
+    // These two used to re-enter it with `this.width`, which is already in
+    // device pixels -- so every touch of the settings panel applied the pixel
+    // ratio a second time and shaded the scene at ratio-squared. At dpr 2 on
+    // `ultra`/Auto that was a 3600x2025 scene target instead of 2400x1350:
+    // 2.25x the pixels, and 403 MB of render targets instead of 180. It never
+    // showed up in a profile taken from a clean load, because the next genuine
+    // window resize passes CSS again and quietly puts it back.
+    ctx.on('quality-changed', () => { this.applyTier(ctx); this.resize(this.cssW, this.cssH, ctx); });
     ctx.on('resolution-changed', (scale) => {
       this.resolutionPinned = scale !== null;
       this.applyTier(ctx);
       this.applyUrlOverrides();
-      this.resize(this.width, this.height, ctx);
+      this.resize(this.cssW, this.cssH, ctx);
     });
     ctx.on('post:set', (p) => this.apply(p as DeepPartial<PostSettings>));
     ctx.on('photo-mode', (on) => { this.settings.dof.enabled = on !== false; });
@@ -255,6 +272,8 @@ export class Post implements WorldModule {
   resize(width: number, height: number, ctx: Ctx): void {
     if (this.failed || !this.app) return;
     const dpr = ctx.renderer.getPixelRatio();
+    this.cssW = width;
+    this.cssH = height;
     this.width = Math.max(2, Math.round(width * dpr));
     this.height = Math.max(2, Math.round(height * dpr));
     const s = Math.max(0.5, Math.min(1, this.settings.renderScale));
