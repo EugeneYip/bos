@@ -70,6 +70,45 @@ export interface PavementResult {
   materials: THREE.Material[];
 }
 
+/*
+ * OPEN: the pale strips across the airfield are not attributed.
+ *
+ * Seen from `logan-taxi-wide` the airfield is two-tone -- near-black
+ * pavement against near-white strips with a hard seam and no texture on
+ * either -- and a reviewer ranked it among the worst regions in the model.
+ * The black side is this file. The pale side is not, and three sessions have
+ * now failed to name it. What has been ruled out, and how, so nobody repeats
+ * it:
+ *
+ *   - All seven terrain layers. Tinted in debug colours one at a time and
+ *     then all at once; the strips never changed. Note the terrain ADOPTS a
+ *     library family whenever a layer name matches one (terrain/surfaces.ts,
+ *     'uAdopt'), so the procedural functions in that file are dead code for
+ *     every named layer -- editing them proves nothing, which cost a session
+ *     on its own.
+ *   - `concrete_sidewalk`, `concrete` and `gravel` in Materials.ts. Darkened
+ *     to a real 0.25 albedo: East Boston's pale decks improved measurably
+ *     (ground over 150 luma, 4.20% to 3.02%, exposure pinned) and Logan did
+ *     not move at all, to four significant figures.
+ *   - This file's own materials. Setting `airport:concrete` to pure red and
+ *     `airport:asphalt` to pure blue turned the black slabs red and the
+ *     runways navy. The pale strips stayed white.
+ *   - `airport:paint`. Set to magenta: every numeral, bar and centreline went
+ *     magenta. The pale strips stayed white.
+ *   - Parks, roads and water, by hiding them.
+ *   - Shadows. With casting off the whole two-tone survives, so it is
+ *     material, not shading -- an earlier point-sample suggesting otherwise
+ *     had simply landed on genuinely shadowed pixels.
+ *
+ * `__debug.pick` returns '(nothing)' on the pale pixels, which in this
+ * codebase normally means CDLOD terrain -- but the terrain has been
+ * eliminated above. Either the raycast is missing a mesh it should hit, or
+ * something draws there that is not in the places looked at so far.
+ *
+ * Use material colour, never `__debug.toggle`, to test this: toggle is
+ * silently defeated by any module that writes `visible` in its own update,
+ * and AirTraffic does.
+ */
 export function buildPavement(ctx: Ctx, layout: LoganLayout): PavementResult {
   const materials: THREE.Material[] = [];
   const meshes: THREE.Mesh[] = [];
