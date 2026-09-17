@@ -288,7 +288,38 @@ const FRAG_NORMAL = /* glsl */ `
   gTn.z = sqrt(max(1e-4, 1.0 - dot(gTn.xy, gTn.xy)));
   // Damp relief with distance so the city doesn't shimmer from the air.
   gTn.xy *= mix(1.0, 0.35, smoothstep(120.0, 900.0, gDist));
-  normal = normalize(mat3(viewMatrix) * normalize(gT * gTn.x + gB * gTn.y + gN * gTn.z));
+  vec3 gNw = normalize(gT * gTn.x + gB * gTn.y + gN * gTn.z);
+  normal = normalize(mat3(viewMatrix) * gNw);
+
+  // ---- specular antialiasing --------------------------------------------
+  //
+  // Roughness here goes down to 0.035 on glass, and a highlight narrower than
+  // a pixel cannot be resolved by one sample: it either lands in the pixel
+  // centre and blows out or misses entirely, and it changes under TAA's own
+  // jitter, so TAA cannot average it away either.
+  //
+  // three.js already filters roughness by the derivative of the geometric
+  // normal ('geometryRoughness' in lights_physical_fragment), but it reads
+  // nonPerturbedNormal — the interpolated vertex normal — and every wall in
+  // Boston is flat, so on this material that term is identically zero and the
+  // whole relief signal goes through unfiltered.
+  //
+  // Filter on the perturbed normal instead. Tokuyoshi and Kaplanyan: treat the
+  // variation of the shading normal over the pixel footprint as a Gaussian,
+  // convert its variance to an equivalent roughness, and add it in
+  // roughness-squared, the space the two convolve in. 1/2pi is their sigma^2
+  // for a pixel-wide kernel; the 0.18 clamp is their kappa, which stops a
+  // silhouette pixel being driven to fully diffuse.
+  //
+  // Worth about 8% of the isolated-sparkle count at street level (high-street,
+  // ultra: 0.472 and 0.465 over two runs of the same build, 0.429 with this)
+  // and neutral elsewhere. It is NOT the cause of the tier inversion where the
+  // best tier is the noisiest; see the commit for the six things that were
+  // ruled out.
+  vec3 gNdx = dFdx(gNw);
+  vec3 gNdy = dFdy(gNw);
+  float gNvar = 0.15915494 * (dot(gNdx, gNdx) + dot(gNdy, gNdy));
+  roughnessFactor = sqrt(min(roughnessFactor * roughnessFactor + min(2.0 * gNvar, 0.18), 1.0));
 `;
 
 const FRAG_EMISSIVE = /* glsl */ `
