@@ -19,6 +19,7 @@ import { grassTuft, shrubClump } from './geometry';
 import { createGroundMaterial, type SharedUniforms, type VegMaterial } from './material';
 import { CLASS_FOREST, CLASS_LAWN, LandMask } from './landmask';
 import { GRASS_CARD } from './textures';
+import { LIFT as PARK_LIFT } from '../Parks';
 
 /**
  * radius, spacing — denser close in, thinning out with distance.
@@ -33,6 +34,28 @@ const GRASS_RINGS: [number, number][] = [[18, 0.34], [40, 0.90], [76, 2.0]];
 const SHRUB_RADIUS = 130;
 const SHRUB_SPACING = 8.5;
 const REBUILD_MOVE = 7;
+
+/**
+ * Where the base of a tuft goes, relative to the terrain height.
+ *
+ * Every green polygon in the city is drawn by `Parks` as an explicit surface
+ * laid `PARK_LIFT` (0.22 m) above the terrain, to clear the CDLOD morph.
+ * Ground cover was planted at `sampleHeight - 0.03`, i.e. a quarter of a
+ * metre *underneath* the ground you can actually see — and a mown-lawn tuft
+ * is 0.19 m tall before its size jitter, so essentially every blade of grass
+ * in Boston was buried. Measured: hiding `vegetation:grass` entirely changed
+ * the lawn's high-frequency contrast at `common-street` by 0.07 of 6.55
+ * points, and an 8x-amplified difference of the two frames over the whole
+ * lawn was indistinguishable from TAA noise. Two thousand instances a frame,
+ * drawing nothing.
+ *
+ * The 4 cm is the amount the base is sunk *into* that surface, so a tuft
+ * reads as rooted rather than standing on the lawn. The classes ground cover
+ * will plant on are a subset of the land-use kinds `Parks` draws, and the
+ * triangle budget is not binding (160k of 220k), so a plantable cell is
+ * effectively always a cell with a park surface over it.
+ */
+const GROUND_Y = PARK_LIFT - 0.04;
 
 function hash2(x: number, z: number, salt: number): number {
   let h = Math.imul(x | 0, 73856093) ^ Math.imul(z | 0, 19349663) ^ Math.imul(salt, 83492791);
@@ -169,7 +192,8 @@ export class GroundCover {
             const vary = 0.82 + 0.4 * hash2(i, j, 21);
             const grow = 1 + Math.sqrt(d2) * 0.004;
             const tall = cls === CLASS_LAWN ? 0.19 : cls === CLASS_FOREST ? 0.32 : 0.26;
-            this.p.set(x, y - 0.03, z);
+            // On the park surface, not on the terrain under it. See GROUND_Y.
+            this.p.set(x, y + GROUND_Y, z);
             this.q.setFromAxisAngle(this.up, hash2(i, j, 33) * Math.PI);
             const wide = GRASS_CARD * vary * grow;
             this.s.set(wide, tall * vary * grow, wide);
@@ -218,7 +242,7 @@ export class GroundCover {
             w = 3.2;
             h = 0.85 + 0.25 * hash2(i, j, 97);
           }
-          this.p.set(x, y - 0.05, z);
+          this.p.set(x, y + GROUND_Y - 0.02, z);
           this.q.setFromAxisAngle(this.up, yaw);
           this.s.set(w, h, hedge ? 1.1 : w * 0.92);
           this.m.compose(this.p, this.q, this.s);

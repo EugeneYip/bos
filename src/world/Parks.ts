@@ -75,12 +75,6 @@ const GREEN: Partial<Record<AreaKind, { color: number; surface: string }>> = {
  */
 const SOIL = new THREE.Vector3(0.088, 0.068, 0.047);
 
-/**
- * Lift above the terrain, metres. The terrain uses continuous-LOD morphing,
- * so its rendered surface slides vertically by more than a few centimetres as
- * chunks blend between levels; anything laid flatter than that pops in and
- * out. 0.22 m clears the morph without reading as a step at eye level.
- */
 /** Even-odd point-in-ring on a flat [x,z,...] outline. */
 function pointInRing(r: readonly number[], px: number, pz: number): boolean {
   let hit = false;
@@ -94,7 +88,18 @@ function pointInRing(r: readonly number[], px: number, pz: number): boolean {
 /** Metres inside the waterline at which a lawn triangle is dropped. */
 const WATER_TRIM = 1.0;
 
-const LIFT = 0.22;
+/**
+ * Lift above the terrain, metres. The terrain uses continuous-LOD morphing,
+ * so its rendered surface slides vertically by more than a few centimetres as
+ * chunks blend between levels; anything laid flatter than that pops in and
+ * out. 0.22 m clears the morph without reading as a step at eye level.
+ *
+ * Exported because it is not a detail of this module: it is where the
+ * *visible ground* is inside a green polygon, and anything planted in one has
+ * to be planted on this surface rather than on the terrain under it. See
+ * `vegetation/groundcover.ts`.
+ */
+export const LIFT = 0.22;
 /**
  * Longest triangle edge before it gets split, metres. Ear-clipping a park
  * boundary gives a few enormous flat triangles; across the 6 m of relief on
