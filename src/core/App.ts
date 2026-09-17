@@ -176,7 +176,13 @@ export class App {
         });
       }
       for (const name in g.attributes) {
-        if (name === 'position' && !MOBILE) continue;
+        // `Mesh.raycast` reads position, and `checkGeometryIntersection`
+        // reads uv, uv1 and normal to fill in the hit it returns -- with a
+        // null array it throws rather than skipping them, which broke
+        // `__debug.pick` outright. Keep three.js's own set on desktop; the
+        // custom vertex streams are the bulk of the saving anyway (aMuv,
+        // aPar, aTint and aSurf alone are 132 MB of the 222).
+        if (!MOBILE && App._raycastAttrs.has(name)) continue;
         const a = g.attributes[name] as THREE.BufferAttribute;
         if (!a || !a.array) continue;
         if ((a as unknown as { isInstancedBufferAttribute?: boolean }).isInstancedBufferAttribute) continue;
@@ -187,6 +193,9 @@ export class App {
       }
     });
   }
+
+  /** What three.js itself reads during a raycast; see `releaseStaticAttributes`. */
+  private static readonly _raycastAttrs = new Set(['position', 'uv', 'uv1', 'normal']);
 
   private releasedGeoms = new WeakSet<THREE.BufferGeometry>();
 

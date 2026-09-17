@@ -198,6 +198,23 @@ const FAMILIES: Record<string, FamilyDef> = {
   },
 
   // ---------------------------------------------------------- cement ----
+  /*
+   * Concrete base colours: 0.25 linear albedo, not 0.40.
+   *
+   * These were 0xa9a59c, 0xa6a49d and 0xb1ada4 -- around 0.40 to 0.44 in
+   * linear terms, brighter than new concrete and far brighter than any of it
+   * after a Boston winter. Real urban concrete sits near 0.25.
+   *
+   * They reach a long way past the pavement they are named for. The terrain
+   * does not use its own procedural surface functions for a layer whose name
+   * matches a family here: it ADOPTS this texture and only falls back to the
+   * procedural one if that fails (terrain/surfaces.ts, 'uAdopt'). So
+   * `concrete_sidewalk` is the terrain's concrete layer, which is what the
+   * land-cover map hands every `pier` polygon and every unclaimed urban cell.
+   * That is the pale sheet reported over Logan's infield, over Fan Pier and
+   * along the East Boston waterfront -- one material, three symptoms, and two
+   * sessions of hunting it in the wrong file.
+   */
   concrete: {
     glsl: CEMENT_GLSL,
     tileMeters: 4.0,                    // 2 x 2 m precast panels
@@ -205,7 +222,7 @@ const FAMILIES: Record<string, FamilyDef> = {
     normalScale: 0.8,
     envMapIntensity: 0.85,
     uniforms: () => ({
-      uMode: f(1), uBase: v3(0xa9a59c),
+      uMode: f(1), uBase: v3(0x8a8780),
       uPlanks: f(8), uTies: f(2), uPanels: f(2),
       uJointDepth: f(0.012), uStain: f(0.45), uAggregate: f(0.35),
     }),
@@ -218,7 +235,7 @@ const FAMILIES: Record<string, FamilyDef> = {
     normalScale: 1.0,
     envMapIntensity: 0.8,
     uniforms: () => ({
-      uMode: f(0), uBase: v3(0xa6a49d),
+      uMode: f(0), uBase: v3(0x888680),
       uPlanks: f(8), uTies: f(2), uPanels: f(2),
       uJointDepth: f(0.010), uStain: f(0.60), uAggregate: f(0.22),
     }),
@@ -230,7 +247,7 @@ const FAMILIES: Record<string, FamilyDef> = {
     normalScale: 0.9,
     envMapIntensity: 0.75,
     uniforms: () => ({
-      uMode: f(2), uBase: v3(0xb1ada4),
+      uMode: f(2), uBase: v3(0x918d86),
       uPlanks: f(8), uTies: f(2), uPanels: f(2),
       uJointDepth: f(0.009), uStain: f(0.38), uAggregate: f(0.45),
     }),
