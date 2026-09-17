@@ -21,7 +21,8 @@
  */
 import * as THREE from 'three';
 import type { HeightSampler } from '../../core/Context';
-import { scanFill } from './poly';
+import type { AreaRecord } from '../../core/types';
+import { cleanRing, scanFill } from './poly';
 import type { WaterBody } from './bodies';
 
 export interface FieldBounds {
@@ -52,7 +53,13 @@ export class WaterField {
   private bed: Float32Array;
   private fetch: Float32Array;
   private murk: Float32Array;
-  private mask: Float32Array;
+  /**
+   * How much surf this stretch of shore is allowed, 0..1. See
+   * {@link paintSurf}. This slot used to hold a body mask that no consumer
+   * ever read -- the shader samples aux .r, .g and .b and has never looked
+   * at .a.
+   */
+  private surf: Float32Array;
   /** Half-float copy of {@link dist}; the distance texture's own storage. */
   private half: Uint16Array = new Uint16Array(0);
 
@@ -86,7 +93,7 @@ export class WaterField {
     this.bed = new Float32Array(sn).fill(60);
     this.fetch = new Float32Array(sn);
     this.murk = new Float32Array(sn);
-    this.mask = new Float32Array(sn);
+    this.surf = new Float32Array(sn);
 
     this.origin.set(this.x0, this.z0);
     this.invSize.set(1 / (this.w * texel), 1 / (this.h * texel));
@@ -169,7 +176,6 @@ export class WaterField {
           const b = bodies[bi];
           this.fetch[si] = b.fetch;
           this.murk[si] = b.murk;
-          this.mask[si] = 1;
         } else {
           // Nearest-body lookup in a small neighbourhood keeps the aux map from
           // snapping to zero one texel outside the shoreline (it is filtered).
@@ -221,6 +227,67 @@ export class WaterField {
       if (d > best[bi]) best[bi] = d;
     }
     for (let i = 0; i < bodies.length; i++) bodies[i].inradius = best[i];
+  }
+
+  /**
+   * Where the shoreline is soft enough to break surf on.
+   *
+   * Boston's waterline is overwhelmingly hard: granite seawall, steel sheet
+   * pile, riprap, wharf. Surf is a *beach* phenomenon -- it needs a shoaling
+   * bottom to trip a wave over -- and against a vertical bulkhead the water
+   * goes dark right up to the wall with, at most, a thin line of scum. The
+   * foam block in the shader had no way to know the difference and laid a
+   * nine-metre wash band along every metre of coast in the city, which at
+   * `dusk-harbour` reads as snow piled up against the Seaport quays.
+   *
+   * The terrain cannot answer this either: `carveShoreline` gives every body
+   * of water the same 1:12 approach slope, so the bed is exactly as shallow
+   * off a bulkhead as off a beach, and any test on depth would pass
+   * everywhere.
+   *
+   * So it comes from the data. OSM's `beach` and `sand` areas are painted
+   * into the aux map's fourth channel and spread a few texels seaward -- the
+   * polygons sit on the dry sand, and the fragments that need to know are the
+   * ones just offshore. 216,000 m2 of beach and 78,000 of sand, against
+   * roughly forty kilometres of hard edge.
+   */
+  paintSurf(records: readonly AreaRecord[]): void {
+    const { sw, sh, sts, x0, z0, surf } = this;
+    let painted = 0;
+    for (const rec of records) {
+      if (rec.kind !== 'beach' && rec.kind !== 'sand') continue;
+      if (!rec.outline || rec.outline.length < 6) continue;
+      const ring = cleanRing(rec.outline);
+      if (ring.length < 6) continue;
+      scanFill([ring], x0, z0, sts, sts, sw, sh, (idx) => { surf[idx] = 1; painted++; });
+    }
+    if (!painted) return;
+
+    // Separable max-with-decay, three passes at 24 m per texel: the flag
+    // reaches ~70 m out, at a fifth strength, which is about as far as a
+    // wash band ever gets. A blur would be wrong -- this wants to *grow*
+    // from the sand, not average with the water beside it.
+    const tmp = new Float32Array(surf.length);
+    const DECAY = 0.62;
+    for (let pass = 0; pass < 3; pass++) {
+      for (let j = 0; j < sh; j++) {
+        const row = j * sw;
+        for (let i = 0; i < sw; i++) {
+          const c = surf[row + i];
+          const l = i > 0 ? surf[row + i - 1] : 0;
+          const r = i + 1 < sw ? surf[row + i + 1] : 0;
+          tmp[row + i] = Math.max(c, DECAY * Math.max(l, r));
+        }
+      }
+      for (let j = 0; j < sh; j++) {
+        const row = j * sw;
+        const up = j > 0 ? row - sw : row;
+        const dn = j + 1 < sh ? row + sw : row;
+        for (let i = 0; i < sw; i++) {
+          surf[row + i] = Math.max(tmp[row + i], DECAY * Math.max(tmp[up + i], tmp[dn + i]));
+        }
+      }
+    }
   }
 
   /** Sample the bed height from the terrain wherever there is water nearby. */
@@ -326,7 +393,7 @@ export class WaterField {
       aux[i * 4] = Math.round(Math.min(255, Math.max(0, ((this.bed[i] + 60) / 160) * 255)));
       aux[i * 4 + 1] = Math.round(Math.min(255, Math.max(0, this.fetch[i] * 255)));
       aux[i * 4 + 2] = Math.round(Math.min(255, Math.max(0, this.murk[i] * 255)));
-      aux[i * 4 + 3] = Math.round(Math.min(255, Math.max(0, this.mask[i] * 255)));
+      aux[i * 4 + 3] = Math.round(Math.min(255, Math.max(0, this.surf[i] * 255)));
     }
   }
 
@@ -357,14 +424,14 @@ export class WaterField {
   compact(): number {
     const freed = this.dist.byteLength + this.bodyAt.byteLength
       + this.bed.byteLength + this.fetch.byteLength
-      + this.murk.byteLength + this.mask.byteLength;
+      + this.murk.byteLength + this.surf.byteLength;
     const none = new Float32Array(0);
     this.dist = none;
     this.bodyAt = new Int32Array(0);
     this.bed = none;
     this.fetch = none;
     this.murk = none;
-    this.mask = none;
+    this.surf = none;
     return freed;
   }
 

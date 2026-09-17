@@ -574,5 +574,21 @@
     ],
     "hour": 17.1,
     "note": "The whole-metro read at the hour the site opens on."
+  },
+  {
+    "id": "carson-beach",
+    "title": "Carson Beach and Pleasure Bay, looking north-east along the sand",
+    "pos": [
+      900,
+      110,
+      3620
+    ],
+    "target": [
+      2100,
+      2,
+      2850
+    ],
+    "hour": 15.4,
+    "note": "The one stretch of Boston shoreline that is a beach: surf and a wet-sand band belong here and nowhere else in the harbour."
   }
 ]

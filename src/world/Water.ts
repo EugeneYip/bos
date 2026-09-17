@@ -154,6 +154,7 @@ export class Water implements WorldModule {
     // Rasterise shore distance, fetch, turbidity and bed depth into the field.
     const field = new WaterField(rect, FIELD_PAD, FIELD_TEXEL);
     field.rasterise(this.bodies);
+    field.paintSurf(areas);
     field.measureInradii(this.bodies);
     field.refreshFetch(this.bodies);
     field.bakeBed(ctx.sampleHeight);

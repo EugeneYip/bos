@@ -164,6 +164,8 @@ void main() {
   float bed = aux.r * 160.0 - 60.0;
   float fetch = clamp(max(aux.g, vFetch), 0.0, 1.0);
   float murk = aux.b;
+  // How much surf this stretch of shore can break. See 'WaterField.paintSurf'.
+  float surfable = aux.a;
 
   // Water depth from the carved seabed. This is the one signal we can always
   // trust: the terrain module burns the water polygons into the heightfield,
@@ -647,11 +649,21 @@ void main() {
     float windward = clamp(-dot(wind, sn), 0.0, 1.0);
     windward = 0.22 + 0.78 * windward * windward;
 
+    // Surf needs a beach. Boston's waterline is overwhelmingly seawall,
+    // sheet pile, riprap and wharf, and against a vertical bulkhead the
+    // water is dark right up to the wall -- a thin line of scum at most.
+    // This block used to lay the same nine-metre wash band along every metre
+    // of coast in the city, which from the air reads as snow piled against
+    // the Seaport quays. 'surfable' comes from the beach and sand polygons
+    // (see 'WaterField.paintSurf'); off a hard edge what is left is the
+    // scum line.
+    float soft = mix(0.16, 1.0, surfable);
+
     // The waterline breathes. Phase varies along the bank so the whole
     // shoreline does not pulse in unison.
     float ph = texture2D(uNoise, p * 0.0013).a;
     float swash = 0.5 + 0.5 * sin(uTime * 0.72 + ph * 11.0 + dot(p, perp) * 0.012);
-    float band = mix(1.8, 7.0, windward) * mix(0.5, 1.3, fetch);
+    float band = mix(1.8, 7.0, windward) * mix(0.5, 1.3, fetch) * mix(0.42, 1.0, surfable);
     float edge = shoreD - swash * band * 0.55;
 
     // Two octaves of churn, one of them running up the beach.
@@ -665,10 +677,12 @@ void main() {
     // left a sheltered pond or lagoon breaking white at full opacity, just in
     // a thinner ribbon — a duck pond does not surf. Fetch has to cut the
     // *strength* as well as the width, or a dead-calm bank reads like a beach.
-    cov = (wash * 1.15 + lace * 0.36 * churn) * churn * windward * uFoamGain * mix(0.28, 1.0, fetch);
+    cov = (wash * 1.15 + lace * 0.36 * churn) * churn * windward * uFoamGain
+        * mix(0.28, 1.0, fetch) * soft;
 
     // Just inside the waterline the sheet is thin and glossy over wet sand.
-    float wet = (1.0 - smoothstep(0.0, 2.6, edge)) * 0.55;
+    // Wet sand is only wet *sand*; a granite wall does not shine.
+    float wet = (1.0 - smoothstep(0.0, 2.6, edge)) * 0.55 * mix(0.25, 1.0, surfable);
     color = mix(color, siltCol * down * 1.9 * authored, wet * (1.0 - clamp(cov, 0.0, 1.0)));
   }
 #endif
@@ -745,6 +759,7 @@ void main() {
   if (vm == 3) { gl_FragColor = vec4(rough * 2.0, windiness, clamp(vLostVar, 0.0, 1.0), 1.0); return; }
   if (vm == 4) { gl_FragColor = vec4(fres, NoV, clamp(cov, 0.0, 1.0), 1.0); return; }
   if (vm == 5) { gl_FragColor = vec4(clamp(shoreD / 300.0, 0.0, 1.0), clamp(foam, 0.0, 1.0), 0.0, 1.0); return; }
+  if (vm == 6) { gl_FragColor = vec4(surfable, clamp(cov, 0.0, 1.0), clamp(shoreD / 60.0, 0.0, 1.0), 1.0); return; }
 #endif
 
   // Bound the HDR output, and do it with a comparison rather than a bare
