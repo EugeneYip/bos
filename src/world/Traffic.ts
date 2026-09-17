@@ -6,7 +6,8 @@ import { loadAreas, loadProps, loadRoads } from '../core/data';
 import { buildLaneGraph, sampleEdge, LANE_W, type LaneGraph, type NoDrive } from './traffic/graph';
 import {
   vehicleTypes, pedestrianGeometry, CAR_COLORS, CLOTHES,
-  WHEEL_VERT_PARS, WHEEL_VERT_POS, WHEEL_VERT_NRM, WALK_VERT_PARS, WALK_VERT_POS,
+  WHEEL_VERT_PARS, WHEEL_VERT_POS, WHEEL_VERT_NRM,
+  WALK_VERT_PARS, WALK_VERT_POS, WALK_VERT_COLOR, WALK_FRAG_PARS, WALK_FRAG_COLOR,
   SHELL_FRAG_PARS, SHELL_FRAG_COLOR, SHELL_FRAG_ROUGH, SHELL_FRAG_METAL,
   SHELL_FRAG_LIGHT, GLASS_FRAG_PARS, GLASS_FRAG_LIGHT,
   type Part, type VehicleDef,
@@ -181,6 +182,8 @@ interface Walker {
   build: number;
   /** Seconds left standing still. */
   idle: number;
+  /** Skin and hair, 0..1. Fixed for the life of this walker. */
+  tone: number;
   active: boolean;
 }
 
@@ -277,6 +280,8 @@ export class Traffic implements WorldModule {
   private walkMesh: THREE.InstancedMesh | null = null;
   private walkPhase: THREE.InstancedBufferAttribute | null = null;
   private walkSwing: THREE.InstancedBufferAttribute | null = null;
+  /** Per-person skin and hair tone, 0..1; see `WALK_VERT_COLOR`. */
+  private walkTone: THREE.InstancedBufferAttribute | null = null;
   private walkSpawn = 0;
   /** Metres from each walk edge's centreline to the footway beside it. */
   private walkKerb: Float32Array = new Float32Array(0);
@@ -1119,18 +1124,29 @@ export class Traffic implements WorldModule {
     const geo = pedestrianGeometry();
     const phase = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
     const swing = new THREE.InstancedBufferAttribute(new Float32Array(n).fill(1), 1);
+    // One number per person for skin and hair, because the crowd needs to
+    // vary in something the clothing tint cannot reach: `instanceColor` is
+    // the coat, and it used to be the face as well.
+    const tone = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
     geo.setAttribute('aPhase', phase);
     geo.setAttribute('aSwing', swing);
+    geo.setAttribute('aTone', tone);
     this.walkPhase = phase;
     this.walkSwing = swing;
+    this.walkTone = tone;
 
     const mat = new THREE.MeshStandardMaterial({
-      name: 'pedestrian', roughness: 0.82, metalness: 0, vertexColors: true,
+      name: 'pedestrian', roughness: 0.78, metalness: 0, vertexColors: true,
+      envMapIntensity: 1.0,
     });
     mat.onBeforeCompile = (sh) => {
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>\n${WALK_VERT_PARS}`)
+        .replace('#include <color_vertex>', `#include <color_vertex>\n${WALK_VERT_COLOR}`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${WALK_VERT_POS}`);
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', `#include <common>\n${WALK_FRAG_PARS}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${WALK_FRAG_COLOR}`);
     };
     mat.customProgramCacheKey = () => 'pedestrian';
     this.materials.push(mat);
@@ -1148,7 +1164,8 @@ export class Traffic implements WorldModule {
     for (let i = 0; i < n; i++) {
       this.walkers.push({
         edge: -1, s: 0, side: 0, lane: 0.6, speed: 1.4, cruise: 1.4,
-        colour: 0, phase: 0, yaw: 0, tall: 1, build: 1, idle: 0, active: false,
+        colour: 0, phase: 0, yaw: 0, tall: 1, build: 1, idle: 0, tone: 0,
+        active: false,
       });
     }
     this.walkOrder = new Array(this.walkers.length).fill(0).map((_, i) => i);
@@ -1176,6 +1193,9 @@ export class Traffic implements WorldModule {
       w.idle = Math.random() < 0.11 ? 2 + Math.random() * 12 : 0;
       w.speed = w.idle > 0 ? 0 : w.cruise;
       w.colour = CLOTHES[(Math.random() * CLOTHES.length) | 0];
+      // Skewed toward the light end of the ramp, which is what the city is,
+      // without anyone being the same as the person beside them.
+      w.tone = Math.random() ** 1.7;
       w.phase = Math.random() * 6.283;
       w.tall = 0.90 + Math.random() * 0.17;
       w.build = 0.90 + Math.random() * 0.20;
@@ -1201,6 +1221,7 @@ export class Traffic implements WorldModule {
     const col = new THREE.Color();
     const phaseArr = this.walkPhase!.array as Float32Array;
     const swingArr = this.walkSwing!.array as Float32Array;
+    const toneArr = this.walkTone!.array as Float32Array;
     let slot = 0;
     const cap = mesh.instanceMatrix.count;
 
@@ -1293,6 +1314,7 @@ export class Traffic implements WorldModule {
       // Arms and legs swing in proportion to the pace; a standing figure only
       // sways. Clamped low rather than to zero so nobody is a statue.
       swingArr[slot] = 0.10 + 0.78 * Math.min(1, w.speed / 1.45);
+      toneArr[slot] = w.tone;
       slot++;
     }
 
@@ -1301,6 +1323,7 @@ export class Traffic implements WorldModule {
     mesh.instanceColor!.needsUpdate = true;
     this.walkPhase!.needsUpdate = true;
     this.walkSwing!.needsUpdate = true;
+    this.walkTone!.needsUpdate = true;
     ctx.stats.pedestriansDrawn = slot;
   }
 

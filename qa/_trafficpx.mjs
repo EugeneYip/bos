@@ -26,7 +26,7 @@
  *   QA_PORT=4443 QA_OUTDIR=dist-v node qa/_trafficpx.mjs --view street-night \
  *     --hour 21.4 --tier ultra [--png out-prefix]
  */
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,14 @@ const HOUR = flag('hour', null);
 const PNGOUT = flag('png', null);
 const W = 1600, H = 900;
 
+// A previous run's preview server can still hold the port. `--strictPort`
+// makes the new one fail, the poll below then finds the *old* server healthy,
+// and the whole measurement silently reports the old build — which is how a
+// before and an after came back byte-identical once.
+try {
+  execSync(`lsof -ti tcp:${PORT} | xargs -r kill -9`, { stdio: 'ignore', shell: '/bin/bash' });
+} catch { /* nothing listening */ }
+
 async function startServer() {
   const p = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort', '--outDir', OUTDIR], {
     cwd: ROOT, stdio: 'pipe', env: { ...process.env, VITE_BASE: '/' },
@@ -58,7 +66,7 @@ async function startServer() {
 
 const server = await startServer();
 const browser = await puppeteer.launch({
-  headless: true,
+  headless: true, protocolTimeout: 900000,
   args: ['--no-sandbox', '--enable-gpu', '--use-angle=metal', '--enable-unsafe-swiftshader',
     '--ignore-gpu-blocklist', '--enable-webgl', `--window-size=${W},${H}`, '--hide-scrollbars'],
 });

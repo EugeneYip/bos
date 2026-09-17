@@ -705,41 +705,89 @@ export const GLASS_FRAG_LIGHT = /* glsl */ `
  */
 export function pedestrianGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
+  /**
+   * @param shade  Multiplier on whichever colour this part ends up wearing —
+   *   white for the face and the body of a coat, less for a sleeve, a collar
+   *   or a trouser leg. It is not the colour itself: clothing takes the
+   *   per-instance tint and skin takes a per-instance skin tone, and both
+   *   arrive after this.
+   * @param mask   0 clothing, 1 skin, 2 hair. See {@link WALK_VERT_COLOR}.
+   */
   const tag = (
-    g: THREE.BufferGeometry, stride: number, hue: number, bob = 1,
+    g: THREE.BufferGeometry, stride: number, shade: number, mask = 0, bob = 1,
   ): THREE.BufferGeometry => {
     const n = g.getAttribute('position').count;
-    const a = new Float32Array(n);
-    a.fill(stride);
-    g.setAttribute('stride', new THREE.Float32BufferAttribute(a, 1));
+    g.setAttribute('stride', new THREE.Float32BufferAttribute(new Float32Array(n).fill(stride), 1));
     g.setAttribute('aBob', new THREE.Float32BufferAttribute(new Float32Array(n).fill(bob), 1));
-    // Converted once, not twice; see `tint` above.
-    const c = new THREE.Color(hue);
+    const c = new THREE.Color(shade);
     const col = new Float32Array(n * 3);
-    for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+    const skin = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      skin[i * 4] = mask;
+    }
     g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute('aSkin', new THREE.Float32BufferAttribute(skin, 4));
     return g;
   };
 
-  // Torso, in two blocks so the shoulders are wider than the waist. White so
-  // the per-instance tint becomes the clothing.
+  /**
+   * Head-local coordinates in the unused three channels of `aSkin`, so the
+   * fragment stage can put a face on the front plane of the head without a
+   * texture, a UV set or a single extra triangle. Normalised to -1..1 over
+   * the head box, and zero everywhere else, which is what keeps a hand or a
+   * neck from growing eyes.
+   */
+  const faceCoords = (
+    g: THREE.BufferGeometry, cx: number, cy: number, hx: number, hy: number, hz: number,
+  ): THREE.BufferGeometry => {
+    const p = g.getAttribute('position');
+    const a = g.getAttribute('aSkin') as THREE.BufferAttribute;
+    for (let i = 0; i < p.count; i++) {
+      a.setY(i, (p.getX(i) - cx) / hx);
+      a.setZ(i, (p.getY(i) - cy) / hy);
+      a.setW(i, p.getZ(i) / hz);
+    }
+    return g;
+  };
+
+  // Torso, in two blocks so the shoulders are wider than the waist. The coat
+  // body is left at full strength and the skirt below the waist is knocked
+  // back a little, because a coat that is one flat value from collar to hem
+  // is the single largest area of this figure and it was reading as a poncho.
   parts.push(tag(taper(0.24, 0.30, 0.33, 0.42, 0, 1.14), 0, 0xffffff));       // chest
-  parts.push(tag(taper(0.21, 0.24, 0.36, 0.31, 0, 0.90), 0, 0xffffff));       // hips/waist
-  parts.push(tag(box(0.10, 0.08, 0.10, 0, 1.47), 0, 0xd9bda1));               // neck
-  parts.push(tag(box(0.185, 0.215, 0.175, 0, 1.615), 0, 0xf0d2b4));           // head
-  // Arms hanging against the ribs, counter-swinging.
-  for (const z of [-0.245, 0.245]) {
+  parts.push(tag(taper(0.21, 0.24, 0.36, 0.31, 0, 0.90), 0, 0xe0e0e0));       // hips/waist
+  // Collar: a darker band across the top of the chest. Three centimetres of
+  // geometry, and it is what separates a head from a torso at fifty metres.
+  parts.push(tag(box(0.255, 0.05, 0.345, 0, 1.418), 0, 0x9aa0a6));
+  parts.push(tag(box(0.10, 0.085, 0.10, 0, 1.468), 0, 0xd8d8d8, 1));          // neck
+  const head = tag(box(0.185, 0.205, 0.158, 0, 1.612), 0, 0xffffff, 1);
+  parts.push(faceCoords(head, 0, 1.612, 0.0925, 0.1025, 0.079));
+  // Hair: a cap over the crown and a slab down the back of the skull, left
+  // as its own tone rather than the coat's. A bare skin-coloured cube is the
+  // thing that made these read as dolls more than anything else about them.
+  parts.push(tag(box(0.197, 0.072, 0.170, -0.006, 1.732), 0, 0xffffff, 2));
+  parts.push(tag(box(0.055, 0.150, 0.170, -0.077, 1.640), 0, 0xd2d2d2, 2));
+  // Arms hanging against the ribs, counter-swinging. Set a shade below the
+  // chest and a centimetre further out: same cloth, but a sleeve that is
+  // exactly the value of the chest behind it has no edge, and the arm and the
+  // body merged into one slab with a crease drawn on it.
+  for (const z of [-0.255, 0.255]) {
     const s = z > 0 ? -0.62 : 0.62;
-    parts.push(tag(box(0.10, 0.56, 0.10, 0, 1.14, z), s, 0xffffff));
-    parts.push(tag(box(0.08, 0.11, 0.085, 0.01, 0.80, z), s, 0xe8c9ab));      // hand
+    parts.push(tag(box(0.10, 0.50, 0.10, 0, 1.17, z), s, 0xd4d4d4));         // sleeve
+    parts.push(tag(box(0.095, 0.055, 0.095, 0, 0.905, z), s, 0x8d9298));     // cuff
+    parts.push(tag(box(0.08, 0.115, 0.085, 0.01, 0.815, z), s, 0xf2f2f2, 1)); // hand
   }
   // Legs, hinged at the hip. 1.0 above the knee, 1.05 below it, so the shin
-  // and shoe can fold back through the swing.
+  // and shoe can fold back through the swing. Trousers keep their own dark
+  // neutral rather than taking the coat colour — nobody's trousers match
+  // their coat, and a figure in one colour from collar to ankle is a doll.
   for (const z of [-0.085, 0.085]) {
     const s = z > 0 ? 1 : -1;
     parts.push(tag(box(0.135, 0.42, 0.145, 0, 0.66, z), s, 0x565c66));        // thigh
     parts.push(tag(box(0.115, 0.46, 0.125, 0, 0.25, z), s * 1.05, 0x4b515a)); // shin
-    parts.push(tag(box(0.235, 0.075, 0.115, 0.045, 0.038, z), s * 1.05, 0x24262b)); // shoe
+    parts.push(tag(box(0.235, 0.062, 0.115, 0.045, 0.045, z), s * 1.05, 0x2c2f35)); // shoe
+    parts.push(tag(box(0.245, 0.018, 0.122, 0.048, 0.010, z), s * 1.05, 0x6a6f77)); // sole
   }
   return merge(parts)!;
 }
@@ -754,6 +802,92 @@ attribute float stride;
 attribute float aBob;
 attribute float aPhase;
 attribute float aSwing;
+attribute vec4 aSkin;
+attribute float aTone;
+varying vec4 vPedSkin;
+
+/**
+ * Skin, from a per-instance 0..1. Three linear-sRGB control points through
+ * the range a Boston street actually contains, not a hue rotation of one
+ * colour, because the thing that reads wrong is the *value* relationship
+ * between a face and a coat, and a ramp that only moves the hue keeps every
+ * face at the same lightness.
+ */
+vec3 bhSkinTone(float t) {
+  vec3 a = vec3(0.871, 0.578, 0.396);
+  vec3 b = vec3(0.527, 0.253, 0.111);
+  vec3 c = vec3(0.147, 0.061, 0.029);
+  return t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, (t - 0.5) * 2.0);
+}
+
+/** Hair. Mostly dark; the top of the ramp is grey rather than blond. */
+vec3 bhHairTone(float t) {
+  vec3 a = vec3(0.0108, 0.0079, 0.0060);
+  vec3 b = vec3(0.0426, 0.0231, 0.0125);
+  vec3 c = vec3(0.253, 0.145, 0.055);
+  vec3 d = vec3(0.324, 0.306, 0.281);
+  if (t < 0.45) return mix(a, b, t / 0.45);
+  if (t < 0.82) return mix(b, c, (t - 0.45) / 0.37);
+  return mix(c, d, (t - 0.82) / 0.18);
+}
+`;
+
+/**
+ * Where the per-instance clothing tint stops.
+ *
+ * `instanceColor` multiplies the whole figure, head included, so a walker in
+ * a green coat had a green face and a walker in a charcoal one was a black
+ * cut-out from hat to boot. That is also why the clothing palette had been
+ * lifted into a range no one in Boston wears: it was the only way to keep the
+ * faces from going black, and it is what left a pedestrian reading three
+ * times brighter than the lawn behind them in the same light. Masking the
+ * tint off skin and hair lets the coats go back down to real values.
+ */
+export const WALK_VERT_COLOR = /* glsl */ `
+vPedSkin = aSkin;
+if (aSkin.x > 0.5) {
+  vec3 bhTone = aSkin.x > 1.5
+    ? bhHairTone(fract(aTone * 7.13 + 0.37))
+    : bhSkinTone(aTone);
+  vColor.rgb = color.rgb * bhTone;
+}
+`;
+
+/** Declarations the walker's fragment stage needs. */
+export const WALK_FRAG_PARS = /* glsl */ `
+varying vec4 vPedSkin;
+`;
+
+/**
+ * A face, on the front plane of the head, out of the head-local coordinates
+ * the vertex stage already carries.
+ *
+ * At the eight metres the review measured, a head is about forty-five pixels
+ * tall and an eye is seven of them — plenty to read, and the difference
+ * between a person and a mannequin. It is drawn rather than modelled because
+ * the triangles would be invisible: what registers at this range is two dark
+ * marks, a brow and a mouth, and those are three smoothsteps.
+ *
+ * `fwidth` on the head-local vertical gives head-local units per pixel, which
+ * is a direct measure of how large the head is on screen, so the face fades
+ * out by itself at about twenty-five metres rather than boiling into
+ * aliasing noise across a crowd.
+ */
+export const WALK_FRAG_COLOR = /* glsl */ `
+if (vPedSkin.x > 0.5 && vPedSkin.x < 1.5 && vPedSkin.y > 0.5) {
+  float bhNear = 1.0 - smoothstep(0.055, 0.155, fwidth(vPedSkin.z));
+  if (bhNear > 0.01) {
+    float bhFront = smoothstep(0.86, 0.97, vPedSkin.y);
+    vec2 bhE = vec2(abs(vPedSkin.w) - 0.42, (vPedSkin.z - 0.20) * 1.35);
+    float bhEye = 1.0 - smoothstep(0.09, 0.19, length(bhE));
+    float bhBrow = (1.0 - smoothstep(0.04, 0.14, abs(vPedSkin.z - 0.40)))
+                 * (1.0 - smoothstep(0.52, 0.72, abs(vPedSkin.w)));
+    float bhMouth = (1.0 - smoothstep(0.03, 0.09, abs(vPedSkin.z + 0.42)))
+                  * (1.0 - smoothstep(0.20, 0.33, abs(vPedSkin.w)));
+    diffuseColor.rgb *= 1.0 - bhNear * bhFront
+      * (0.74 * bhEye + 0.26 * bhBrow + 0.34 * bhMouth);
+  }
+}
 `;
 
 export const WALK_VERT_POS = /* glsl */ `
@@ -782,14 +916,17 @@ transformed.y += aBob * (0.022 * aSwing * (0.5 - 0.5 * cos(aPhase * 2.0))
 `;
 
 /**
- * Clothing colours. Boston does dress in dark neutrals, but the per-instance
- * tint multiplies the whole figure including the head, so a palette of true
- * charcoals rendered everyone as a black cut-out. These are the same hues
- * lifted into a range that still reads as a coat once the sun and the
- * tonemapper have had their way with it.
+ * Clothing colours: outerwear, as worn.
+ *
+ * These used to be lifted well above anything on a real street, because the
+ * per-instance tint multiplied the whole figure including the face, so a
+ * charcoal coat produced a charcoal person. It also made a walker measure
+ * three times the brightness of the lawn behind them under the same sun,
+ * which is an albedo a coat does not have. Skin and hair now sit outside the
+ * tint (see `WALK_VERT_COLOR`), so the coats can be coats.
  */
 export const CLOTHES: number[] = [
-  0x4a5058, 0x5a6169, 0x3e444c, 0x6f757d, 0x8a9098,
-  0x9a5f46, 0xa8adb4, 0xc6c9cd, 0x466f8c, 0x7d4247,
-  0x4e7257, 0xd6d1c4, 0x8f84a2, 0xb5754a, 0x5f7f9c,
+  0x353b43, 0x454b53, 0x2a2f37, 0x585e66, 0x757b84,
+  0x8c5638, 0x9298a0, 0xb4b7bb, 0x2e4c62, 0x6d383d,
+  0x3a5a43, 0xb9b3a4, 0x655b7a, 0x8a5733, 0x46617b,
 ];

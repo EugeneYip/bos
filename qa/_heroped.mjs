@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 /**
- * Put the camera 8 m from a pedestrian and report what the pedestrian is made
- * of.
+ * One pedestrian, in a fixed pose, in a fixed coat, 8 m from a fixed camera.
  *
  * Defect #1 was measured on a figure that happened to walk into the middle of
- * one screenshot; that cannot be repeated after a change, because the crowd is
- * re-seeded on every boot. So this finds a walker instead: it reads the
- * instance matrices off the pedestrian mesh, picks the one nearest the centre
- * of the frame at a sensible distance, projects its bounding box, and measures
- * inside it — plus an equal-area patch of whatever is immediately beside it,
- * which is the only brightness reference that survives auto-exposure.
+ * one screenshot, which cannot be repeated after a change: the crowd is
+ * re-seeded on every boot, and seeding the generator does not survive a code
+ * change either. So this places a walker rather than looking for one. The
+ * frame loop is stopped, every other walker and every vehicle is drawn zero
+ * times, and slot zero's instance matrix, instance colour and skin tone are
+ * overwritten with a canonical pose. Both arms then measure the same figure
+ * in the same coat under the same light.
  *
- *   QA_PORT=4445 QA_OUTDIR=dist-v node qa/_heroped.mjs [--view common-street]
- *     [--hour 15] [--tier ultra] [--png out-prefix]
+ * '--yaw 180' faces them at the camera, which is the only view that says
+ * anything about a head.
+ *
+ *   QA_PORT=4445 QA_OUTDIR=dist-v node qa/_heroped.mjs --view common-street \
+ *     [--hour 15] [--yaw 180] [--coat 45505c] [--tone 0.32] [--png prefix]
  */
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,8 +32,20 @@ const flag = (n, d) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[
 const TIER = flag('tier', 'ultra');
 const VIEW = flag('view', 'common-street');
 const HOUR = flag('hour', null);
+const COAT = flag('coat', '45505c');
+const TONE = Number(flag('tone', '0.32'));
+const DIST = Number(flag('dist', '8'));
+const YAW = Number(flag('yaw', '180'));
 const PNGOUT = flag('png', null);
 const W = 1600, H = 900;
+
+// A previous run's preview server can still hold the port. `--strictPort`
+// makes the new one fail, the poll below then finds the *old* server healthy,
+// and the whole measurement silently reports the old build — which is how a
+// before and an after came back byte-identical once.
+try {
+  execSync(`lsof -ti tcp:${PORT} | xargs -r kill -9`, { stdio: 'ignore', shell: '/bin/bash' });
+} catch { /* nothing listening */ }
 
 async function startServer() {
   const p = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort', '--outDir', OUTDIR], {
@@ -46,7 +61,7 @@ async function startServer() {
 
 const server = await startServer();
 const browser = await puppeteer.launch({
-  headless: true,
+  headless: true, protocolTimeout: 900000,
   args: ['--no-sandbox', '--enable-gpu', '--use-angle=metal', '--enable-unsafe-swiftshader',
     '--ignore-gpu-blocklist', '--enable-webgl', `--window-size=${W},${H}`, '--hide-scrollbars'],
 });
@@ -56,21 +71,6 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 await page.evaluateOnNewDocument(() => { try { localStorage.setItem('bh-onboarded', '1'); } catch { /* */ } });
-// Seed the world.
-//
-// Every car's colour, lane and position comes out of Math.random at boot, so
-// two runs put a different fleet on a different street and no statistic over
-// 'the vehicles in this frame' means the same thing twice — one run of this
-// script found 10% of the frame covered in bodywork and the next found 0.03%.
-// Replacing the generator before any module loads makes the whole city
-// reproducible, so a before and an after describe the same cars.
-await page.evaluateOnNewDocument((seed) => {
-  let s = seed >>> 0;
-  Math.random = () => {
-    s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
-    return s / 4294967296;
-  };
-}, Number(process.env.QA_SEED || 0x2f6e2b1));
 await page.goto(`http://localhost:${PORT}/?q=${TIER}`, { waitUntil: 'networkidle2', timeout: 180000 });
 await page.waitForFunction('window.__ready === true', { timeout: 300000 });
 
@@ -81,188 +81,172 @@ const hour = HOUR !== null ? Number(HOUR) : vp.hour;
 await page.evaluate((v, h) => { window.__debug.setView(v.pos, v.target); window.__debug.setTime(h); }, vp, hour);
 await page.evaluate(() => window.__debug.settle(90));
 await new Promise((r) => setTimeout(r, 1200));
-await page.evaluate(() => window.__debug.settle(30));
+await page.evaluate(() => window.__debug.settle(40));
 
-/**
- * Stop the world.
- *
- * A walker covers 1.4 m/s and a screenshot round trip is about half a
- * second, so measuring a box computed before the capture put the rectangle
- * two thirds of a metre — 110 px at this range — to the left of the figure
- * it was supposed to describe. `running` is the app's own frame-loop latch;
- * with it down nothing steps, and a frame is drawn on demand instead.
- */
-const freeze = () => page.evaluate(() => { window.__boston.running = false; });
+await page.evaluate(() => { window.__boston.running = false; });
 const redraw = () => page.evaluate(() => {
   const app = window.__boston;
   if (app.renderOverride) app.renderOverride(1 / 60);
   else app.ctx.renderer.render(app.ctx.scene, app.ctx.camera);
 });
-await freeze();
-await redraw();
+const shot = async () => PNG.sync.read(Buffer.from(await page.screenshot({ type: 'png' })));
 
-/** Screen-space box of the best-placed walker, and the frame's exposure. */
-const find = () => page.evaluate((w, h) => {
+const placed = await page.evaluate((hex, tone, dist, yawDeg) => {
   const ctx = window.__boston.ctx;
-  let mesh = null;
-  ctx.scene.traverse((o) => { if (o.name === 'pedestrians') mesh = o; });
-  if (!mesh) return null;
   const cam = ctx.camera;
-  cam.updateMatrixWorld(true);
-  const im = mesh.instanceMatrix.array;
-  const vp = [];
-  {
-    // projection * viewInverse, column-major, both straight off the camera.
-    const p = cam.projectionMatrix.elements, v = cam.matrixWorldInverse.elements;
-    for (let c = 0; c < 4; c++) {
-      for (let r = 0; r < 4; r++) {
-        let s = 0;
-        for (let k = 0; k < 4; k++) s += p[k * 4 + r] * v[c * 4 + k];
-        vp[c * 4 + r] = s;
-      }
-    }
-  }
-  /** Object-space point through the instance matrix and then the camera. */
-  const project = (e, x, y, z) => {
-    const wx = e[0] * x + e[4] * y + e[8] * z + e[12];
-    const wy = e[1] * x + e[5] * y + e[9] * z + e[13];
-    const wz = e[2] * x + e[6] * y + e[10] * z + e[14];
-    const cx = vp[0] * wx + vp[4] * wy + vp[8] * wz + vp[12];
-    const cy = vp[1] * wx + vp[5] * wy + vp[9] * wz + vp[13];
-    const cz = vp[2] * wx + vp[6] * wy + vp[10] * wz + vp[14];
-    const cw = vp[3] * wx + vp[7] * wy + vp[11] * wz + vp[15];
-    return [cx / cw, cy / cw, cz / cw, cw];
-  };
-  let best = null;
-  for (let i = 0; i < mesh.count; i++) {
-    const m = { elements: im.subarray(i * 16, i * 16 + 16) };
-    const px = m.elements[12], py = m.elements[13], pz = m.elements[14];
-    const d = Math.hypot(px - cam.position.x, py - cam.position.y, pz - cam.position.z);
-    if (d < 4 || d > 16) continue;
-    // Corners of the instance's own box, so the reported rectangle is the
-    // figure and not a guess from its origin.
-    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, behind = false;
-    for (const dx of [-0.45, 0.45]) {
-      for (const dy of [0.0, 1.85]) {
-        for (const dz of [-0.45, 0.45]) {
-          const v = project(m.elements, dx, dy, dz);
-          if (v[3] <= 0) behind = true;
-          const sx = (v[0] * 0.5 + 0.5) * w, sy = (-v[1] * 0.5 + 0.5) * h;
-          x0 = Math.min(x0, sx); x1 = Math.max(x1, sx);
-          y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
-        }
-      }
-    }
-    if (behind) continue;
-    if (x0 < 8 || y0 < 8 || x1 > w - 8 || y1 > h - 8) continue;
-    // Prefer big and central.
-    const cx = (x0 + x1) * 0.5, cy = (y0 + y1) * 0.5;
-    const score = (y1 - y0) - 0.10 * Math.hypot(cx - w / 2, cy - h / 2);
-    if (!best || score > best.score) {
-      best = { i, d, score, x0, y0, x1, y1, world: [px, py, pz] };
-    }
-  }
-  return best ? { ...best, exposure: ctx.exposure, count: mesh.count } : null;
-}, W, H);
-
-let hero = await find();
-if (!hero) {
-  // Nobody close enough in the stock pose: drop the camera onto the footway
-  // beside the nearest walker and look along it.
-  const moved = await page.evaluate(() => {
-    const ctx = window.__boston.ctx;
-    let mesh = null;
-    ctx.scene.traverse((o) => { if (o.name === 'pedestrians') mesh = o; });
-    if (!mesh || !mesh.count) return false;
-    const im = mesh.instanceMatrix.array;
-    let bi = -1, bd = 1e9;
-    for (let i = 0; i < mesh.count; i++) {
-      const d = Math.hypot(im[i * 16 + 12] - ctx.camera.position.x, im[i * 16 + 14] - ctx.camera.position.z);
-      if (d < bd) { bd = d; bi = i; }
-    }
-    if (bi < 0) return false;
-    const p = [im[bi * 16 + 12], im[bi * 16 + 13], im[bi * 16 + 14]];
-    const a = Math.atan2(p[2] - ctx.camera.position.z, p[0] - ctx.camera.position.x);
-    window.__debug.setView(
-      [p[0] - Math.cos(a) * 8, p[1] + 1.55, p[2] - Math.sin(a) * 8],
-      [p[0], p[1] + 0.95, p[2]],
-    );
-    return true;
+  let mesh = null;
+  const others = [];
+  ctx.scene.traverse((o) => {
+    if (!o.isInstancedMesh) return;
+    if (o.name === 'pedestrians') mesh = o;
+    else if ((o.name || '').startsWith('traffic:')) others.push(o);
   });
-  if (moved) {
-    await page.evaluate(() => { window.__boston.running = true; });
-    await page.evaluate(() => window.__debug.settle(40));
-    await freeze();
-    await redraw();
-    hero = await find();
-  }
-}
-if (!hero) { await browser.close(); server.kill(); throw new Error('no pedestrian in frame'); }
+  if (!mesh) return null;
+  for (const o of others) o.count = 0;
 
-const png = PNG.sync.read(Buffer.from(await page.screenshot({ type: 'png' })));
+  const fwd = new (cam.position.constructor)();
+  cam.getWorldDirection(fwd);
+  fwd.y = 0; fwd.normalize();
+  const px = cam.position.x + fwd.x * dist;
+  const pz = cam.position.z + fwd.z * dist;
+  const g = ctx.sampleHeight ? ctx.sampleHeight(px, pz) : null;
+  const py = Number.isFinite(g) ? g : cam.position.y - 1.6;
+  const yaw = Math.atan2(-fwd.z, fwd.x) + (yawDeg * Math.PI) / 180;
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+
+  mesh.count = 1;
+  mesh.instanceMatrix.array.set([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, px, py, pz, 1], 0);
+  mesh.instanceMatrix.needsUpdate = true;
+  const n = parseInt(hex, 16);
+  const lin = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  mesh.instanceColor.setXYZ(0, lin(((n >> 16) & 255) / 255), lin(((n >> 8) & 255) / 255), lin((n & 255) / 255));
+  mesh.instanceColor.needsUpdate = true;
+  for (const [a, v] of [['aPhase', 0.45], ['aSwing', 0.8], ['aTone', tone]]) {
+    const at = mesh.geometry.getAttribute(a);
+    if (at) { at.setX(0, v); at.needsUpdate = true; }
+  }
+  // Where the figure will land on screen, so the mask can be confined to it.
+  // The post chain re-jitters between two draws and scatters a few thousand
+  // single-pixel differences across every leaf in the frame; unconfined, that
+  // noise was most of the 'pedestrian'.
+  cam.updateMatrixWorld(true);
+  const pm = cam.projectionMatrix.elements, vm = cam.matrixWorldInverse.elements;
+  const vpm = [];
+  for (let cc = 0; cc < 4; cc++) {
+    for (let rr = 0; rr < 4; rr++) {
+      let acc = 0;
+      for (let k = 0; k < 4; k++) acc += pm[k * 4 + rr] * vm[cc * 4 + k];
+      vpm[cc * 4 + rr] = acc;
+    }
+  }
+  let sx0 = 1e9, sy0 = 1e9, sx1 = -1e9, sy1 = -1e9;
+  for (const dx of [-0.6, 0.6]) {
+    for (const dy of [-0.05, 2.0]) {
+      for (const dz of [-0.6, 0.6]) {
+        const wx = px + dx, wy = py + dy, wz = pz + dz;
+        const cw = vpm[3] * wx + vpm[7] * wy + vpm[11] * wz + vpm[15];
+        const ex = (vpm[0] * wx + vpm[4] * wy + vpm[8] * wz + vpm[12]) / cw;
+        const ey = (vpm[1] * wx + vpm[5] * wy + vpm[9] * wz + vpm[13]) / cw;
+        const ux = (ex * 0.5 + 0.5) * window.innerWidth;
+        const uy = (-ey * 0.5 + 0.5) * window.innerHeight;
+        sx0 = Math.min(sx0, ux); sx1 = Math.max(sx1, ux);
+        sy0 = Math.min(sy0, uy); sy1 = Math.max(sy1, uy);
+      }
+    }
+  }
+  return {
+    world: [px, py, pz], exposure: ctx.exposure,
+    hasTone: !!mesh.geometry.getAttribute('aTone'),
+    screen: [Math.floor(sx0), Math.floor(sy0), Math.ceil(sx1), Math.ceil(sy1)],
+  };
+}, COAT, TONE, DIST, YAW);
+if (!placed) { await browser.close(); server.kill(); throw new Error('no pedestrian mesh'); }
+
+await redraw();
+const withPed = await shot();
+await page.evaluate(() => {
+  window.__boston.ctx.scene.traverse((o) => { if (o.name === 'pedestrians') o.count = 0; });
+});
+await redraw();
+const without = await shot();
 await browser.close(); server.kill();
 
-const bx = Math.max(0, Math.round(hero.x0));
-const by = Math.max(0, Math.round(hero.y0));
-const bw = Math.min(png.width - bx, Math.round(hero.x1 - hero.x0));
-const bh = Math.min(png.height - by, Math.round(hero.y1 - hero.y0));
+const mask = new Uint8Array(W * H);
+const [gx0, gy0, gx1, gy1] = placed.screen;
+let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, n = 0;
+for (let p = 0; p < W * H; p++) {
+  const px0 = p % W, py0 = (p / W) | 0;
+  if (px0 < gx0 || px0 > gx1 || py0 < gy0 || py0 > gy1) continue;
+  const i = p * 4;
+  const d = Math.abs(withPed.data[i] - without.data[i])
+    + Math.abs(withPed.data[i + 1] - without.data[i + 1])
+    + Math.abs(withPed.data[i + 2] - without.data[i + 2]);
+  if (d <= 20) continue;
+  mask[p] = 1; n++;
+  const x = p % W, y = (p / W) | 0;
+  if (x < x0) x0 = x;
+  if (x > x1) x1 = x;
+  if (y < y0) y0 = y;
+  if (y > y1) y1 = y;
+}
+if (!n) throw new Error('walker did not render');
+const bh = y1 - y0, bw = x1 - x0;
 
-function patch(x0, y0, w, h) {
+function over(pred, src) {
+  const img = src ?? withPed;
   const uniq = new Set();
-  let n = 0, sl = 0, sl2 = 0, sat = 0, sr = 0, sg = 0, sb = 0;
-  for (let y = y0; y < y0 + h; y++) {
-    for (let x = x0; x < x0 + w; x++) {
-      if (x < 0 || y < 0 || x >= png.width || y >= png.height) continue;
-      const i = (y * png.width + x) * 4;
-      const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
-      uniq.add((r << 16) | (g << 8) | b);
-      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      n++; sl += l; sl2 += l * l; sr += r; sg += g; sb += b;
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-      if (mx > 0) sat += (mx - mn) / mx;
-    }
+  let m = 0, sl = 0, sl2 = 0, sat = 0, sr = 0, sg = 0, sb = 0;
+  for (let p = 0; p < W * H; p++) {
+    if (!mask[p] || !pred(p % W, (p / W) | 0)) continue;
+    const i = p * 4;
+    const r = img.data[i], g = img.data[i + 1], b = img.data[i + 2];
+    uniq.add((r << 16) | (g << 8) | b);
+    const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    m++; sl += l; sl2 += l * l; sr += r; sg += g; sb += b;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx > 0) sat += (mx - mn) / mx;
   }
-  const mean = sl / Math.max(n, 1);
+  if (!m) return { n: 0 };
+  const mean = sl / m;
   return {
-    n, uniq: uniq.size, uniqPerKpx: +((uniq.size / Math.max(n, 1)) * 1000).toFixed(1),
-    luma: +mean.toFixed(1), sd: +Math.sqrt(Math.max(0, sl2 / n - mean * mean)).toFixed(2),
-    sat: +(sat / Math.max(n, 1)).toFixed(3),
-    rgb: [+(sr / n).toFixed(1), +(sg / n).toFixed(1), +(sb / n).toFixed(1)],
+    n: m, uniq: uniq.size, uniqPerKpx: +((uniq.size / m) * 1000).toFixed(1),
+    luma: +mean.toFixed(1), sd: +Math.sqrt(Math.max(0, sl2 / m - mean * mean)).toFixed(2),
+    sat: +(sat / m).toFixed(3),
+    rgb: [+(sr / m).toFixed(1), +(sg / m).toFixed(1), +(sb / m).toFixed(1)],
   };
 }
 
-// The torso: the middle third of the box, which is all clothing.
-const torso = patch(bx + Math.round(bw * 0.25), by + Math.round(bh * 0.30),
-  Math.max(2, Math.round(bw * 0.5)), Math.max(2, Math.round(bh * 0.25)));
-// The head: the top eighth.
-const head = patch(bx + Math.round(bw * 0.3), by, Math.max(2, Math.round(bw * 0.4)),
-  Math.max(2, Math.round(bh * 0.13)));
-// Whatever is beside the figure, same area, one box-width to the left.
-const beside = patch(Math.max(0, bx - bw - 6), by + Math.round(bh * 0.55), bw, Math.round(bh * 0.3));
+// What the figure is standing in front of, sampled from the frame with the
+// figure removed over exactly the pixels it covered. A ratio inside one frame
+// is the only brightness claim that survives auto-exposure moving.
+const behind = over(() => true, without);
+const all = over(() => true);
+const head = over((x, y) => y < y0 + bh * 0.14);
+const torso = over((x, y) => y > y0 + bh * 0.20 && y < y0 + bh * 0.52);
+const legs = over((x, y) => y > y0 + bh * 0.66);
 
-const out = {
-  view: VIEW, hour, tier: TIER, exposure: +hero.exposure.toFixed(4),
-  distance: +hero.d.toFixed(2), crowd: hero.count,
-  box: { x: bx, y: by, w: bw, h: bh },
-  torso, head, beside,
-  torsoOverBeside: +(torso.luma / Math.max(beside.luma, 0.01)).toFixed(2),
-};
-console.log(JSON.stringify(out, null, 2));
+console.log(JSON.stringify({
+  view: VIEW, hour, tier: TIER, coat: COAT, tone: TONE, yaw: YAW,
+  exposure: +placed.exposure.toFixed(4), hasTone: placed.hasTone,
+  box: { x: x0, y: y0, w: bw + 1, h: bh + 1 }, pixels: n,
+  all, head, torso, legs, behind,
+  figureOverBackground: +(all.luma / Math.max(behind.luma, 0.01)).toFixed(2),
+}, null, 2));
 if (errors.length) console.error('ERRORS', errors.slice(0, 6));
 
 if (PNGOUT) {
-  await writeFile(`${PNGOUT}-frame.png`, PNG.sync.write(png));
-  const pad = 24, z = 4;
-  const cx = Math.max(0, bx - pad), cy = Math.max(0, by - pad);
-  const cw = Math.min(png.width - cx, bw + pad * 2), ch = Math.min(png.height - cy, bh + pad * 2);
+  const pad = 20, z = 4;
+  const cx = Math.max(0, x0 - pad), cy = Math.max(0, y0 - pad);
+  const cw = Math.min(W - cx, bw + 1 + pad * 2), ch = Math.min(H - cy, bh + 1 + pad * 2);
   const zo = new PNG({ width: cw * z, height: ch * z });
   for (let y = 0; y < ch * z; y++) {
     for (let x = 0; x < cw * z; x++) {
-      const si = ((cy + Math.floor(y / z)) * png.width + cx + Math.floor(x / z)) * 4;
+      const si = ((cy + Math.floor(y / z)) * W + cx + Math.floor(x / z)) * 4;
       const di = (y * zo.width + x) * 4;
-      zo.data[di] = png.data[si]; zo.data[di + 1] = png.data[si + 1];
-      zo.data[di + 2] = png.data[si + 2]; zo.data[di + 3] = 255;
+      zo.data[di] = withPed.data[si]; zo.data[di + 1] = withPed.data[si + 1];
+      zo.data[di + 2] = withPed.data[si + 2]; zo.data[di + 3] = 255;
     }
   }
   await writeFile(`${PNGOUT}-hero.png`, PNG.sync.write(zo));
+  await writeFile(`${PNGOUT}-frame.png`, PNG.sync.write(withPed));
 }

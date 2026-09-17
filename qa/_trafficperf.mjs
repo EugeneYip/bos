@@ -11,7 +11,7 @@
  *   QA_PORT=4447 QA_OUTDIR=dist-v node qa/_trafficperf.mjs --view downtown-traffic \
  *     [--tier ultra] [--reps 4] [--ms 2200]
  */
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,14 @@ const VIEW = flag('view', 'downtown-traffic');
 const HOUR = flag('hour', null);
 const REPS = Number(flag('reps', '4'));
 const MS = Number(flag('ms', '2200'));
+
+// A previous run's preview server can still hold the port. `--strictPort`
+// makes the new one fail, the poll below then finds the *old* server healthy,
+// and the whole measurement silently reports the old build — which is how a
+// before and an after came back byte-identical once.
+try {
+  execSync(`lsof -ti tcp:${PORT} | xargs -r kill -9`, { stdio: 'ignore', shell: '/bin/bash' });
+} catch { /* nothing listening */ }
 
 const srv = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort', '--outDir', OUTDIR], {
   cwd: ROOT, stdio: 'ignore', env: { ...process.env, VITE_BASE: '/' },
