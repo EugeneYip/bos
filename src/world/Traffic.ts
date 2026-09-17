@@ -565,10 +565,15 @@ export class Traffic implements WorldModule {
             .replace('#include <common>',
               '#include <common>\nattribute float aTail;\nattribute float aBrake;\n'
               + 'attribute float aSide;\nattribute float aIndicator;\nuniform float uTime;\n'
-              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;')
+              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;\n'
+              + 'varying float vChmsl;')
             .replace('#include <begin_vertex>', /* glsl */ `
               #include <begin_vertex>
               vTail = aTail; vBrakeAmt = aBrake;
+              // The high-level brake lamp is the only tail lamp on the
+              // centreline, so 'a tail lamp with no side' identifies it
+              // without another attribute.
+              vChmsl = aTail * (1.0 - step(0.5, abs(aSide)));
               // On the correct side only: aSide and aIndicator agree in sign
               // (both +1 or both -1) exactly when this lamp is the one that
               // should blink. A 1.6 Hz square wave, phase-offset per instance
@@ -582,12 +587,21 @@ export class Traffic implements WorldModule {
           sh.fragmentShader = sh.fragmentShader
             .replace('#include <common>',
               '#include <common>\nuniform float uNight;\nuniform float uBrake;\nuniform float uIndicator;\n'
-              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;')
+              + 'varying float vTail;\nvarying float vBrakeAmt;\nvarying float vBlinkOn;\n'
+              + 'varying float vChmsl;')
             .replace('#include <emissivemap_fragment>', /* glsl */ `
               #include <emissivemap_fragment>
               vec3 bhHead = vec3(1.0, 0.80, 0.58) * uNight;
-              vec3 bhTail = vec3(1.0, 0.055, 0.02)
-                          * (uNight * 0.42 + vBrakeAmt * uBrake);
+              // A third brake lamp is a *brake* lamp: dark until someone is
+              // on the pedal. Lighting it with the running tail lamps put a
+              // permanently glowing bar across the back of every cab in the
+              // city, and on a pickup it stands clear of the bodywork, so it
+              // read as a bar hanging in mid-air beside the pedestrians.
+              // The corner lamps keep the running drive they were tuned to:
+              // the review's complaint about the lights was that they emitted
+              // nothing, and nothing here measured them as too bright.
+              float bhRun = uNight * 0.42 * (1.0 - vChmsl);
+              vec3 bhTail = vec3(1.0, 0.055, 0.02) * (bhRun + vBrakeAmt * uBrake);
               vec3 bhAmber = vec3(1.0, 0.56, 0.05) * (vBlinkOn * uIndicator);
               totalEmissiveRadiance = mix(bhHead, bhTail, vTail) + bhAmber;
             `);
