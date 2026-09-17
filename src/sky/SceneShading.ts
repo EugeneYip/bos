@@ -187,7 +187,7 @@ export const AERIAL_GLSL = /* glsl */ `
     // optical depth gives more contrast again (far field 11.5, city 40.2) but
     // it is a lie: the Mie coefficient is set from a 49 km meteorological
     // visual range, which is what a clear day over the harbour actually is,
-    // and halving it claims 98 km. Cutting `uApInscatterGain` to 0.65 lands in
+    // and halving it claims 98 km. Cutting 'uApInscatterGain' to 0.65 lands in
     // much the same place as this does, but as an unexplained factor rather
     // than a fix to a known contamination.
     vec3 rdSky = rd.y < 0.045 ? normalize( vec3( rd.x, 0.045, rd.z ) ) : rd;
