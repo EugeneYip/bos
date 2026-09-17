@@ -826,9 +826,17 @@ varying vec4 vPedSkin;
  * face at the same lightness.
  */
 vec3 bhSkinTone(float t) {
-  vec3 a = vec3(0.871, 0.578, 0.396);
-  vec3 b = vec3(0.527, 0.253, 0.111);
-  vec3 c = vec3(0.147, 0.061, 0.029);
+  // These are diffuse albedos, and they used to start at 0.871 linear in the
+  // red, which is brighter than white paint and about what fresh snow
+  // returns. That is the 'paper doll' in the review, restated as a number: a
+  // face and a pair of hands rendering as cut paper, 143 luma against a
+  // pavement at 39 in the same lamp light, so the only parts of a figure with
+  // any contrast in them were the ones floating clear of the coat. Measured
+  // skin sits between 0.44 and 0.06 linear across the range, and reflectance
+  // that high does not exist on a person.
+  vec3 a = vec3(0.447, 0.316, 0.247);
+  vec3 b = vec3(0.225, 0.132, 0.089);
+  vec3 c = vec3(0.062, 0.036, 0.025);
   return t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, (t - 0.5) * 2.0);
 }
 
@@ -890,6 +898,51 @@ if (aSkin.x > 0.5) {
 /** Declarations the walker's fragment stage needs. */
 export const WALK_FRAG_PARS = /* glsl */ `
 varying vec4 vPedSkin;
+uniform float uWalkSky;
+uniform float uWalkLamp;
+`;
+
+/**
+ * A sheen on cloth and skin, so a person has a contour after dark.
+ *
+ * The walkers were a plain standard material: roughness 0.78, metalness 0,
+ * no environment map bound, and therefore no specular term of any kind at
+ * night. The sun is the only direct light and it is below the horizon; the
+ * one thing left is the street-lamp field, which the sky module adds to the
+ * diffuse gather and nothing else. So a figure in a dark coat measured 11.3
+ * luma with a standard deviation of 2.07 across the whole torso — a flat
+ * black cut-out standing on a pavement at 39, with a face and two hands on
+ * it as the only things carrying any contrast. That reads as a mask and a
+ * pair of gloves floating in the dark, which is most of what made these
+ * unusable at street level.
+ *
+ * Cloth is a dielectric, so its sheen is the colour of the light rather than
+ * of the dye, and it is strongest at grazing incidence — on a person that is
+ * the shoulders, the outside of the arms and the edge of a coat, which is
+ * exactly the contour that has to separate a figure from what is behind it.
+ * The roughness handed to the sky lookup is high because a wool coat is not
+ * a windscreen: what it returns is the average of a wide cone of sky, not an
+ * image of it.
+ *
+ * This is the same construction the car shell got for defect #6; see
+ * {@link SHELL_FRAG_LIGHT}, including the reciprocal-pi correction on the
+ * lamp field.
+ */
+export const WALK_FRAG_LIGHT = /* glsl */ `
+#if defined( SKY_AERIAL ) && defined( USE_FOG )
+{
+  vec3 bhNw = normalize(uApViewToWorld * geometryNormal);
+  vec3 bhVw = normalize(uApViewToWorld * geometryViewDir);
+  float bhFres = 0.028 + 0.972 * pow(1.0 - saturate(dot(geometryNormal, geometryViewDir)), 5.0);
+  vec3 bhSky = skyApRadiance(reflect(-bhVw, bhNw), 0.62);
+  // 'skyStreetLight' answers an irradiance, because every other caller adds
+  // it to the diffuse gather where three divides by pi on the way out. A
+  // specular lobe fed the same number unconverted is pi times too bright.
+  vec3 bhLamp = skyStreetLight(cameraPosition + skyApOffset(vFogViewPos), bhNw)
+              * RECIPROCAL_PI;
+  reflectedLight.indirectSpecular += bhFres * (bhSky * uWalkSky + bhLamp * uWalkLamp);
+}
+#endif
 `;
 
 /**

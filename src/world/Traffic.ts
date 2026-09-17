@@ -8,6 +8,7 @@ import {
   vehicleTypes, pedestrianGeometry, CAR_COLORS, CLOTHES,
   WHEEL_VERT_PARS, WHEEL_VERT_POS, WHEEL_VERT_NRM,
   WALK_VERT_PARS, WALK_VERT_POS, WALK_VERT_COLOR, WALK_FRAG_PARS, WALK_FRAG_COLOR,
+  WALK_FRAG_LIGHT,
   SHELL_FRAG_PARS, SHELL_FRAG_COLOR, SHELL_FRAG_ROUGH, SHELL_FRAG_METAL,
   SHELL_FRAG_LIGHT, GLASS_FRAG_PARS, GLASS_FRAG_LIGHT,
   type Part, type VehicleDef,
@@ -324,9 +325,17 @@ export class Traffic implements WorldModule {
   private coatUniforms = {
     uCoatSky: { value: 0.45 }, uCoatLamp: { value: 2.5 },
     uGlassSky: { value: 1.3 }, uGlassLamp: { value: 3.4 },
+    // Cloth, well below the paint: a wool coat returns a fraction of what a
+    // clear coat over steel does. See WALK_FRAG_LIGHT.
+    uWalkSky: { value: 0.30 }, uWalkLamp: { value: 1.5 },
   };
 
   private materials: THREE.Material[] = [];
+  /**
+   * Last `ctx.envMap` adopted, so the rebind in `update` runs only when Sky
+   * replaces the probe. See {@link adoptEnv}.
+   */
+  private envRef: THREE.Texture | null = null;
   private nightLit: THREE.MeshStandardMaterial[] = [];
   private time = 0;
   private spawnCursor = 0;
@@ -1140,13 +1149,17 @@ export class Traffic implements WorldModule {
       envMapIntensity: 1.0,
     });
     mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uWalkSky = this.coatUniforms.uWalkSky;
+      sh.uniforms.uWalkLamp = this.coatUniforms.uWalkLamp;
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>\n${WALK_VERT_PARS}`)
         .replace('#include <color_vertex>', `#include <color_vertex>\n${WALK_VERT_COLOR}`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${WALK_VERT_POS}`);
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>\n${WALK_FRAG_PARS}`)
-        .replace('#include <color_fragment>', `#include <color_fragment>\n${WALK_FRAG_COLOR}`);
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${WALK_FRAG_COLOR}`)
+        .replace('#include <lights_fragment_end>',
+          `#include <lights_fragment_end>\n${WALK_FRAG_LIGHT}`);
     };
     mat.customProgramCacheKey = () => 'pedestrian';
     this.materials.push(mat);
@@ -1961,8 +1974,42 @@ export class Traffic implements WorldModule {
     void ctx; // pools are allocated at init; a tier change keeps the capacity
   }
 
+  /**
+   * Adopt the IBL when the Sky module publishes it.
+   *
+   * Every `envMapIntensity` in this file was dead code until this ran.
+   * three.js *overrides* a standard material's `envMapIntensity` with
+   * `scene.environmentIntensity` whenever `material.envMap` is null
+   * (WebGLRenderer, `refreshMaterialUniforms`), and Sky binds the probe to
+   * `scene.environment` but not to anybody's material. So the paint asked
+   * for 1.5, the glazing for 2.0 and the hulls for 1.2, and all of them were
+   * pinned to the scene default of 1 — this module was the last world module
+   * that never bound the probe. Parks and the whole vegetation shader were
+   * broken the same way.
+   *
+   * Sky bakes the environment after the world modules initialise, so at
+   * `init` time `ctx.envMap` is still null, and it is replaced again on a
+   * quality change; hence a per-frame reference check rather than a one-off.
+   * The intensity is deliberately left alone: each material already carries
+   * the value it was authored with, and binding the probe is what makes that
+   * value reach the shader.
+   */
+  private adoptEnv(ctx: Ctx): void {
+    if (ctx.envMap === this.envRef) return;
+    this.envRef = ctx.envMap;
+    for (const m of this.materials) {
+      // The wake is a MeshBasicMaterial and has an `envMap` slot that means
+      // something quite different on an unlit material; skip it.
+      if ((m as THREE.MeshStandardMaterial).isMeshStandardMaterial !== true) continue;
+      const s = m as THREE.MeshStandardMaterial;
+      s.envMap = this.envRef;
+      s.needsUpdate = true;
+    }
+  }
+
   update(dt: number, ctx: Ctx): void {
     if (!this.graph) return;
+    this.adoptEnv(ctx);
     this.time += dt;
     this.flagUniforms.uTime.value = this.time;
 
