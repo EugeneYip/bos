@@ -172,6 +172,23 @@ await page.evaluate(() => {
 
 const arms = {
   base: { on: () => {}, off: () => {} },
+  // Far impostors: the two un-occluded additions to their indirect term.
+  farcan0: { on: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0),
+    off: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0.26) },
+  farcan13: { on: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0.13),
+    off: () => window.__setU('veg:.*:far:leaf', 'uCanopy', 0.26) },
+  fartrans0: { on: () => window.__setU('veg:.*:far:leaf', 'uTransAmount', 0),
+    off: () => window.__setU('veg:.*:far:leaf', 'uTransAmount', 1.25) },
+  fartrans6: { on: () => window.__setU('veg:.*:far:leaf', 'uTransAmount', 0.6),
+    off: () => window.__setU('veg:.*:far:leaf', 'uTransAmount', 1.25) },
+  farboth: { on: () => { window.__setU('veg:.*:far:leaf', 'uCanopy', 0.1);
+    window.__setU('veg:.*:far:leaf', 'uTransAmount', 0.6); },
+  off: () => { window.__setU('veg:.*:far:leaf', 'uCanopy', 0.26);
+    window.__setU('veg:.*:far:leaf', 'uTransAmount', 1.25); } },
+  hue60: { on: () => window.__setU('veg:.*:leaf', 'uHueVar', 0.6),
+    off: () => window.__setU('veg:.*:leaf', 'uHueVar', 0.3) },
+  notrees2: { on: () => { window.__debug.toggle('trees:', false); },
+    off: () => { window.__debug.toggle('trees:', true); } },
   pe15: { on: () => window.__parkEnv(1.5), off: () => window.__parkEnv(0) },
   pe20: { on: () => window.__parkEnv(2.0), off: () => window.__parkEnv(0) },
   pe25: { on: () => window.__parkEnv(2.5), off: () => window.__parkEnv(0) },

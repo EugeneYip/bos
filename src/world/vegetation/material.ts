@@ -418,7 +418,26 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
     shader.uniforms.uSenescent = { value: leaf ? senescent : bark };
     shader.uniforms.uTurnBias = { value: leaf ? sp.turnBias : 0 };
     shader.uniforms.uTransTint = { value: new THREE.Vector3(1.05, 1.3, 0.5) };
-    shader.uniforms.uTransAmount = { value: leaf ? (lod === 'far' ? 1.25 : 0.95) : 0 };
+    // Transmission through an *impostor* is not transmission through a leaf.
+    //
+    // The far tier used to ask for 1.25 against the detailed tiers' 0.95 --
+    // more light through a card standing in for a whole tree than through one
+    // standing in for a spray of leaves, which is backwards: a crown is
+    // several leaf layers thick and passes far less than one leaf does. Seen
+    // from a few hundred feet, where everything is this tier, the canopy
+    // gathered most of the lower hemisphere through its own upward-facing
+    // plate and came out a flat, uniform, plastic green sitting on top of a
+    // city whose roofs were in shadow.
+    //
+    // Measured at `backbay-grid`, ultra, over the foliage pixels of the city
+    // (a region mean cannot see this -- hiding every tree moves the block's
+    // mean luma by 6 %): mean foliage luma 50.7 -> 44.9, and the count of
+    // pixels saturated enough to read as foliage at all 191k -> 162k, so the
+    // crowns get back a lit top and a shaded underside instead of glowing
+    // through. At eye level it is nearly invisible -- `golden-hour-dome`
+    // moves 42.1 -> 43.3, `aerial-city` 100.9 -> 99.3 -- because those views
+    // are near/mid trees and washed-out distance respectively.
+    shader.uniforms.uTransAmount = { value: leaf ? (lod === 'far' ? 0.6 : 0.95) : 0 };
     shader.uniforms.uCanopy = { value: o.canopy ?? 0 };
     shader.uniforms.uMapMean = { value: o.mapMean ?? 1 };
     shader.uniforms.uCanopyTint = { value: new THREE.Vector3(0.78, 1.0, 0.66) };
