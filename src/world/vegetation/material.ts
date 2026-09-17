@@ -48,6 +48,11 @@ export interface SharedUniforms {
   wind: THREE.IUniform<THREE.Vector3>;
   /** Progress through the autumn turn, 0 = summer, 1 = the far end. */
   season: THREE.IUniform<number>;
+  /**
+   * Per-frame offset into the dither pattern. Zero disables it.
+   * @see vegIGN
+   */
+  dither: THREE.IUniform<number>;
 }
 
 export function createSharedUniforms(): SharedUniforms {
@@ -55,14 +60,47 @@ export function createSharedUniforms(): SharedUniforms {
     time: { value: 0 },
     wind: { value: new THREE.Vector3(0.82, 0.57, 1) },
     season: { value: 0 },
+    dither: { value: 0 },
   };
 }
 
-/** Cheap, low-discrepancy screen-space dither. Resolves cleanly under TAA. */
+/**
+ * Cheap, low-discrepancy screen-space dither, offset per frame.
+ *
+ * It used to be purely spatial, on the claim that TAA would resolve it. TAA
+ * cannot: `gl_FragCoord.xy` is the pixel centre, so a still camera discards
+ * exactly the same pixels every frame and the accumulator averages identical
+ * images. A tree parked halfway through a cross-fade therefore rendered as a
+ * permanent chain-link mesh -- plainly visible in the Common at every tier,
+ * ultra included, which is where this was finally caught.
+ *
+ * `uDither` walks the pattern by the golden ratio each frame, so a different
+ * half of the pixels survives each time and TAA integrates a real blend.
+ *
+ * With no accumulator -- the low tier turns TAA off -- there is nothing to
+ * integrate, and a moving pattern would be worse than a still one: the canopy
+ * would fizz. `uDither` goes negative there instead, and the hand-over
+ * becomes a hard switch at the middle of the band. That pops when the camera
+ * moves, which is what an LOD does on hardware that cannot afford the blend,
+ * and it is a great deal better than a chain-link mesh that never resolves.
+ *
+ * Every tier's test reads this same function and the same uniform, so the
+ * exact partitions between them -- near against mid, mid against impostor,
+ * and the impostor's own cards against its canopy plate -- still tile the
+ * pixels between them with no gaps and no double coverage.
+ */
 const IGN = /* glsl */ `
+uniform float uDither;
 float vegIGN( vec2 p ) {
+  p += max( uDither, 0.0 );
   return fract( 52.9829189 * fract( 0.06711056 * p.x + 0.00583715 * p.y ) );
 }
+/**
+ * The threshold a LOD hand-over compares its fade against. A constant 0.5 is
+ * still an exact partition, because the two tiers meeting in a band carry
+ * complementary fades -- one is above 0.5 exactly where the other is below.
+ */
+float vegFadeCut( vec2 p ) { return uDither < 0.0 ? 0.5 : vegIGN( p ); }
 `;
 
 const VERT_PARS = /* glsl */ `
@@ -331,6 +369,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = o.shared.time;
+    shader.uniforms.uDither = o.shared.dither;
     shader.uniforms.uWind = o.shared.wind;
     shader.uniforms.uSeason = o.shared.season;
     shader.uniforms.uSway = { value: leaf ? sp.sway : sp.sway * 0.45 };
@@ -440,7 +479,7 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
       .replace('#include <dithering_fragment>', /* glsl */ `
         #include <dithering_fragment>
         #ifdef VEG_FADE_INVERT
-          if ( vFade < 1.0 - vegIGN( gl_FragCoord.xy ) ) discard;
+          if ( vFade < 1.0 - vegFadeCut( gl_FragCoord.xy ) ) discard;
           // Partition the impostor's own pixels between its vertical cards and
           // its horizontal canopy plate. An exact partition, on a second
           // independent noise, so the two never both claim a pixel and never
@@ -456,12 +495,12 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
           // complement; at or beyond it mid is handing off to the impostor
           // instead, which already expects mid to run the plain test.
           if ( vDist < uFadeIn + uFadeInBand ) {
-            if ( vFade < 1.0 - vegIGN( gl_FragCoord.xy ) ) discard;
+            if ( vFade < 1.0 - vegFadeCut( gl_FragCoord.xy ) ) discard;
           } else {
-            if ( vFade < vegIGN( gl_FragCoord.xy ) ) discard;
+            if ( vFade < vegFadeCut( gl_FragCoord.xy ) ) discard;
           }
         #else
-          if ( vFade < vegIGN( gl_FragCoord.xy ) ) discard;
+          if ( vFade < vegFadeCut( gl_FragCoord.xy ) ) discard;
         #endif
       `);
   };

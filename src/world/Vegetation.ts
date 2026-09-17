@@ -585,12 +585,27 @@ export class Vegetation implements WorldModule {
     this.rb = null;
   }
 
+  private ditherFrame = 0;
+
   update(dt: number, ctx: Ctx): void {
     if (!this.field) return;
     const t0 = performance.now();
 
     this.shared.time.value += dt;
     this.shared.season.value = autumnFactor(ctx.dayOfYear);
+
+    // Walk the LOD dither one golden-ratio step per frame so the accumulator
+    // has something to average. Held at zero when there is no accumulator:
+    // see the note on `vegIGN`. 5.588238 is a whole number of periods of the
+    // noise's own x term, which keeps successive frames decorrelated instead
+    // of sliding the same pattern sideways.
+    if (ctx.quality.taa) {
+      this.ditherFrame = (this.ditherFrame + 1) % 64;
+      this.shared.dither.value = 5.588238 * ((this.ditherFrame * 0.6180339887) % 1);
+    } else {
+      // Negative is the sentinel for 'no accumulator'; see `vegFadeCut`.
+      this.shared.dither.value = -1;
+    }
     // A slow shift in the prevailing wind keeps long shots from looking looped.
     const a = 0.35 + Math.sin(this.shared.time.value * 0.031) * 0.55;
     const gustiness = 0.75 + 0.35 * Math.sin(this.shared.time.value * 0.11 + 1.3);
