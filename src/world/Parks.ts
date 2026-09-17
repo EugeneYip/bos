@@ -556,7 +556,10 @@ export class Parks implements WorldModule {
       // The uniform objects below are created here and referenced nowhere
       // else, so without this there is no way to A/B one of them at runtime:
       // every experiment costs a rebuild. QA only; nothing reads it in the app.
-      mat.userData.shader = shader;
+      // Only the uniforms: the `shader` object it came on also carries the
+      // expanded GLSL source, tens of kilobytes a material, and there are
+      // one of these per land-use surface for the life of the page.
+      mat.userData.uniforms = shader.uniforms;
       shader.uniforms.uSoil = { value: SOIL };
       shader.uniforms.uWear = { value: surface === 'sand' ? 0 : 1 };
       shader.uniforms.uFlat = { value: new THREE.Vector2(60, 260) };

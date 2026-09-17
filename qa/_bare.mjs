@@ -125,7 +125,7 @@ if (flag('paint', '') === '1') {
       for (const m of ms) {
         const n = (m && m.name) || '';
         if (!n.startsWith('veg:')) continue;
-        const u = m.userData && m.userData.shader && m.userData.shader.uniforms;
+        const u = m.userData && m.userData.uniforms;
         if (!u || !u.uSummer) continue;
         const lod = n.includes(':near:') ? 'near' : n.includes(':mid:') ? 'mid' : 'far';
         const c = n.endsWith(':bark') ? [3, 0, 0] : paint[lod];

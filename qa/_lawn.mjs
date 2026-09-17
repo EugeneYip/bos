@@ -93,7 +93,7 @@ const wiring = await page.evaluate(() => {
       if (!m || seen.has(m.uuid)) continue;
       if (!/^park:|^veg:|^vegetation/.test(m.name || '')) continue;
       seen.add(m.uuid);
-      const u = m.userData?.shader?.uniforms ?? {};
+      const u = m.userData?.uniforms ?? {};
       out.mats.push({
         name: m.name,
         envMapOwn: !!m.envMap,
@@ -103,7 +103,7 @@ const wiring = await page.evaluate(() => {
         defines: Object.keys(m.defines || {}),
         uSky: u.uSky?.value,
         uCanopy: u.uCanopy?.value,
-        compiled: !!m.userData?.shader,
+        compiled: !!m.userData?.uniforms,
       });
     }
   });
@@ -138,7 +138,7 @@ await page.evaluate(() => {
       const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
       for (const m of ms) {
         if (!m || !new RegExp(re).test(m.name || '')) continue;
-        const u = m.userData && m.userData.shader && m.userData.shader.uniforms;
+        const u = m.userData && m.userData.uniforms;
         if (u && u[name]) u[name].value = val;
       }
     });
@@ -148,7 +148,7 @@ await page.evaluate(() => {
       const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
       for (const m of ms) {
         if (!m || !new RegExp(re).test(m.name || '')) continue;
-        const u = m.userData && m.userData.shader && m.userData.shader.uniforms;
+        const u = m.userData && m.userData.uniforms;
         if (u && u[name]) u[name].value.set(xyz[0], xyz[1], xyz[2]);
       }
     });

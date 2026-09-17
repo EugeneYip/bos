@@ -403,7 +403,9 @@ export function createVegMaterial(o: MaterialOptions): VegMaterial {
   mat.onBeforeCompile = (shader) => {
     // QA hook: the uniforms below are otherwise unreachable from outside, so
     // every A/B on one of them would cost a rebuild. Nothing reads this.
-    mat.userData.shader = shader;
+    // Uniforms only -- the `shader` object also carries the expanded GLSL,
+    // and there are fifty of these materials.
+    mat.userData.uniforms = shader.uniforms;
     shader.uniforms.uTime = o.shared.time;
     shader.uniforms.uDither = o.shared.dither;
     shader.uniforms.uWind = o.shared.wind;
