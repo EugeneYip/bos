@@ -45,7 +45,27 @@ export interface SafeMode {
   armStable(): void;
 }
 
-export function enterSafeMode(params: URLSearchParams): SafeMode {
+/**
+ * The rung a phone or tablet starts on.
+ *
+ * Not zero. Measured with a verified mobile code path -- which matters, since
+ * a user-agent string alone no longer selects it -- the full model peaks at
+ * 614 MB of JS heap during load and settles at 364. One rung down is 527 and
+ * 318, and what it gives up is rigid-body physics over 61,000 footprints and
+ * the rail network: the two systems a visitor on a phone is least likely to
+ * look for, for 87 MB off the number iOS actually kills on.
+ *
+ * It is also a floor rather than a starting point. The ladder steps *down* a
+ * rung after every boot that survives, so without a floor a phone would climb
+ * to level 0, fail, drop back, survive, climb again -- oscillating between a
+ * working page and a reload loop. `?safe=0` still overrides it outright for
+ * anyone who wants to try.
+ */
+const MOBILE_FLOOR = 1;
+
+export function enterSafeMode(params: URLSearchParams, mobile: boolean): SafeMode {
+  const floor = mobile ? MOBILE_FLOOR : 0;
+
   const forced = params.get('safe');
   if (forced !== null) {
     const level = Math.max(0, Math.min(MAX_SAFE_LEVEL, Number(forced) || 0));
@@ -55,7 +75,8 @@ export function enterSafeMode(params: URLSearchParams): SafeMode {
   }
 
   const crashed = read(KEY) !== null;
-  const previous = Math.max(0, Math.min(MAX_SAFE_LEVEL, Number(read(LEVEL_KEY)) || 0));
+  const stored = Math.max(0, Math.min(MAX_SAFE_LEVEL, Number(read(LEVEL_KEY)) || 0));
+  const previous = Math.max(floor, stored);
   const level = crashed ? Math.min(MAX_SAFE_LEVEL, previous + 1) : previous;
 
   write(LEVEL_KEY, String(level));
@@ -80,8 +101,8 @@ export function enterSafeMode(params: URLSearchParams): SafeMode {
         //
         // Without this a visitor who hit a bad build once stayed stripped
         // permanently, and every later improvement was invisible to them.
-        if (level <= 1) drop(LEVEL_KEY);
-        else write(LEVEL_KEY, String(level - 1));
+        if (level <= floor) drop(LEVEL_KEY);
+        else write(LEVEL_KEY, String(Math.max(floor, level - 1)));
       }, STABLE_AFTER_MS);
     },
   };

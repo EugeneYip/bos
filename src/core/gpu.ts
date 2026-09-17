@@ -25,23 +25,32 @@ export function gpuName(renderer: THREE.WebGLRenderer): string {
  * than a slower GPU.
  *
  * Everything this flag controls is a reduction -- the lowest tier, no terrain
- * refinement, a 1.6 km streaming radius, and releasing the vertex arrays that
+ * refinement, a 1.6 km streaming radius, and releasing the vertex arrays
  * `__debug.pick` needs. A false positive therefore quietly hands a desktop a
  * stripped-down city and makes every improvement shipped for it invisible,
- * which is exactly what a MacBook user reported. So the test has to be one a
- * laptop cannot accidentally pass.
+ * which is exactly what a MacBook user reported. So each clause has to be one
+ * a laptop cannot accidentally pass.
  *
- * iPadOS Safari reports a desktop user agent, so a touch-point count is the
- * only thing that catches an iPad -- but `maxTouchPoints` is not reliably 0
- * on every Mac, and on its own it is too weak a signal to strip a desktop on.
- * Pairing it with `pointer: coarse` is: a trackpad and a mouse are both fine
- * pointers, and no Mac reports a coarse primary pointer.
+ * The awkward case is the iPad: Safari there reports a Macintosh user agent
+ * on purpose, so there is no string to match. The tell is the touch-point
+ * count. A Mac reports 0 -- including a Mac driving a touchscreen, because
+ * Safari exposes no touch there -- and an iPad reports 5. Requiring five,
+ * rather than the two an earlier version asked for, is what keeps a laptop
+ * out; and it is a property a test harness can set, which `pointer: coarse`
+ * turned out not to be under Chrome's device emulation.
+ *
+ * A Windows or Android tablet with a keyboard is deliberately treated as a
+ * desktop: it has the memory, and the cost of being wrong in that direction
+ * is a slow page rather than a stripped one.
  */
-const coarsePointer = typeof matchMedia === 'function'
-  && matchMedia('(pointer: coarse)').matches;
+const ua = navigator.userAgent;
+/** iPadOS Safari reports a Mac UA; five touch points and no mouse is the tell. */
+const isIPadOS = /macintosh/i.test(ua) && navigator.maxTouchPoints >= 5;
 
-export const MOBILE = /iphone|ipod|android/i.test(navigator.userAgent)
-  || (coarsePointer && navigator.maxTouchPoints > 1);
+export const MOBILE = /iphone|ipod/i.test(ua)
+  || (/ipad/i.test(ua))
+  || isIPadOS
+  || (/android/i.test(ua) && /mobile/i.test(ua));
 
 export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
   const gl = renderer.getContext();

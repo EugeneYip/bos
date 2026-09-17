@@ -83,7 +83,7 @@ export class App {
     camera.position.set(-420, 260, 520);
     camera.lookAt(0, 40, 0);
 
-    const safeMode = enterSafeMode(new URLSearchParams(location.search));
+    const safeMode = enterSafeMode(new URLSearchParams(location.search), MOBILE);
 
     this.ctx = {
       safeLevel: safeMode.level,
