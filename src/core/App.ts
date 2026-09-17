@@ -184,7 +184,6 @@ export class App {
   }
 
   private releasedGeoms = new WeakSet<THREE.BufferGeometry>();
-  private releaseCountdown = 0;
 
   /** Modules initialise in registration order, so declare dependencies first. */
   add(...mods: WorldModule[]): this {
@@ -284,14 +283,6 @@ export class App {
     const { renderer } = this.ctx;
     renderer.info.reset();
 
-    // Buildings and roads stream in for a long while after boot, so this
-    // cannot be a one-shot at startup. The callback has to be attached before
-    // the attribute's first upload, and a sweep of ~1,600 geometries every
-    // two seconds costs nothing measurable.
-    if (--this.releaseCountdown <= 0) {
-      this.releaseCountdown = 120;
-      this.releaseStaticAttributes();
-    }
 
     // Two wall-clock spans, which is the one kind of timing this project can
     // still trust. Every per-pass GPU timer here reports a number larger than
@@ -330,6 +321,19 @@ export class App {
       }
     }
     const tr = performance.now();
+
+    // Immediately before the render, and every frame.
+    //
+    // The callback has to be attached before the attribute's first upload,
+    // and an upload happens on the first render after the geometry is
+    // created. A throttled sweep therefore misses anything built and drawn
+    // between two of its passes -- which is everything a streamer produces.
+    // Measured: with roads streaming and the sweep on a 120-frame timer, 668
+    // fewer attributes were released and the mobile figure went *up*, from
+    // 81 MB of retained arrays to 129. Running here catches geometry created
+    // by a module's own update on the same frame it is created. The WeakSet
+    // keeps the per-geometry work to once, so the cost is the traverse.
+    this.releaseStaticAttributes();
 
     if (this.renderOverride) this.renderOverride(dt);
     else renderer.render(this.ctx.scene, this.ctx.camera);

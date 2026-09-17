@@ -22,6 +22,7 @@ import * as THREE from 'three';
 import type { Ctx, LampField, WorldModule } from '../core/Context';
 import { lonLatToWorld } from '../core/geo';
 import { loadRoads } from '../core/data';
+import { MOBILE } from '../core/gpu';
 import { bakeLampField } from './roads/lamps';
 import type { RoadRecord } from '../core/types';
 
@@ -51,6 +52,24 @@ const CHUNK = 165;
 /** Live detail tiles retained before the furthest are recycled. */
 const DETAIL_BUDGET = 70;
 const MICRO_BUDGET = 26;
+
+/**
+ * Base-tier streaming, mobile only.
+ *
+ * The detail and micro tiers have always been planned by range and recycled
+ * against a budget; the base carriageway was not. Every one of the city's
+ * 1,200 m base tiles was built at startup and kept for the session, which is
+ * fine on a laptop and is one of the reasons an iPad cannot open the page at
+ * all -- roads are the single largest geometry in the scene.
+ *
+ * So the base tier joins the same machinery on a phone or tablet. The range
+ * matches the building streamer's, so the two fade out together rather than
+ * leaving roads running through an empty plain or vice versa. The budget is
+ * sized to cover that radius with room to spare: a 2.6 km circle is about 19
+ * tiles at 1,200 m, and going over it only recycles the least recently seen.
+ */
+const BASE_RANGE = 2600;
+const BASE_BUDGET = 30;
 
 /**
  * Bespoke landmark bridges. `Landmarks` owns the Zakim and the Longfellow;
@@ -135,7 +154,7 @@ export class Roads implements WorldModule {
   private microTiles = new Map<number, Tile>();
 
   private queue: Tile[] = [];
-  private queueTier: Array<1 | 2> = [];
+  private queueTier: Array<0 | 1 | 2> = [];
   /** The tile currently mid-build, if a slice ran out of time. */
   private build: Build | null = null;
   private worstFlush = 0;
@@ -316,7 +335,16 @@ export class Roads implements WorldModule {
   /* ------------------------------------------------------------ base tier */
 
   private async buildBase(): Promise<void> {
-    const tiles = [...this.baseTiles.values()];
+    let tiles = [...this.baseTiles.values()];
+    if (MOBILE) {
+      // Only what is near the opening pose; `plan` brings in the rest as the
+      // camera moves, nearest first.
+      const c = this.ctx.camera.position;
+      tiles = tiles
+        .filter((t) => Math.hypot(t.cx - c.x, t.cz - c.z) - Math.sqrt(t.extent) < BASE_RANGE)
+        .sort((a, b) => ((a.cx - c.x) ** 2 + (a.cz - c.z) ** 2) - ((b.cx - c.x) ** 2 + (b.cz - c.z) ** 2));
+      console.info(`[Roads] streaming: ${tiles.length} of ${this.baseTiles.size} base tiles at boot`);
+    }
     let slice = performance.now();
     for (const tile of tiles) {
       this.buildTile(tile, 0);
@@ -603,6 +631,10 @@ export class Roads implements WorldModule {
     if (moved > 12 || this.frame % 8 === 0) {
       this.lastCamX = cam.x;
       this.lastCamZ = cam.z;
+      if (MOBILE) {
+        this.plan(cam.x, cam.z, this.baseTiles, BASE_RANGE, 0);
+        this.evict(this.baseTiles, BASE_BUDGET);
+      }
       this.plan(cam.x, cam.z, this.detailTiles, DETAIL_RANGE, 1);
       this.plan(cam.x, cam.z, this.microTiles, MICRO_RANGE, 2);
       this.evict(this.detailTiles, DETAIL_BUDGET);
@@ -646,7 +678,7 @@ export class Roads implements WorldModule {
 
   /** Queues tiles in range, newest-nearest first, and hides the rest. */
   private plan(
-    cx: number, cz: number, map: Map<number, Tile>, range: number, tier: 1 | 2,
+    cx: number, cz: number, map: Map<number, Tile>, range: number, tier: 0 | 1 | 2,
   ): void {
     const want: Tile[] = [];
     for (const tile of map.values()) {
