@@ -640,11 +640,31 @@ void main() {
   // every azimuth and every sun elevation, and there is nothing left to seam.
   color = skyApplyOffset(color, vWorld - cameraPosition);
 
-  // Bound the HDR output. At a grazing angle the surface mirrors the sky
-  // almost totally, and a bright dusk horizon pushed that past anything the
-  // tonemapper could roll off — the harbour clipped to a hard white band and
-  // dragged the auto-exposure down with it. 12 still reads as dazzling.
-  color = min(color, vec3(12.0));
+  // Bound the HDR output, and do it with a comparison rather than a bare
+  // 'min'.
+  //
+  // Two reasons, and the second is the one that matters. At a grazing angle
+  // the surface mirrors the sky almost totally, and a bright dusk horizon
+  // pushed that past anything the tonemapper could roll off -- the harbour
+  // clipped to a hard white band and dragged the auto-exposure down with it.
+  // 12 still reads as dazzling.
+  //
+  // But 'min' is not a guard against a bad value. GLSL leaves min-with-NaN
+  // implementation-defined, so one driver clamps it and the next hands it
+  // straight through, and a non-finite fragment renders as flat white. That
+  // is not hypothetical here: a half-precision underflow in the Beckmann lobe
+  // did exactly this, over square kilometres, on a machine where none of the
+  // local tests could see it. Every comparison against a NaN is false, so
+  // testing the value is a real guard where clamping it is not.
+  //
+  // The fallback is dim sky rather than black: a patch of water that loses a
+  // little light is invisible, and it cannot poison the metering the way a
+  // non-finite texel does.
+  vec3 safe = uSkyAmbient * 0.25;
+  color = vec3(
+    (color.r >= 0.0 && color.r < 1.0e6) ? min(color.r, 12.0) : safe.r,
+    (color.g >= 0.0 && color.g < 1.0e6) ? min(color.g, 12.0) : safe.g,
+    (color.b >= 0.0 && color.b < 1.0e6) ? min(color.b, 12.0) : safe.b);
 
   gl_FragColor = vec4(color, 1.0);
 
