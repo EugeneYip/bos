@@ -20,13 +20,20 @@ export function gpuName(renderer: THREE.WebGLRenderer): string {
   return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
 }
 
+/**
+ * A phone or a tablet, which here means a far tighter memory budget rather
+ * than a slower GPU. iPadOS reports a desktop user agent in Safari, so the
+ * touch-point test is what actually catches an iPad.
+ */
+export const MOBILE = /iphone|ipad|ipod|android|mobile/i.test(navigator.userAgent)
+  || (navigator.maxTouchPoints > 1 && /macintosh/i.test(navigator.userAgent));
+
 export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
   const gl = renderer.getContext();
   const raw = gpuName(renderer);
   const name = raw.toLowerCase();
 
-  const mobile = /iphone|ipad|android|mobile/i.test(navigator.userAgent);
-  if (mobile) return /apple a1[7-9]|apple m\d/.test(name) ? 'medium' : 'low';
+  if (MOBILE) return /apple a1[7-9]|apple m\d/.test(name) ? 'medium' : 'low';
 
   // Discrete desktop parts.
   if (/rtx\s*(40|50)\d\d|rtx\s*30(80|90)|radeon rx\s*(7[89]|9)\d{2}/.test(name)) return 'ultra';

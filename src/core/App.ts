@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { QUALITY, RENDER, type QualityTier } from './config';
 import type { Ctx, WorldModule } from './Context';
-import { detectTier, gpuName } from './gpu';
+import { detectTier, gpuName, MOBILE } from './gpu';
 import { safeRead, safeStore } from '../ui/dom';
 
 export class App {
@@ -127,6 +127,65 @@ export class App {
     this.installContextHandlers();
   }
 
+  /**
+   * Drop the CPU-side copy of static geometry attributes once the GPU has
+   * them.
+   *
+   * three.js keeps `attribute.array` alive after uploading it, and this scene
+   * has 1,580 geometries holding 386 MB of them. That is not a rounding error
+   * against a ~900 MB heap, and on iOS Safari it is the difference between
+   * running and being killed: a visitor on an iPad reported the page looping
+   * on the loading screen, succeeding for about a second, then starting over,
+   * which is that tab's out-of-memory reload. The quality tier does not help
+   * -- `low` still builds every building and every road, and measures 846 MB
+   * against high's 900.
+   *
+   * On a desktop `position` and the index stay, so `__debug.pick` keeps
+   * working; that alone takes 386 MB to 221. On a phone or tablet they go
+   * too, once the bounding sphere has been computed from them -- nothing in
+   * the runtime raycasts, `Raycaster` appears only in the debug API, and a
+   * diagnostic that cannot run on a device that cannot load the page is not
+   * worth 165 MB.
+   *
+   * The reason not to do this would be context restore, which re-uploads from
+   * exactly these arrays -- but that path was never going to work here anyway.
+   * Everything baked once into a render target at boot is gone with the
+   * context, so a restore lands in a world with no atmosphere LUTs and no
+   * material atlases, which is why `onContextLost` asks for a reload.
+   *
+   * Dynamic and instanced attributes are left alone: the cars rewrite their
+   * roll, steer and brake streams every frame.
+   */
+  private releaseStaticAttributes(): void {
+    const seen = this.releasedGeoms;
+    this.ctx.scene.traverse((o) => {
+      const g = (o as THREE.Mesh).geometry;
+      if (!g || seen.has(g)) return;
+      seen.add(g);
+      // Frustum culling computes this lazily, and it needs positions. Force
+      // it now, while they are still here.
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      if (MOBILE && g.index && g.index.array && g.index.usage === THREE.StaticDrawUsage) {
+        g.index.onUpload(function onUploaded(this: THREE.BufferAttribute) {
+          (this as unknown as { array: unknown }).array = null;
+        });
+      }
+      for (const name in g.attributes) {
+        if (name === 'position' && !MOBILE) continue;
+        const a = g.attributes[name] as THREE.BufferAttribute;
+        if (!a || !a.array) continue;
+        if ((a as unknown as { isInstancedBufferAttribute?: boolean }).isInstancedBufferAttribute) continue;
+        if (a.usage !== THREE.StaticDrawUsage) continue;
+        a.onUpload(function onUploaded(this: THREE.BufferAttribute) {
+          (this as unknown as { array: unknown }).array = null;
+        });
+      }
+    });
+  }
+
+  private releasedGeoms = new WeakSet<THREE.BufferGeometry>();
+  private releaseCountdown = 0;
+
   /** Modules initialise in registration order, so declare dependencies first. */
   add(...mods: WorldModule[]): this {
     this.modules.push(...mods);
@@ -224,6 +283,15 @@ export class App {
 
     const { renderer } = this.ctx;
     renderer.info.reset();
+
+    // Buildings and roads stream in for a long while after boot, so this
+    // cannot be a one-shot at startup. The callback has to be attached before
+    // the attribute's first upload, and a sweep of ~1,600 geometries every
+    // two seconds costs nothing measurable.
+    if (--this.releaseCountdown <= 0) {
+      this.releaseCountdown = 120;
+      this.releaseStaticAttributes();
+    }
 
     // Two wall-clock spans, which is the one kind of timing this project can
     // still trust. Every per-pass GPU timer here reports a number larger than
