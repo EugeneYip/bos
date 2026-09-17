@@ -121,7 +121,8 @@ export function curtainWall(
 
         const base = glassPos.length / 3;
         pushPane(glassPos, glassNor, glassUv, glassIdx, base,
-          x0, z0, x1, z1, vy0, vy1, sv0, sv1, nx, nz, proud, au, av);
+          x0, z0, x1, z1, vy0, vy1, sv0, sv1, nx, nz, proud, au, av, false,
+          hash01(pane * 374761393 + seed * 668265263));
         pane++;
 
         if (vision < 0.999) {
@@ -139,12 +140,31 @@ export function curtainWall(
   return { glass, spandrel, paneCount: pane };
 }
 
+/**
+ * Peak deviation of a pane's normal from its wall plane, radians.
+ *
+ * A curtain-wall pane is a sheet of glass a few metres across held at its
+ * edges, and it is never flat: it bows under its own weight, under the
+ * pressure difference across it and under the temperature difference between
+ * its faces, so each one reflects in a slightly different direction. That is
+ * where a glass tower's quilted look comes from, and it is the only thing
+ * that gives the Hancock a visible window rhythm at a kilometre and a half —
+ * every pane shares one UV (the emissive atlas needs a single texel per pane)
+ * and the Builder strips every attribute but position, normal and uv, so the
+ * normal is the only channel a per-pane signal can travel down.
+ *
+ * 0.6 degrees. Real bowing is a few millimetres over a 1.5 m half-span, which
+ * is about this; more than a degree and a facade reads as dented rather than
+ * as glass.
+ */
+const PANE_BOW = 0.024;
+
 function pushPane(
   pos: number[], nor: number[], uv: number[], idx: number[], base: number,
   x0: number, z0: number, x1: number, z1: number,
   yB: number, yT: number, sB: number, sT: number,
   nx: number, nz: number, proud: number,
-  au: number, av: number, metricUv = false,
+  au: number, av: number, metricUv = false, bow = 0,
 ): void {
   const ox = nx * proud;
   const oz = nz * proud;
@@ -154,7 +174,19 @@ function pushPane(
     x1 * sT + ox, yT, z1 * sT + oz,
     x0 * sT + ox, yT, z0 * sT + oz,
   );
-  for (let k = 0; k < 4; k++) nor.push(nx, 0, nz);
+  // Yaw about the wall's own up axis, pitch about its tangent. Two decorrelated
+  // angles out of one hash: the second is the fractional part after a prime
+  // stretch, which is a cheap independent draw from the same number.
+  const yaw = (bow - 0.5) * 2 * PANE_BOW;
+  const pitch = ((bow * 61.0) % 1 - 0.5) * 2 * PANE_BOW;
+  // Wall tangent is the normal turned a quarter turn in the XZ plane.
+  let pnx = nx - nz * yaw;
+  let pnz = nz + nx * yaw;
+  const pny = pitch;
+  const pl = Math.hypot(pnx, pny, pnz) || 1;
+  pnx /= pl;
+  pnz /= pl;
+  for (let k = 0; k < 4; k++) nor.push(pnx, pny / pl, pnz);
   if (metricUv) {
     const w = Math.hypot(x1 - x0, z1 - z0);
     uv.push(0, yB, w, yB, w, yT, 0, yT);

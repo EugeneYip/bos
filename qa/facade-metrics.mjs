@@ -104,6 +104,7 @@ function stats(png, rect) {
     white: (100 * white) / n,
     hot: (100 * hot) / n,
     ...periodicity(px, w, h),
+    ...finePeriodicity(px, w, h),
   };
 }
 
@@ -159,6 +160,59 @@ function periodicity(px, w, h) {
   const hx = axis(w, h, (i, o) => g[o * w + i]);
   const vy = axis(h, w, (i, o) => g[i * w + o]);
   return { hPeak: hx.peak, hLag: hx.lag, vPeak: vy.peak, vLag: vy.lag };
+}
+
+/**
+ * Autocorrelation at the pitch of a *single pane*, not of a window bay.
+ *
+ * `periodicity` above high-passes with a 7-tap box, which is the right filter
+ * for a masonry bay at 8 to 40 px but annihilates exactly the signal a glass
+ * tower has at a kilometre and a half, where one pane is three or four
+ * pixels. This one high-passes with a 3-tap box and reports lags from 2, and
+ * it reports the strongest *magnitude*: a grid with period 4 shows up as a
+ * large negative correlation at lag 2 before it shows as a positive one at
+ * lag 4, and the negative lobe is the stronger, cleaner measurement.
+ */
+function finePeriodicity(px, w, h) {
+  const g = px.map(([r, gg, b]) => 0.2126 * r + 0.7152 * gg + 0.0722 * b);
+  const axis = (len, other, at) => {
+    const hp = [];
+    for (let o = 0; o < other; o++) {
+      const line = new Float64Array(len);
+      for (let i = 0; i < len; i++) {
+        let s = 0;
+        let n = 0;
+        for (let k = -1; k <= 1; k++) {
+          const j = i + k;
+          if (j < 0 || j >= len) continue;
+          s += at(j, o);
+          n++;
+        }
+        line[i] = at(i, o) - s / n;
+      }
+      hp.push(line);
+    }
+    let best = 0;
+    let bestLag = 0;
+    for (let lag = 2; lag <= Math.min(12, len >> 1); lag++) {
+      let num = 0;
+      let d1 = 0;
+      let d2 = 0;
+      for (const line of hp) {
+        for (let i = 0; i + lag < len; i++) {
+          num += line[i] * line[i + lag];
+          d1 += line[i] * line[i];
+          d2 += line[i + lag] * line[i + lag];
+        }
+      }
+      const c = num / Math.sqrt(Math.max(1e-9, d1 * d2));
+      if (Math.abs(c) > Math.abs(best)) { best = c; bestLag = lag; }
+    }
+    return { peak: best, lag: bestLag };
+  };
+  const hx = axis(w, h, (i, o) => g[o * w + i]);
+  const vy = axis(h, w, (i, o) => g[i * w + o]);
+  return { fhPeak: hx.peak, fhLag: hx.lag, fvPeak: vy.peak, fvLag: vy.lag };
 }
 
 function global(png) {
@@ -219,6 +273,11 @@ for (const file of process.argv.slice(2)) {
       + `   p1/p4 ${(s.pave_1.mean / s.pave_4.mean).toFixed(3)}`
       + `   p1/wall ${(s.pave_1.mean / (s.wall?.mean || 1)).toFixed(3)}`,
     );
+  }
+  if (s.hancock) {
+    const v = s.hancock;
+    console.log(`  PANE   hancock fine fh ${v.fhPeak.toFixed(3)}@${v.fhLag}`
+      + `  fv ${v.fvPeak.toFixed(3)}@${v.fvLag}`);
   }
   if (s.hancock && s.ordinary) {
     console.log(
