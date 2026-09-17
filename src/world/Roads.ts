@@ -176,9 +176,12 @@ export class Roads implements WorldModule {
   private lastCamX = 1e9;
   private lastCamZ = 1e9;
   private tris = 0;
+  /** Base-tier streaming reach; tightened further by a degraded boot. */
+  private baseRange = BASE_RANGE;
 
   async init(ctx: Ctx): Promise<void> {
     this.ctx = ctx;
+    this.baseRange = BASE_RANGE * (ctx.safeLevel > 0 ? (ctx.safeLevel > 1 ? 0.4 : 0.65) : 1);
     this.mats = new RoadMaterials(ctx);
 
     this.root.name = 'roads';
@@ -342,7 +345,7 @@ export class Roads implements WorldModule {
       // camera moves, nearest first.
       const c = this.ctx.camera.position;
       tiles = tiles
-        .filter((t) => Math.hypot(t.cx - c.x, t.cz - c.z) - Math.sqrt(t.extent) < BASE_RANGE)
+        .filter((t) => Math.hypot(t.cx - c.x, t.cz - c.z) - Math.sqrt(t.extent) < this.baseRange)
         .sort((a, b) => ((a.cx - c.x) ** 2 + (a.cz - c.z) ** 2) - ((b.cx - c.x) ** 2 + (b.cz - c.z) ** 2));
       console.info(`[Roads] streaming: ${tiles.length} of ${this.baseTiles.size} base tiles at boot`);
     }
@@ -633,7 +636,7 @@ export class Roads implements WorldModule {
       this.lastCamX = cam.x;
       this.lastCamZ = cam.z;
       if (MOBILE) {
-        this.plan(cam.x, cam.z, this.baseTiles, BASE_RANGE, 0);
+        this.plan(cam.x, cam.z, this.baseTiles, this.baseRange, 0);
         this.evict(this.baseTiles, BASE_BUDGET);
       }
       this.plan(cam.x, cam.z, this.detailTiles, DETAIL_RANGE, 1);

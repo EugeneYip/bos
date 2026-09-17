@@ -134,6 +134,10 @@ const ctx = {
   emit: (evt: string, p?: unknown) => {
     for (const fn of listeners.get(evt) ?? []) fn(p);
   },
+  // This harness always wants the full model; the crash-loop ladder is a
+  // property of a real visit, not of a landmark preview.
+  safeLevel: 0,
+  safeMode: { level: 0, degraded: false, armStable: () => {} },
 } satisfies Ctx;
 scene.environment = ctx.envMap;
 

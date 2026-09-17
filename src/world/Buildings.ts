@@ -87,6 +87,7 @@ export class Buildings implements WorldModule {
   private loadedShards = new Set<number>();
   private loadingShards = new Set<number>();
   private streaming = false;
+  private radius = STREAM_RADIUS;
   private streamCountdown = 0;
   private lastStreamAt = new THREE.Vector3(1e9, 1e9, 1e9);
 
@@ -125,6 +126,8 @@ export class Buildings implements WorldModule {
     this.skipLandmarks = skipLandmarks;
     this.streaming = MOBILE && this.shardBounds.length === this.shardUrls.length;
 
+    // A degraded boot pulls the radius in further still; see core/safeMode.
+    this.radius = STREAM_RADIUS * (ctx.safeLevel > 0 ? (ctx.safeLevel > 1 ? 0.4 : 0.65) : 1);
     const first = this.streaming
       ? this.shardsNear(ctx.camera.position)
       : this.shardUrls.map((_, i) => i);
@@ -141,7 +144,7 @@ export class Buildings implements WorldModule {
       this.lastStreamAt.copy(ctx.camera.position);
       console.info(
         `[Buildings] streaming: ${first.length} of ${this.shardUrls.length} shards within `
-        + `${STREAM_RADIUS} m`,
+        + `${Math.round(this.radius)} m`,
       );
     }
 
@@ -290,7 +293,7 @@ export class Buildings implements WorldModule {
    * Nearest first matters: the loader works through them in order, so the
    * ground under the camera appears before the far side of the river.
    */
-  private shardsNear(p: THREE.Vector3, reach = STREAM_RADIUS): number[] {
+  private shardsNear(p: THREE.Vector3, reach = this.radius): number[] {
     const out: Array<{ i: number; d: number }> = [];
     for (let i = 0; i < this.shardBounds.length; i++) {
       const [x0, z0, x1, z1] = this.shardBounds[i];
@@ -331,7 +334,7 @@ export class Buildings implements WorldModule {
   private async reconcile(ctx: Ctx): Promise<void> {
     const cam = ctx.camera.position;
     const want = new Set(this.shardsNear(cam));
-    const keep = new Set(this.shardsNear(cam, STREAM_RADIUS + STREAM_HYSTERESIS));
+    const keep = new Set(this.shardsNear(cam, this.radius + STREAM_HYSTERESIS));
 
     for (const i of [...this.loadedShards]) {
       if (!keep.has(i)) this.unloadShard(i);
@@ -347,7 +350,7 @@ export class Buildings implements WorldModule {
     try {
       const payload = await this.runWorkers([next]);
       // The camera may have moved on while that was in flight.
-      if (this.shardsNear(ctx.camera.position, STREAM_RADIUS + STREAM_HYSTERESIS).includes(next)) {
+      if (this.shardsNear(ctx.camera.position, this.radius + STREAM_HYSTERESIS).includes(next)) {
         this.assembleTiles(payload.tiles, payload.shardOf);
         this.loadedShards.add(next);
       }

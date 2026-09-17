@@ -20,7 +20,8 @@ await pg.evaluateOnNewDocument(()=>{
     window.__trace.push([Math.round(performance.now()-t0), Math.round(m/1048576)]);
   }, 200);
 });
-await pg.goto(`http://localhost:${PORT}/${process.env.Q?`?q=${process.env.Q}`:''}`,{waitUntil:'networkidle2',timeout:180000});
+const qs=[process.env.Q?`q=${process.env.Q}`:'', process.env.SAFE?`safe=${process.env.SAFE}`:''].filter(Boolean).join('&');
+await pg.goto(`http://localhost:${PORT}/${qs?'?'+qs:''}`,{waitUntil:'networkidle2',timeout:180000});
 await pg.waitForFunction('window.__ready === true',{timeout:300000});
 await pg.evaluate(()=>window.__debug.settle(400));
 await new Promise(r=>setTimeout(r,9000));

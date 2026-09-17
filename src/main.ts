@@ -94,6 +94,17 @@ async function main(): Promise<void> {
 
   // Registration order is initialisation order: materials and terrain publish
   // capabilities that later modules read, and Post must wrap a finished scene.
+  // What a degraded boot gives up, in the order it gives it up.
+  //
+  // Level 1 drops the things a visitor is least likely to miss on a phone and
+  // that cost the most to build: rigid-body physics over 61,000 footprints,
+  // and the rail network with its trains. Level 2 additionally drops street
+  // furniture, the tree layer and all moving traffic, which leaves terrain,
+  // water, roads, buildings and sky -- the city, and nothing that animates.
+  const lvl = app.ctx.safeLevel;
+  const keepHeavy = lvl < 1;
+  const keepLively = lvl < 2;
+
   app.add(
     new Materials(),
     new Sky(),
@@ -108,14 +119,12 @@ async function main(): Promise<void> {
     // Buildings reads it and every hand-authored landmark is drawn twice.
     new Landmarks(),
     new Buildings(),
-    new Vegetation(),
-    new Props(),
-    new Traffic(),
+    ...(keepLively ? [new Vegetation(), new Props()] : []),
+    ...(keepLively ? [new Traffic()] : []),
     // After Roads, which owns the rail network, and after Traffic, whose
     // established pattern (graph + instanced meshes + distance culling) this
     // follows for the trains that run on it.
-    new Transit(),
-    new Physics(),
+    ...(keepHeavy ? [new Transit(), new Physics()] : []),
     new CameraRig(),
     post,
     new Hud(),
@@ -124,6 +133,13 @@ async function main(): Promise<void> {
   await app.init(setProgress);
   installDebugApi(app);
   app.start();
+
+  // Surviving this long is what marks the boot successful; see core/safeMode.
+  app.ctx.safeMode.armStable();
+  if (app.ctx.safeLevel > 0) {
+    console.warn(`[safe] running at level ${app.ctx.safeLevel}`);
+    status.textContent = `reduced detail after a failed load — reload with ?safe=0 to try the full model`;
+  }
 
   boot.classList.add('done');
   setTimeout(() => boot.remove(), 1100);

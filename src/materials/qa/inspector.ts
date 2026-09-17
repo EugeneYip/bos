@@ -165,6 +165,9 @@ const ctx = {
   emit: (evt: string, p?: unknown) => {
     for (const fn of listeners.get(evt) ?? []) fn(p);
   },
+  // The material inspector always wants the full model.
+  safeLevel: 0,
+  safeMode: { level: 0, degraded: false, armStable: () => {} },
 } satisfies Ctx;
 
 const mats = new Materials();

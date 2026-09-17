@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { QUALITY, RENDER, type QualityTier } from './config';
 import type { Ctx, WorldModule } from './Context';
 import { detectTier, gpuName, MOBILE } from './gpu';
+import { enterSafeMode } from './safeMode';
 import { safeRead, safeStore } from '../ui/dom';
 
 export class App {
@@ -82,7 +83,11 @@ export class App {
     camera.position.set(-420, 260, 520);
     camera.lookAt(0, 40, 0);
 
+    const safeMode = enterSafeMode(new URLSearchParams(location.search));
+
     this.ctx = {
+      safeLevel: safeMode.level,
+      safeMode,
       scene,
       camera,
       renderer,

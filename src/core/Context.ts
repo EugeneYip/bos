@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { QualitySettings, QualityTier } from './config';
+import type { SafeMode } from './safeMode';
 
 /**
  * Samples terrain elevation (metres above sea level) at a world X/Z.
@@ -136,6 +137,14 @@ export interface Ctx {
    * crossing of Fort Point Channel -- the deck lands *at* the water surface and
    * the wave troughs wash over the carriageway.
    */
+  /**
+   * How much the world has been asked to give up, 0 for the full model.
+   * Raised automatically by {@link SafeMode} after a boot that never reached
+   * a steady state, which is how an out-of-memory reload loop is broken.
+   */
+  safeLevel: number;
+  safeMode: SafeMode;
+
   waterDistAt?: (x: number, z: number) => number;
 
   /**
