@@ -11,12 +11,20 @@
  * written to storage before the world is built and cleared only once the
  * page has been running for {@link STABLE_AFTER_MS}. If a later boot finds
  * that flag still set, the previous attempt died on the way up, and this one
- * asks for less. Three rungs, and the bottom one is deliberately austere
+ * asks for less. Four rungs, and the bottom one is deliberately austere
  * enough to run anywhere.
  *
  * The visitor can always override it: `?safe=0` forces the full model,
- * `?safe=2` forces the bottom rung, and reaching a steady state at any level
+ * `?safe=3` forces the bottom rung, and reaching a steady state at any level
  * resets the ladder so the next visit starts from the top again.
+ *
+ * A rung only counts if it takes something off the PEAK heap during load,
+ * which is the number iOS kills the tab on -- not off the settled heap. The
+ * first two rungs failed that test: every module they drop allocates after the
+ * peak has already been reached, so a phone that could not boot at level 2 had
+ * nowhere left to fall and looped forever. See the attribution table in
+ * `src/main.ts` for the measurement, and add new rungs against it rather than
+ * against a guess at what looks expensive.
  */
 
 const KEY = 'bh-boot';
@@ -24,7 +32,7 @@ const LEVEL_KEY = 'bh-safe';
 /** How long a session must survive before its boot counts as successful. */
 const STABLE_AFTER_MS = 20000;
 /** Rungs below the full model. */
-export const MAX_SAFE_LEVEL = 2;
+export const MAX_SAFE_LEVEL = 3;
 
 function read(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }

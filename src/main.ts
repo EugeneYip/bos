@@ -101,9 +101,34 @@ async function main(): Promise<void> {
   // and the rail network with its trains. Level 2 additionally drops street
   // furniture, the tree layer and all moving traffic, which leaves terrain,
   // water, roads, buildings and sky -- the city, and nothing that animates.
+  //
+  // Level 3 drops parks and the hand-authored landmarks as well. It exists
+  // because levels 1 and 2 could not save a phone, and the attribution says
+  // why: what iOS kills the tab on is the PEAK heap during load, and the peak
+  // is reached before any of the level 1 and 2 modules have run.
+  //
+  //     Parks triangulated   183 ->  322 MB   (+139)
+  //     Roads base tiles     348 ->  566 MB   (+218)
+  //     Landmarks                 ->  638 MB   (+72)
+  //     Buildings                 ->  695 MB   (+57)  <- peak, 3.3 s
+  //     garbage collected         ->  431 MB
+  //     Vegetation, Props, Traffic, Transit, Physics all allocate after this
+  //
+  // So levels 1 and 2 cut the settled heap and the frame cost, and leave the
+  // number that decides whether the tab survives untouched. A device that
+  // cannot boot at level 2 had nowhere left to fall, which is precisely the
+  // reload loop this ladder was built to stop. Level 3 is the first rung that
+  // takes anything off the peak: about 211 MB of it.
+  //
+  // Dropping Landmarks is safe rather than merely tolerable. `Landmarks.init`
+  // publishes a suppression list that `Buildings` reads to skip the OSM
+  // footprints it replaces; with no Landmarks the list is empty and Buildings
+  // simply draws the original OSM footprint for each of those 27 sites. The
+  // visitor loses the hand-authored model and keeps the building.
   const lvl = app.ctx.safeLevel;
   const keepHeavy = lvl < 1;
   const keepLively = lvl < 2;
+  const keepCity = lvl < 3;
 
   app.add(
     new Materials(),
@@ -111,13 +136,13 @@ async function main(): Promise<void> {
     new Terrain(),
     new FarTerrain(),
     new Water(),
-    new Parks(),
+    ...(keepCity ? [new Parks()] : []),
     new Roads(),
     // Landmarks before Buildings: `Landmarks.init` publishes the suppression
     // list that `Buildings` reads once, up front, to skip the OSM footprints it
     // replaces. Registered the other way round the list is still empty when
     // Buildings reads it and every hand-authored landmark is drawn twice.
-    new Landmarks(),
+    ...(keepCity ? [new Landmarks()] : []),
     new Buildings(),
     ...(keepLively ? [new Vegetation(), new Props()] : []),
     ...(keepLively ? [new Traffic()] : []),
