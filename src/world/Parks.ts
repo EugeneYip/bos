@@ -464,10 +464,34 @@ export class Parks implements WorldModule {
       });
     }
 
+    // Turf gets no normal map at all.
+    //
+    // A lawn has about ten millimetres of relief and the library's map is
+    // tuned for a 2 m tile, so past a couple of metres what is left on screen
+    // is not turf: it is the *lattice the sampler itself is built on*. The
+    // hex-cell stochastic sampler switches between two phases of the same map
+    // at its cell boundaries, and that switch does not shrink with distance
+    // the way texture detail does -- the cells are 1.9 m of world, forever.
+    // Boston Common's sunlit turf carried a brickwork pattern all the way to
+    // the tree line at `common-street`, in every tier, and it is the loudest
+    // thing in the frame at 1:1.
+    //
+    // Measured with qa/_hf.mjs -- high-frequency contrast of a lawn region,
+    // normalised by the region's own mean so the auto-exposure cannot flatter
+    // it -- at `common-street`, against an otherwise identical build: 6.54 %
+    // with the map against 5.29 % without at 16 m, 6.24 % against 5.36 % at
+    // 30 m. Nothing else in the shading moves, so the difference is all
+    // lattice. What is left doing the near-field relief is the grass cards in
+    // `groundcover.ts`, which are real geometry out to 76 m and a far better
+    // account of a sward than a 10 mm bump map ever was.
+    //
+    // Sand keeps its map: a beach's ripples are tens of centimetres, and they
+    // are a real surface at fifty metres.
+    const flat = surface !== 'sand';
     const mat = new THREE.MeshStandardMaterial({
       name: `park:${surface}`,
       map,
-      normalMap: src?.normalMap ?? set?.normalMap ?? null,
+      normalMap: flat ? null : (src?.normalMap ?? set?.normalMap ?? null),
       roughnessMap: src?.roughnessMap ?? set?.roughnessMap ?? null,
       roughness: 1, metalness: 0, vertexColors: true,
       // Ear-clipping in the XZ plane and then treating it as a Y-up surface
@@ -476,9 +500,7 @@ export class Parks implements WorldModule {
       side: THREE.DoubleSide,
       polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
     });
-    // Ground seen at a grazing angle over-reads slope enormously, and a lawn
-    // has about 10 mm of relief. At the library's strength the near field
-    // turned to corduroy the moment the sun got low.
+    // Ground seen at a grazing angle over-reads slope enormously.
     mat.normalScale = new THREE.Vector2(0.28, 0.28);
 
     // Small hex cells and a soft blend: a lawn has no structure to protect, so
@@ -494,6 +516,7 @@ export class Parks implements WorldModule {
       prev.call(mat, shader, renderer);
       shader.uniforms.uSoil = { value: SOIL };
       shader.uniforms.uWear = { value: surface === 'sand' ? 0 : 1 };
+      shader.uniforms.uFlat = { value: new THREE.Vector2(60, 260) };
       shader.uniforms.uSky = { value: SKY_FLOOR };
       shader.uniforms.uCanopyMap = { value: canopy?.tex ?? null };
       shader.uniforms.uCanopyXf = {
@@ -506,6 +529,7 @@ export class Parks implements WorldModule {
           #include <common>
           uniform vec3  uSoil;
           uniform float uWear;
+          uniform vec2  uFlat;
           uniform float uSky;
           uniform vec4  uCanopyXf;
           #ifdef PARK_CANOPY
@@ -558,6 +582,15 @@ export class Parks implements WorldModule {
           // …and it is damper and more overhung, so it is darker too.
           diffuseColor.rgb *= 1.0 - 0.10 * shade * uWear;
         }
+        `)
+        // Sand's own relief still has to stop somewhere: ripples are a real
+        // surface at fifty metres and a tiling artefact at five hundred.
+        .replace('#include <emissivemap_fragment>', /* glsl */ `
+          #include <emissivemap_fragment>
+          #ifdef USE_NORMALMAP_TANGENTSPACE
+            normal = normalize( mix( normal, nonPerturbedNormal,
+              smoothstep( uFlat.x, uFlat.y, length( vViewPosition ) ) ) );
+          #endif
         `)
         // Skylight that the post chain's occlusion has no business removing.
         //
