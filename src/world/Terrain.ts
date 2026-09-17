@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Ctx, WorldModule } from '../core/Context';
+import { MOBILE } from '../core/gpu';
 import { loadAreas, loadTerrain } from '../core/data';
 import { Heightfield } from './terrain/Heightfield';
 import { rasteriseLandCover } from './terrain/landcover';
@@ -11,7 +12,20 @@ import { createTerrainDepthMaterial, createTerrainMaterial, type TerrainUniforms
 
 /** Refinement of the shipped ~9 m DEM posts. 2 gives ~4.5 m, which is what the
  * shoreline needs to read as a shoreline rather than as a staircase. */
-const UPSAMPLE = 2;
+/**
+ * Catmull-Rom refinement of the shipped 9 m posts, per axis.
+ *
+ * 2 gives ~4.5 m posts and a shoreline twice as crisp, which is the most
+ * scrutinised silhouette in the model -- and it costs four times the grid:
+ * 4.4 million posts instead of 1.1. That is 18 MB of heightfield, four times
+ * the land-cover rasters that are sized from it, a bigger CDLOD tree, and a
+ * 26 MB transient while the two refinement passes run.
+ *
+ * A phone cannot see the difference and cannot afford any of it. iOS kills
+ * the tab on peak memory, and the peak lands during exactly this part of
+ * the load.
+ */
+const UPSAMPLE = MOBILE ? 1 : 2;
 const MAX_CHUNKS = 6144;
 
 export interface TerrainDebugApi {

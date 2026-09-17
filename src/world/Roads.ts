@@ -65,11 +65,12 @@ const MICRO_BUDGET = 26;
  * So the base tier joins the same machinery on a phone or tablet. The range
  * matches the building streamer's, so the two fade out together rather than
  * leaving roads running through an empty plain or vice versa. The budget is
- * sized to cover that radius with room to spare: a 2.6 km circle is about 19
- * tiles at 1,200 m, and going over it only recycles the least recently seen.
+ * sized to cover that radius with room to spare: a 1.6 km circle is about
+ * nine tiles at 1,200 m, and going over it only recycles the least recently
+ * seen.
  */
-const BASE_RANGE = 2600;
-const BASE_BUDGET = 30;
+const BASE_RANGE = 1600;
+const BASE_BUDGET = 16;
 
 /**
  * Bespoke landmark bridges. `Landmarks` owns the Zakim and the Longfellow;

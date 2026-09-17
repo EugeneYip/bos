@@ -33,7 +33,16 @@ export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
   const raw = gpuName(renderer);
   const name = raw.toLowerCase();
 
-  if (MOBILE) return /apple a1[7-9]|apple m\d/.test(name) ? 'medium' : 'low';
+  // Always the lowest tier on a phone or tablet, whatever the GPU says.
+  //
+  // An M-series iPad is not short of arithmetic, it is short of address
+  // space, and the tier controls far more than shading: `medium` doubles the
+  // facade atlas to 1024, nearly doubles the tree budget, doubles the detail
+  // distance, turns on volumetric clouds and adds TAA and SSAO render
+  // targets. Measured on an iPad user agent, the page peaks at 776 MB of JS
+  // heap before the collector catches up and settles at 481 -- and iOS kills
+  // the tab on the peak, which is what the reload loop is.
+  if (MOBILE) return 'low';
 
   // Discrete desktop parts.
   if (/rtx\s*(40|50)\d\d|rtx\s*30(80|90)|radeon rx\s*(7[89]|9)\d{2}/.test(name)) return 'ultra';

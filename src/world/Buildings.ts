@@ -51,12 +51,14 @@ interface Tile {
  * at once is what makes iOS Safari reload the tab, which is what 'it kept
  * jumping out' turned out to be.
  *
- * 2.6 km covers the whole downtown peninsula from a street-level pose and
- * still leaves the skyline standing when you fly. Shards are spatially
- * bucketed by the build tool and carry their bounds in the manifest, so this
- * is a rectangle test rather than a guess.
+ * 1.6 km covers the downtown peninsula from a street-level pose and holds
+ * the skyline together when you fly. It was 2.6 km, which looked better and
+ * cost 776 MB of peak heap -- and iOS kills the tab on the peak, not on the
+ * settled figure. Shards are spatially bucketed by the build tool and carry
+ * their bounds in the manifest, so this is a rectangle test rather than a
+ * guess.
  */
-const STREAM_RADIUS = 2600;
+const STREAM_RADIUS = 1600;
 /** Extra margin before a loaded shard is thrown away, metres. Stops churn. */
 const STREAM_HYSTERESIS = 700;
 
