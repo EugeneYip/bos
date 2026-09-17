@@ -104,9 +104,14 @@ async function main() {
 
   log('loading app…');
   // Pre-dismiss the first-run onboarding card so it never covers a capture.
-  await page.evaluateOnNewDocument(() => {
-    try { localStorage.setItem('bh-onboarded', '1'); } catch { /* private mode */ }
-  });
+  await page.evaluateOnNewDocument((res) => {
+    try {
+      localStorage.setItem('bh-onboarded', '1');
+      // QA_RES drives the HUD's own Resolution control, which is independent
+      // of the quality tier and is where upscaling artefacts show.
+      if (res) localStorage.setItem('bh-res', res);
+    } catch { /* private mode */ }
+  }, process.env.QA_RES ?? '');
   await page.goto(`http://localhost:${PORT}/?q=${TIER}${POST ? `&post=${POST}` : ''}`, { waitUntil: 'networkidle2', timeout: 180000 });
   await page.waitForFunction('window.__ready === true', { timeout: 300000 });
   await page.waitForFunction('window.__debug !== undefined', { timeout: 30000 });

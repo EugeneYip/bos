@@ -352,6 +352,20 @@ export function bakeSurfaces(
     // which is why the whole city rendered as bare concrete. Asking for the
     // *material* forces the bake and gives maps that definitely have pixels;
     // the set is still the source of truth for the physical tile size.
+    //
+    // Note what this means for everything above: when a layer's name matches
+    // a family in the shared library -- and all seven of them do -- the
+    // terrain *adopts* that family's texture and the procedural `sGrass`,
+    // `sAsphalt`, `sConcrete` and friends are never sampled. They are the
+    // fallback for a library that failed to bake, not the surfaces you see.
+    //
+    // This cost two sessions. Logan's infield reads as a pale sheet against
+    // near-black runways, and the hunt for it tinted the procedural gravel,
+    // then asphalt, then concrete, then all seven layers at once in debug
+    // colours -- and the airfield did not change by a pixel in any of them,
+    // which read as proof that the surface was not the terrain at all. It
+    // was: it just gets its albedo from `materials/Materials.ts`. Change the
+    // family there, not the function here.
     let set: ReturnType<MaterialLibrary['textures']>;
     let mat: THREE.MeshStandardMaterial | undefined;
     try {
