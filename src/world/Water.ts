@@ -3,6 +3,7 @@ import type { Ctx, WorldModule } from '../core/Context';
 import type { AreaRecord } from '../core/types';
 import { loadAreas } from '../core/data';
 import { BOUNDS, SEA_LEVEL } from '../core/config';
+import { MOBILE } from '../core/gpu';
 
 /**
  * Estimated screen fraction of water below which the planar reflection is not
@@ -65,6 +66,30 @@ const FIELD_TEXEL = 6;
 /** Water is clipped a little past the data so the Mystic doesn't end mid-air. */
 const FIELD_PAD = 1200;
 const CHUNK = 700;
+
+/**
+ * Surface lattice spacing, metres.
+ *
+ * The field stays at 6 m everywhere -- it is a texture and it costs the same
+ * either way -- but the *mesh* built from it is the module's largest CPU
+ * allocation, and on a phone or a tablet that is the budget that decides
+ * whether the page loads at all. `App.releaseStaticAttributes` frees these
+ * arrays on mobile, but only per geometry and only once that geometry has
+ * actually been uploaded, i.e. once it has been drawn; a visitor who looks
+ * one way holds every chunk behind them at full size, and the worst case is
+ * the whole sheet, at boot, which is exactly when an iPad tab is killed.
+ *
+ * Halving the resolution quarters the interior vertices and halves the
+ * shoreline cells. What it costs is the geometric part of the wave spectrum:
+ * `oceanWaves` gates displacement on `smoothstep(3.2 * cell, 5.4 * cell,
+ * lambda)`, so at 12 m only the 88 m swell still displaces and the 49 m
+ * component is down to a third. Normals are unaffected -- they come from the
+ * fragment cascade and the analytic Gerstner slope, neither of which knows
+ * about the lattice -- so the surface still has every ripple it had, it just
+ * stops physically rising by the last few centimetres.
+ */
+const CELL_DESKTOP = 6;
+const CELL_MOBILE = 12;
 /**
  * QA instrumentation, compiled in only when the page is loaded with `?wdbg`.
  *
@@ -95,6 +120,8 @@ export class Water implements WorldModule {
   private reflectEnabled = false;
   private vis: SurfaceVisibility | null = null;
   private probe: THREE.Mesh | null = null;
+  /** Surface lattice spacing actually used; see {@link CELL_DESKTOP}. */
+  private cell = CELL_DESKTOP;
 
   // Scratch — allocating per frame is how you get GC hitches.
   private static _v3 = new THREE.Vector3();
@@ -139,8 +166,12 @@ export class Water implements WorldModule {
       ctx.quality.anisotropy, ctx.quality.anisotropy >= 8 ? 512 : 256,
     );
 
-    const surf = buildSurfaces(this.bodies, field, FIELD_TEXEL, CHUNK);
+    this.cell = MOBILE ? CELL_MOBILE : CELL_DESKTOP;
+    const surf = buildSurfaces(this.bodies, field, this.cell, CHUNK);
     const skirt = buildOceanSkirt(field, rect, SEA_LEVEL);
+
+    // Everything the field kept only for the build. See 'WaterField.compact'.
+    const freedMB = field.compact() / 1048576;
 
     this.reflectEnabled = ctx.quality.waterReflections;
     if (this.reflectEnabled) {
@@ -220,7 +251,9 @@ export class Water implements WorldModule {
     ctx.stats.waterTris = surf.triangles;
     console.info(
       `[Water] ${this.bodies.length} bodies, ${surf.chunks.length} chunks, ` +
-      `${(surf.triangles / 1000).toFixed(0)}k tris, reflections ${this.reflectEnabled ? 'on' : 'off'}`,
+      `${(surf.triangles / 1000).toFixed(0)}k tris at ${this.cell} m, ` +
+      `reflections ${this.reflectEnabled ? 'on' : 'off'}, ` +
+      `field scratch freed ${freedMB.toFixed(1)} MB`,
     );
 
     this.material.uniforms.uDetail.value = ctx.quality.anisotropy >= 8 ? 1 : 0.55;
@@ -305,7 +338,7 @@ export class Water implements WorldModule {
         uGustiness: { value: 0.62 },
         uWaveAmp: { value: 0.92 },
         uPeak: { value: 0.42 },
-        uCellSize: { value: FIELD_TEXEL },
+        uCellSize: { value: this.cell },
         // How hard the detail cascade pushes each octave back along the slope
         // of the one above it. This is the horizontal half of a Gerstner
         // displacement and it is what turns rounded bumps into chop.

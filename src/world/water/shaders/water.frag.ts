@@ -454,9 +454,14 @@ void main() {
   vec3 sky = skyApRadiance(R, rough);
 
 #if WATER_ENV == 1
-  // The probe carries the clouds and the city's own bounce, which belong in
-  // the reflection — but it also averages in a lot of ground, so it tints
-  // rather than replaces the atmosphere.
+  // The probe is the same atmosphere, prefiltered: 'EnvProbe' renders the sky
+  // dome's radiance function to a 512x256 equirect and runs PMREM over it, so
+  // it carries a correctly widened solar disc and a roughness-prefiltered
+  // lobe the analytic sample does not. What it emphatically does *not* carry
+  // is the city, the ground, or anything else in the scene -- an earlier
+  // comment here claimed it 'averages in a lot of ground' and that was simply
+  // wrong, which is worth stating because it is exactly the thing the tiers
+  // without a planar pass would need and cannot get from here.
   vec3 probe = textureCubeUV(envMap, R, clamp(rough * 1.6, 0.02, 1.0)).rgb;
   sky = mix(sky, probe, 0.35);
 #endif

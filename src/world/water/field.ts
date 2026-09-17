@@ -36,17 +36,25 @@ export class WaterField {
   readonly w: number;
   readonly h: number;
 
-  /** Signed shore distance in metres, positive inside water. */
-  readonly dist: Float32Array;
+  /**
+   * Signed shore distance in metres, positive inside water.
+   *
+   * Live only until {@link compact}; after that {@link sampleDist} reads the
+   * half-float texture staging buffer instead, which is the same field at
+   * half the bytes and is exactly what the shader samples.
+   */
+  private dist: Float32Array;
 
   // Quarter-resolution channels.
   readonly sw: number;
   readonly sh: number;
   readonly sts: number;
-  readonly bed: Float32Array;
-  readonly fetch: Float32Array;
-  readonly murk: Float32Array;
-  readonly mask: Float32Array;
+  private bed: Float32Array;
+  private fetch: Float32Array;
+  private murk: Float32Array;
+  private mask: Float32Array;
+  /** Half-float copy of {@link dist}; the distance texture's own storage. */
+  private half: Uint16Array = new Uint16Array(0);
 
   distTex!: THREE.DataTexture;
   auxTex!: THREE.DataTexture;
@@ -234,7 +242,17 @@ export class WaterField {
 
   // ---------------------------------------------------------- sampling ----
 
-  /** Bilinear signed distance in metres, clamped at the field edge. */
+  /**
+   * Bilinear signed distance in metres, clamped at the field edge.
+   *
+   * Reads the float field while it exists and the half-float one after
+   * {@link compact} has dropped it. That is not a degradation: the half
+   * field *is* what the shader samples, so after compaction the CPU and the
+   * GPU answer the same question the same way. Half precision is 0.015 m at
+   * 60 m from a bank and 0.25 m at the 400 m clamp, and every consumer --
+   * bridge decks, park placement, the boat no-drive mask -- cares only about
+   * the first few tens of metres.
+   */
   sampleDist(x: number, z: number): number {
     const { w, h, ts } = this;
     let u = (x - this.x0) / ts - 0.5;
@@ -244,8 +262,15 @@ export class WaterField {
     const i = u | 0, j = v | 0;
     const fx = u - i, fz = v - j;
     const d = this.dist;
-    const a = d[j * w + i], b = d[j * w + i + 1];
-    const c = d[(j + 1) * w + i], e = d[(j + 1) * w + i + 1];
+    if (d.length !== 0) {
+      const a = d[j * w + i], b = d[j * w + i + 1];
+      const c = d[(j + 1) * w + i], e = d[(j + 1) * w + i + 1];
+      return (a + (b - a) * fx) * (1 - fz) + (c + (e - c) * fx) * fz;
+    }
+    const q = this.half;
+    const f = THREE.DataUtils.fromHalfFloat;
+    const a = f(q[j * w + i]), b = f(q[j * w + i + 1]);
+    const c = f(q[(j + 1) * w + i]), e = f(q[(j + 1) * w + i + 1]);
     return (a + (b - a) * fx) * (1 - fz) + (c + (e - c) * fx) * fz;
   }
 
@@ -270,6 +295,7 @@ export class WaterField {
     const half = new Uint16Array(n);
     const toHalf = THREE.DataUtils.toHalfFloat;
     for (let i = 0; i < n; i++) half[i] = toHalf(Math.max(-400, Math.min(400, this.dist[i])));
+    this.half = half;
 
     this.distTex = new THREE.DataTexture(half, this.w, this.h, THREE.RedFormat, THREE.HalfFloatType);
     this.distTex.magFilter = THREE.LinearFilter;
@@ -304,10 +330,42 @@ export class WaterField {
     }
   }
 
-  updateAuxTexture(): void {
-    if (!this.auxTex) return;
-    this.packAux(this.auxTex.image.data as Uint8Array);
-    this.auxTex.needsUpdate = true;
+  /**
+   * Drop everything that only the build needed.
+   *
+   * The field is the single largest CPU allocation in the module and most of
+   * it is scratch. At the shipped 6 m texel the grid is 2131 x 1845, so:
+   *
+   *   bodyAt   Int32    15.0 MB   which body owns a texel; wanted by
+   *                               'rasterise', 'refreshFetch' and
+   *                               'measureInradii', all of which have run
+   *   dist     Float32  15.0 MB   superseded by the half-float copy the
+   *                               texture already holds, which is the same
+   *                               field at half the bytes
+   *   bed/fetch/murk/mask
+   *            Float32   3.8 MB   staged into 'auxTex' by 'buildTextures';
+   *                               'sampleFetch' wants 'fetch', and the
+   *                               surface builder is the only caller
+   *
+   * 33.8 MB, none of it reachable by anything that runs after load. What
+   * stays is the 7.5 MB half-float field (which 'sampleDist' now reads and
+   * 'distTex' owns) and the 0.9 MB packed aux bytes.
+   *
+   * Call once, after the surfaces have been built -- 'buildSurfaces' and
+   * 'buildOceanSkirt' both sample 'fetch'.
+   */
+  compact(): number {
+    const freed = this.dist.byteLength + this.bodyAt.byteLength
+      + this.bed.byteLength + this.fetch.byteLength
+      + this.murk.byteLength + this.mask.byteLength;
+    const none = new Float32Array(0);
+    this.dist = none;
+    this.bodyAt = new Int32Array(0);
+    this.bed = none;
+    this.fetch = none;
+    this.murk = none;
+    this.mask = none;
+    return freed;
   }
 
   dispose(): void {

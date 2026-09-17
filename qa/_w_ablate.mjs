@@ -38,6 +38,13 @@ const b = await puppeteer.launch({
 });
 const pg = await b.newPage();
 await pg.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
+// MOBILE in src/core/gpu.ts is a user-agent test, so this is the only way to
+// exercise the mobile paths (the coarse water lattice, the attribute release)
+// from a desktop harness.
+if (process.env.MOBILE_UA) {
+  await pg.setUserAgent('Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
+    + ' (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1');
+}
 await pg.evaluateOnNewDocument((res) => {
   try {
     localStorage.removeItem('bh-tier');
