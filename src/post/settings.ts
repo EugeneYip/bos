@@ -297,7 +297,24 @@ export function defaultSettings(): PostSettings {
 
     lens: {
       chromaticAberration: true,
-      chromaticStrength: 0.9,
+      /**
+       * Lateral colour, as a fraction of a pixel at the frame corner.
+       *
+       * This was 0.9, which works out at about 1.8 texels of red/blue
+       * separation in the corners -- enough to split a hard edge into a fully
+       * saturated red pixel and a fully saturated blue one. Isolated by
+       * shooting the monochrome Logan airfield with and without the pass, it
+       * multiplied the mean colour split on outer-edge pixels by 2.4x (10.8
+       * to 26.4) and the count of visibly fringed edges by 7.7x (0.24% to
+       * 1.85%), peaking at 182 on grey concrete. A reviewer called it
+       * 'cranked to cartoon strength', and on a night frame full of blown
+       * windows it turned every one into a red/blue LED.
+       *
+       * A real lens shows a fraction of a pixel except right in the corners.
+       * The falloff is already cubic in radius, which is right; it was only
+       * ever the amplitude that was wrong.
+       */
+      chromaticStrength: 0.22,
       vignette: true,
       vignetteStrength: 0.3,
       vignetteRoundness: 1.1,
