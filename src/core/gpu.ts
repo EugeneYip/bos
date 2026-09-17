@@ -22,11 +22,26 @@ export function gpuName(renderer: THREE.WebGLRenderer): string {
 
 /**
  * A phone or a tablet, which here means a far tighter memory budget rather
- * than a slower GPU. iPadOS reports a desktop user agent in Safari, so the
- * touch-point test is what actually catches an iPad.
+ * than a slower GPU.
+ *
+ * Everything this flag controls is a reduction -- the lowest tier, no terrain
+ * refinement, a 1.6 km streaming radius, and releasing the vertex arrays that
+ * `__debug.pick` needs. A false positive therefore quietly hands a desktop a
+ * stripped-down city and makes every improvement shipped for it invisible,
+ * which is exactly what a MacBook user reported. So the test has to be one a
+ * laptop cannot accidentally pass.
+ *
+ * iPadOS Safari reports a desktop user agent, so a touch-point count is the
+ * only thing that catches an iPad -- but `maxTouchPoints` is not reliably 0
+ * on every Mac, and on its own it is too weak a signal to strip a desktop on.
+ * Pairing it with `pointer: coarse` is: a trackpad and a mouse are both fine
+ * pointers, and no Mac reports a coarse primary pointer.
  */
-export const MOBILE = /iphone|ipad|ipod|android|mobile/i.test(navigator.userAgent)
-  || (navigator.maxTouchPoints > 1 && /macintosh/i.test(navigator.userAgent));
+const coarsePointer = typeof matchMedia === 'function'
+  && matchMedia('(pointer: coarse)').matches;
+
+export const MOBILE = /iphone|ipod|android/i.test(navigator.userAgent)
+  || (coarsePointer && navigator.maxTouchPoints > 1);
 
 export function detectTier(renderer: THREE.WebGLRenderer): QualityTier {
   const gl = renderer.getContext();

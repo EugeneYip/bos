@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { App } from './App';
+import { MOBILE } from './gpu';
 
 /**
  * Deterministic control surface used by the automated visual-QA harness
@@ -174,7 +175,14 @@ export function installDebugApi(app: App): void {
       const out: Record<string, unknown> = {
         gpu: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown',
         tier: ctx.tier,
+        // The two settings that silently strip the world. A false MOBILE or a
+        // stuck safe level makes every shipped improvement invisible, and
+        // neither was reportable until a MacBook user said nothing had
+        // changed and there was no way to check from here.
+        mobile: MOBILE,
+        safeLevel: ctx.safeLevel,
         pixelRatio: r.getPixelRatio(),
+        devicePixelRatio: window.devicePixelRatio,
         drawingBuffer: [r.domElement.width, r.domElement.height],
         // The float formats the post chain depends on. RGBA32F in particular is
         // renderable on some drivers and not others, and the luminance history

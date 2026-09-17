@@ -73,10 +73,15 @@ export function enterSafeMode(params: URLSearchParams): SafeMode {
     armStable(): void {
       setTimeout(() => {
         drop(KEY);
-        // A level that works is not a permanent sentence, but it is the
-        // sensible place for the *next* visit to start. Only a clean run at
-        // level 0 clears the ladder entirely.
-        if (level === 0) drop(LEVEL_KEY);
+        // Climb back. A surviving run at level N means N was enough, not that
+        // N is required forever -- and the reason for the crash is usually
+        // fixed in a later build, or was another tab. Stepping down one rung
+        // per good visit recovers the full model in a couple of loads.
+        //
+        // Without this a visitor who hit a bad build once stayed stripped
+        // permanently, and every later improvement was invisible to them.
+        if (level <= 1) drop(LEVEL_KEY);
+        else write(LEVEL_KEY, String(level - 1));
       }, STABLE_AFTER_MS);
     },
   };

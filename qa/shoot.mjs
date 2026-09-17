@@ -52,22 +52,49 @@ async function ensureBuild() {
   });
 }
 
+/**
+ * Serve `OUTDIR`, and prove it is ours before returning.
+ *
+ * `--strictPort` makes vite refuse a taken port -- but it exits, and the
+ * readiness probe below is perfectly happy to be answered by whatever *else*
+ * is listening there. A long session leaves preview servers behind on other
+ * ports, and the failure mode is silent and vicious: the harness reports on a
+ * build from an hour ago, or from another agent's tree, and every conclusion
+ * drawn from the shots is wrong. It has already produced one 'the fix had no
+ * effect' that was simply the wrong bundle.
+ *
+ * So the build gets a nonce written into it and the probe insists on reading
+ * that exact nonce back.
+ */
 async function startServer() {
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  await writeFile(path.join(ROOT, OUTDIR, 'qa-build-id.txt'), nonce);
+
   const p = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort', '--outDir', OUTDIR], {
     cwd: ROOT, stdio: 'pipe', env: { ...process.env, VITE_BASE: '/' },
   });
+  let err = '';
   p.stdout.on('data', () => {});
-  p.stderr.on('data', () => {});
-  // Poll until the server answers.
+  p.stderr.on('data', (d) => { err += d; });
+
   for (let i = 0; i < 120; i++) {
     try {
-      const r = await fetch(`http://localhost:${PORT}/`);
-      if (r.ok) return p;
-    } catch { /* not up yet */ }
+      const r = await fetch(`http://localhost:${PORT}/qa-build-id.txt`);
+      if (r.ok && (await r.text()).trim() === nonce) return p;
+      if (r.ok) {
+        p.kill();
+        throw new Error(
+          `port ${PORT} is serving somebody else's build — another preview server is `
+          + `already listening there. Pick a different QA_PORT, or kill it.`,
+        );
+      }
+    } catch (e) {
+      if (String(e.message).includes('serving somebody')) throw e;
+    }
     await new Promise((r) => setTimeout(r, 250));
   }
   p.kill();
-  throw new Error('preview server did not start');
+  throw new Error(`preview server did not start on ${PORT}${err ? `:\n${err.slice(-500)}` : ''}`);
 }
 
 async function main() {
