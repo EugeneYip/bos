@@ -510,5 +510,69 @@
     ],
     "hour": 13.5,
     "note": "The wide read of the airfield: apron, taxiways and runway in one frame, where pale patches show up."
+  },
+  {
+    "id": "harbour-edge",
+    "title": "East over the harbour to the skirt boundary",
+    "pos": [
+      1500,
+      120,
+      600
+    ],
+    "target": [
+      2600,
+      20,
+      -900
+    ],
+    "hour": 8.6,
+    "note": "Where the OSM water polygons end and the ocean skirt takes over. The two are shaded by different paths and must not show a seam."
+  },
+  {
+    "id": "dusk-water",
+    "title": "The Charles at the boot hour, low western sun",
+    "pos": [
+      -1500,
+      150,
+      900
+    ],
+    "target": [
+      -200,
+      10,
+      -300
+    ],
+    "hour": 17.1,
+    "note": "5:06 pm is what the site boots to, and a low sun at grazing incidence is the condition every reported water fault has been seen under."
+  },
+  {
+    "id": "dusk-harbour",
+    "title": "The harbour and the skirt boundary at the boot hour",
+    "pos": [
+      1500,
+      300,
+      600
+    ],
+    "target": [
+      3000,
+      10,
+      -1200
+    ],
+    "hour": 17.1,
+    "note": "Low-sun read of where the water chunks hand over to the ocean skirt."
+  },
+  {
+    "id": "dusk-aerial",
+    "title": "High over the city at the boot hour",
+    "pos": [
+      -900,
+      2400,
+      2600
+    ],
+    "target": [
+      -200,
+      0,
+      -400
+    ],
+    "hour": 17.1,
+    "note": "The whole-metro read at the hour the site opens on."
   }
 ]

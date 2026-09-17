@@ -50,14 +50,42 @@ interface FarHeader {
  * the whole harbour rim, which is everything you can actually pick out.
  */
 const RADIUS = 23000;
-/** Grid stride: every Nth post. Distant hills need shape, not detail. */
-const STRIDE = 2;
+/**
+ * Grid stride: every Nth post.
+ *
+ * This was 2, which threw away half of a grid that is already only 407 m --
+ * so the Blue Hills and the Fells were drawn as 814 m facets and the whole
+ * surround read as a flat painted plate around the city rather than land.
+ * The saving was not real: the entire far field at stride 2 is 3,918
+ * triangles, against 12 million in the frame.
+ */
+const STRIDE = 1;
 /**
  * At or under this elevation a post is sea, and the quads made only of sea
  * posts are not drawn. Not exactly zero: the grid holds a few thousand posts
  * sitting on 0.0 along the tide line, and they belong to the water.
  */
 const SEA_EPS = 0.01;
+/**
+ * How far the built-up ring reaches past the modelled box, metres.
+ *
+ * The far field shades itself from elevation and slope alone, which makes
+ * every dry post outside the box woodland -- so the detailed city ended at a
+ * straight line and flat green began, and from altitude the whole model read
+ * as a plate sitting on a lawn. That is the 'drafty' edge.
+ *
+ * Boston does not do that. Somerville, Everett, Chelsea, Malden, Revere,
+ * Watertown and Quincy are continuous dense fabric for miles past the box,
+ * and only then does it break up into the wooded suburbs the green is right
+ * for. This is an approximation of that ring, not mapped data: there is no
+ * land-cover raster in the extract, so the blend is driven by distance from
+ * the box and damped on slope, since the hills inside the ring -- the Fells,
+ * the Arlington drumlins -- did stay wooded.
+ */
+const URBAN_REACH = 9000;
+/** Strength of that blend at the box edge; it falls to zero at the reach. */
+const URBAN_AT_EDGE = 0.72;
+
 /** Where a surviving sea post sits, metres. Under the skirt, not on it. */
 const SHELF = -1.4;
 /**
@@ -152,6 +180,21 @@ export class FarTerrain implements WorldModule {
         const n = hash01(i * 73856093 ^ j * 19349663);
         c.multiplyScalar(0.82 + 0.30 * n * wood);
         if (h < 6) c.lerp(new THREE.Color(0.30, 0.27, 0.20), 0.45 * (1 - h / 6));
+      }
+
+      // Built-up ring: pull the colour toward city fabric near the box, so
+      // the detailed model's edge is a change of resolution rather than a
+      // change of continent. Steep ground keeps its trees.
+      if (h > 0.01) {
+        const dxb = Math.max(hx0 - x, 0, x - hx1);
+        const dzb = Math.max(hz0 - z, 0, z - hz1);
+        const out = Math.hypot(dxb, dzb);
+        const t = URBAN_AT_EDGE * (1 - Math.min(out / URBAN_REACH, 1)) * (1 - slope * 0.8);
+        if (t > 0.001) {
+          const n2 = hash01(i * 19349663 ^ j * 83492791);
+          const g = 0.255 + 0.115 * n2;
+          c.lerp(new THREE.Color(g * 1.03, g * 1.0, g * 0.95), Math.max(t, 0));
+        }
       }
 
       const id = pos.length / 3;
