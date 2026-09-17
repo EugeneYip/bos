@@ -17,6 +17,7 @@ import { SEA_LEVEL } from '../../core/config';
 import {
   CLASS, type ClassSpec, type SurfaceKey, TUNE, crownDy, lanesOf, surfaceOf, widthOf,
 } from './spec';
+import { mem } from './mem';
 
 /** Minimum deck height above the water surface, metres. */
 const BRIDGE_CLEARANCE = 3.6;
@@ -113,9 +114,32 @@ export interface Network {
   portals: Array<{ p: V2; y: number; dir: V2; width: number; road: PreparedRoad }>;
 }
 
+/**
+ * Node key: 0.5 m snapping, packed into one integer.
+ *
+ * This used to be a template string. The topology pass builds one for every
+ * vertex of every road three separate times -- degree counting, chain
+ * welding, endpoint indexing -- over 199,413 source vertices, and the maps
+ * then *retain* 146,120 of them for the rest of the pass. Measured on the
+ * shards: 19 MB for the `degree` map alone and ~55 MB across the three, none
+ * of it collectable until well after the boot high-water mark has been set,
+ * which is the figure iOS kills the tab on.
+ *
+ * The packing holds +/-131 km at 0.5 m and layers -16..15. Boston's road data
+ * spans 13.6 km by 11.1 km with layers -4..3, so there is a factor of ten of
+ * headroom on each axis. An out-of-range coordinate is clamped rather than
+ * left to wrap, so a nonsense record collides with another nonsense record
+ * instead of aliasing onto a real node.
+ */
 const GRID = 2; // 0.5 m snapping
-const key = (p: V2, layer: number): string =>
-  `${Math.round(p.x * GRID)}|${Math.round(p.z * GRID)}|${layer}`;
+const KEY_SPAN = 1 << 19;
+const KEY_HALF = 1 << 18;
+const clampAxis = (v: number): number => (v < -KEY_HALF ? -KEY_HALF : v > KEY_HALF - 1 ? KEY_HALF - 1 : v);
+/** Packs already-snapped grid coordinates; `dx`/`dz` neighbour probes use this. */
+const keyAt = (rx: number, rz: number, layer: number): number =>
+  ((layer + 16) * KEY_SPAN + (clampAxis(rx) + KEY_HALF)) * KEY_SPAN + (clampAxis(rz) + KEY_HALF);
+const key = (p: V2, layer: number): number =>
+  keyAt(Math.round(p.x * GRID), Math.round(p.z * GRID), layer);
 
 function decode(rec: RoadRecord): { pts: V2[]; ys: number[] } | null {
   const path = rec.path;
@@ -225,6 +249,7 @@ export function buildNetwork(
   sample: (x: number, z: number) => number,
   waterDist?: (x: number, z: number) => number,
 ): Network {
+  mem('net.enter', `${records.length} records`);
   // ---- 1. prepare -------------------------------------------------------
   let prepared: PreparedRoad[] = [];
   for (const rec of records) {
@@ -300,8 +325,9 @@ export function buildNetwork(
     });
   }
 
+  mem('net.prepare', `${prepared.length} prepared`);
   // ---- 2. vertex degrees ------------------------------------------------
-  const degree = new Map<string, number>();
+  const degree = new Map<number, number>();
   for (const r of prepared) {
     for (let i = 0; i < r.pts.length; i++) {
       const k = key(r.pts[i], r.layer);
@@ -310,6 +336,7 @@ export function buildNetwork(
     }
   }
 
+  mem('net.degree', `${degree.size} verts`);
   // ---- 3. split ways at interior junction vertices ----------------------
   const split: PreparedRoad[] = [];
   for (const r of prepared) {
@@ -337,15 +364,18 @@ export function buildNetwork(
   }
   prepared = split;
 
+  mem('net.split', `${prepared.length} parts`);
   // ---- 4. weld degree-2 chains so mid-block joints stay mitred ----------
   prepared = weldChains(prepared);
 
+  mem('net.weld', `${prepared.length} welded`);
   // ---- 4b. drop OSM sidewalk footways we are about to rebuild ourselves --
   const dupes = markSidewalkDuplicates(prepared);
   if (dupes.size) prepared = prepared.filter((r) => !dupes.has(r));
 
+  mem('net.dupes', `${dupes.size} dropped`);
   // ---- 5. index the endpoints ------------------------------------------
-  const nodes = new Map<string, Approach[]>();
+  const nodes = new Map<number, Approach[]>();
   const surfaceRoads = prepared.filter((r) => !r.tunnel);
   for (const r of surfaceRoads) {
     for (const end of [0, 1] as const) {
@@ -371,6 +401,7 @@ export function buildNetwork(
     }
   }
 
+  mem('net.nodes', `${nodes.size} nodes`);
   // ---- 6. junction polygons --------------------------------------------
   const junctions: Junction[] = [];
   for (const [, apps] of nodes) {
@@ -386,6 +417,7 @@ export function buildNetwork(
     if (j) junctions.push(j);
   }
 
+  mem('net.junctions', `${junctions.length} junctions`);
   // ---- 7. apply trims ---------------------------------------------------
   for (const r of surfaceRoads) {
     const usable = Math.max(0, r.length - 1.2);
@@ -400,9 +432,10 @@ export function buildNetwork(
     r.trimEnd = b;
   }
 
+  mem('net.trims');
   // ---- 8. tunnel portals ------------------------------------------------
   const portals: Network['portals'] = [];
-  const surfaceKeys = new Set<string>();
+  const surfaceKeys = new Set<number>();
   for (const r of surfaceRoads) {
     surfaceKeys.add(key(r.pts[0], 0));
     surfaceKeys.add(key(r.pts[r.pts.length - 1], 0));
@@ -418,8 +451,9 @@ export function buildNetwork(
       let touches = false;
       for (let dz = -1; dz <= 1 && !touches; dz++) {
         for (let dx = -1; dx <= 1 && !touches; dx++) {
-          const k = `${Math.round(p.x * GRID) + dx}|${Math.round(p.z * GRID) + dz}|0`;
-          if (surfaceKeys.has(k)) touches = true;
+          if (surfaceKeys.has(keyAt(Math.round(p.x * GRID) + dx, Math.round(p.z * GRID) + dz, 0))) {
+            touches = true;
+          }
         }
       }
       if (!touches) continue;
@@ -433,6 +467,7 @@ export function buildNetwork(
     }
   }
 
+  mem('net.portals', `${portals.length} portals`);
   return { roads: prepared, junctions, portals };
 }
 
@@ -449,7 +484,7 @@ function approachDir(pts: V2[], end: 0 | 1): V2 {
 
 /** Joins ways that meet head-to-tail at a degree-2 node with matching attributes. */
 function weldChains(roads: PreparedRoad[]): PreparedRoad[] {
-  const ends = new Map<string, Array<{ r: PreparedRoad; end: 0 | 1 }>>();
+  const ends = new Map<number, Array<{ r: PreparedRoad; end: 0 | 1 }>>();
   for (const r of roads) {
     for (const end of [0, 1] as const) {
       const k = key(end === 0 ? r.pts[0] : r.pts[r.pts.length - 1], r.layer);

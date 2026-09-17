@@ -231,6 +231,17 @@ interface CanopyField {
   invH: number;
 }
 
+/**
+ * TEMPORARY (qa/parksmem): synchronous JS-heap reading at each step of
+ * `init`, so the load-time transient can be attributed to a phase instead of
+ * inferred from a console line's arrival time over CDP. Remove before commit.
+ */
+const MARK = (label: string): void => {
+  const m = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+  if (!m) return;
+  console.info(`[Parks] MARK ${(m.usedJSHeapSize / 1048576).toFixed(1)} MB  ${label}`);
+};
+
 export class Parks implements WorldModule {
   readonly name = 'Parks';
   private root = new THREE.Group();
@@ -245,6 +256,7 @@ export class Parks implements WorldModule {
   async init(ctx: Ctx): Promise<void> {
     this.root.name = 'parks';
     ctx.scene.add(this.root);
+    MARK('enter');
 
     let areas: AreaRecord[];
     try {
@@ -253,12 +265,16 @@ export class Parks implements WorldModule {
       console.warn('[Parks] no area data; skipping', err);
       return;
     }
+    MARK('areas loaded');
     // Shared with Vegetation and already cached by the loader, so this is free.
     try {
-      this.canopy = buildCanopy(await loadProps());
+      const sets = await loadProps();
+      MARK('props loaded');
+      this.canopy = buildCanopy(sets);
     } catch {
       /* no props: the lawn just comes out uniformly unshaded. */
     }
+    MARK('canopy built');
 
     // One bucket per surface so the whole city's greenery is a couple of draws.
     const buckets = new Map<string, Bucket>();
@@ -271,6 +287,7 @@ export class Parks implements WorldModule {
       .filter((r) => GREEN[r.kind] && r.outline && r.outline.length >= 8)
       .map((r) => ({ rec: r, extent: extentOf(r.outline) }))
       .sort((a, b) => b.extent - a.extent);
+    MARK('green sorted');
 
     // Published by the Water module, which initialises before this one.
     const waterAt = ctx.waterDistAt;
@@ -305,8 +322,12 @@ export class Parks implements WorldModule {
       return false;
     };
     let onDeck = 0;
+    MARK('pier box');
 
+    let markAt = 0;
     for (const { rec } of green) {
+      const mi = markAt++;
+      if (mi < 640 ? mi % 64 === 0 : mi % 512 === 0) MARK(`loop ${mi} tris=${this.triCount}`);
       const spec = GREEN[rec.kind]!;
       const tri = this.triangulate(rec);
       if (!tri) continue;
@@ -377,15 +398,19 @@ export class Parks implements WorldModule {
 
     ctx.stats.parksOverWater = overWater;
     ctx.stats.parksOnWharf = onDeck;
+    MARK(`loop done tris=${this.triCount}`);
 
     for (const [surface, b] of buckets) {
       const n = b.tris.count;
       if (!n) continue;
       const tile = this.tileMetersFor(ctx, surface);
+      MARK(`tileMeters ${surface}`);
+      MARK(`before arrays ${surface} n=${n} (want ${((n * 33 * 4) / 1048576).toFixed(1)} MB)`);
       const pos = new Float32Array(n * 9);
       const uv = new Float32Array(n * 6);
       const col = new Float32Array(n * 9);
       const nor = new Float32Array(n * 9);
+      MARK(`arrays allocated ${surface}`);
       // Colour runs are consumed in step with the triangles that produced
       // them, so the per-polygon tint survives the flattening.
       let run = 0;
@@ -420,7 +445,9 @@ export class Parks implements WorldModule {
         nx /= len; ny /= len; nz /= len;
         for (let k = 0; k < 9; k += 3) { nor[p + k] = nx; nor[p + k + 1] = ny; nor[p + k + 2] = nz; }
       });
+      MARK(`forEach filled ${surface}`);
       b.tris.release();
+      MARK(`tristore released ${surface}`);
 
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -430,6 +457,7 @@ export class Parks implements WorldModule {
       g.computeBoundingSphere();
 
       const mat = this.surfaceMaterial(ctx, surface);
+      MARK(`material ${surface}`);
       this.materials.push(mat);
 
       const mesh = new THREE.Mesh(g, mat);
@@ -447,6 +475,7 @@ export class Parks implements WorldModule {
       this.meshes.push(mesh);
     }
 
+    MARK('done');
     ctx.stats.parkPolys = drawn;
     ctx.stats.parkHa = Math.round(area / 10000);
     ctx.stats.parkTris = this.triCount;
@@ -469,7 +498,9 @@ export class Parks implements WorldModule {
   private tileMetersFor(ctx: Ctx, surface: string): number {
     let t = this.tileCache.get(surface);
     if (t === undefined) {
+      MARK(`before textures(${surface})`);
       t = ctx.materials.textures(surface)?.tileMeters ?? 4.5;
+      MARK(`after textures(${surface})`);
       this.tileCache.set(surface, t);
     }
     return t;
@@ -486,7 +517,9 @@ export class Parks implements WorldModule {
   private surfaceMaterial(ctx: Ctx, surface: string): THREE.MeshStandardMaterial {
     // Pull the map from the *material*: asking the library for a material
     // forces the family to bake, whereas its TextureSet may still be empty.
+    MARK(`before materials.get(${surface})`);
     const src = ctx.materials.get(surface) as THREE.MeshStandardMaterial | undefined;
+    MARK(`after materials.get(${surface})`);
     const set = ctx.materials.textures(surface);
     const map = src?.map ?? set?.map ?? null;
 
@@ -770,6 +803,7 @@ function buildCanopy(sets: PropSet[]): CanopyField | undefined {
     }
   }
   if (!n || !isFinite(minX)) return undefined;
+  MARK(`canopy bbox ${n} trees`);
 
   const pad = CANOPY_CELL * 4;
   const x0 = minX - pad;
@@ -777,6 +811,7 @@ function buildCanopy(sets: PropSet[]): CanopyField | undefined {
   const nx = Math.ceil((maxX + pad - x0) / CANOPY_CELL) + 1;
   const nz = Math.ceil((maxZ + pad - z0) / CANOPY_CELL) + 1;
   const acc = new Uint16Array(nx * nz);
+  MARK(`canopy acc ${nx}x${nz} = ${((nx * nz * 2) / 1048576).toFixed(1)} MB`);
 
   // One crown covers roughly a 12 m disc, so stamp the cell and its
   // neighbours with a falling weight.
@@ -799,6 +834,7 @@ function buildCanopy(sets: PropSet[]): CanopyField | undefined {
     }
   }
 
+  MARK('canopy stamped');
   const out = new Uint8Array(nx * nz);
   for (let j = 0; j < nz; j++) {
     for (let i = 0; i < nx; i++) {
@@ -831,6 +867,7 @@ function buildCanopy(sets: PropSet[]): CanopyField | undefined {
     }
   }
 
+  MARK('canopy blurred');
   const tex = new THREE.DataTexture(out, nx, nz, THREE.RedFormat, THREE.UnsignedByteType);
   tex.name = 'parks:canopy';
   tex.minFilter = THREE.LinearFilter;

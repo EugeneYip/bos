@@ -27,6 +27,12 @@ export interface QualitySettings {
   shadowDistance: number;
   /** Device-pixel-ratio ceiling. */
   maxPixelRatio: number;
+  /**
+   * Fraction of the presented resolution the scene is shaded at, recovered by
+   * the FSR upscale. `Post` used to hardcode these; they live here so `App`
+   * and `Post` agree on the one number that decides the frame's cost.
+   */
+  renderScale: number;
   ssao: boolean;
   ssaoSamples: number;
   ssr: boolean;
@@ -62,13 +68,13 @@ export interface QualitySettings {
  */
 export const QUALITY: Record<QualityTier, QualitySettings> = {
   low: {
-    shadowMapSize: 1024, cascadeCount: 2, shadowDistance: 600, maxPixelRatio: 1,
+    shadowMapSize: 1024, cascadeCount: 2, shadowDistance: 600, maxPixelRatio: 1, renderScale: 0.72,
     ssao: false, ssaoSamples: 8, ssr: false, bloom: true, motionBlur: false, taa: false,
     volumetricClouds: false, cloudSteps: 0, detailDistance: 350, treeBudget: 4000,
     anisotropy: 2, waterReflections: false,
   },
   medium: {
-    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 1200, maxPixelRatio: 1.25,
+    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 1200, maxPixelRatio: 1.25, renderScale: 0.85,
     ssao: true, ssaoSamples: 12, ssr: false, bloom: true, motionBlur: false, taa: true,
     volumetricClouds: true, cloudSteps: 24, detailDistance: 700, treeBudget: 7000,
     anisotropy: 4, waterReflections: true,
@@ -77,13 +83,13 @@ export const QUALITY: Record<QualityTier, QualitySettings> = {
     // Three cascades rather than four: every shadow-casting mesh in the city
     // is submitted once per cascade, and the fourth buys very little on a
     // 2048 map at this distance.
-    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 2200, maxPixelRatio: 1.25,
+    shadowMapSize: 2048, cascadeCount: 3, shadowDistance: 2200, maxPixelRatio: 1.25, renderScale: 1,
     ssao: true, ssaoSamples: 20, ssr: true, bloom: true, motionBlur: true, taa: true,
     volumetricClouds: true, cloudSteps: 48, detailDistance: 1400, treeBudget: 16000,
     anisotropy: 8, waterReflections: true,
   },
   ultra: {
-    shadowMapSize: 4096, cascadeCount: 4, shadowDistance: 3500, maxPixelRatio: 1.5,
+    shadowMapSize: 4096, cascadeCount: 4, shadowDistance: 3500, maxPixelRatio: 1.5, renderScale: 1,
     ssao: true, ssaoSamples: 32, ssr: true, bloom: true, motionBlur: true, taa: true,
     volumetricClouds: true, cloudSteps: 80, detailDistance: 2600, treeBudget: 30000,
     anisotropy: 16, waterReflections: true,
@@ -112,3 +118,78 @@ export const RENDER = {
   /** Exposure for the ACES tonemapper. */
   exposure: 0.78,
 } as const;
+
+/**
+ * Presentation ceiling, in pixels per CSS pixel.
+ *
+ * Above 2 the returns are invisible and the cost is not: every
+ * full-resolution post target scales with this, quadratically.
+ */
+export const PRESENT_CAP = 2;
+
+/**
+ * Floor on `renderScale`, which is also the ceiling on the upscale factor:
+ * 1/0.5 = 2x linear is as far as FSR 1.0 holds up before it starts inventing.
+ */
+export const MIN_RENDER_SCALE = 0.5;
+
+/** How many pixels we shade, how many we present, and the ratio between. */
+export interface Presentation {
+  /** Pixels shaded per CSS pixel. The frame's cost lives here. */
+  sceneRatio: number;
+  /** Pixels presented per CSS pixel — the renderer's pixel ratio. */
+  presentRatio: number;
+  /** `sceneRatio / presentRatio`: what EASU+RCAS upscales from. */
+  renderScale: number;
+}
+
+/**
+ * Decide the resolution path.
+ *
+ * The two quantities used to be one, and conflating them is what made months
+ * of water and shoreline work invisible on a Retina MacBook. At dpr 2 on
+ * `high` the renderer presented at the tier's 1.25 cap, the canvas is
+ * CSS-sized, and so the *browser* stretched the result 1.6x with plain
+ * bilinear — while the FSR upscaler this repo already owns sat switched off,
+ * because `Post` only runs it when it is rendering below the canvas. The
+ * critic measured the loss at 72-76% of high-frequency energy, uniformly
+ * across five unrelated scenes, which is the signature of a filter rather
+ * than of missing content.
+ *
+ * So: present at the panel's resolution and let EASU+RCAS do the upscale
+ * instead of the compositor. `sceneRatio` is unchanged for every combination
+ * of dpr, tier and pin — the scene is shaded at exactly the rate it was, and
+ * only the presentation rises. See qa/respath/NOTES.md for the table proving
+ * it.
+ *
+ * `mobile` opts out entirely and keeps today's presentation. The chain holds
+ * about two dozen render targets sized by the *presented* resolution, and iOS
+ * kills the tab on steady-state GPU footprint; a sharper image is not worth
+ * making that worse, and the complaint came from a desktop anyway.
+ */
+export function presentationFor(opts: {
+  dpr: number;
+  tier: QualityTier;
+  /** The user's explicit Resolution choice, or `null` to follow the tier. */
+  pin: number | null;
+  mobile: boolean;
+}): Presentation {
+  const q = QUALITY[opts.tier];
+  const dpr = opts.dpr > 0 ? opts.dpr : 1;
+  const pin = opts.pin !== null ? Math.max(0.4, Math.min(opts.pin, 4)) : null;
+
+  // What the renderer's pixel ratio has always been.
+  const legacy = pin ?? Math.min(dpr, q.maxPixelRatio);
+  // Asking for a resolution outright is a request for that many *shaded*
+  // pixels, so the tier's render scale does not then take it back off you.
+  const sceneRatio = pin ?? legacy * q.renderScale;
+
+  const presentRatio = opts.mobile
+    ? legacy
+    // Never below what we shade: a pin above the display's own dpr is
+    // supersampling, and presenting under it would throw the pixels away.
+    : Math.max(sceneRatio, Math.min(dpr, PRESENT_CAP, sceneRatio / MIN_RENDER_SCALE));
+
+  const renderScale = Math.min(1, Math.max(MIN_RENDER_SCALE, sceneRatio / presentRatio));
+  return { sceneRatio, presentRatio, renderScale };
+}
