@@ -109,6 +109,12 @@ export class Builder {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.name = `${name}:${b.material.name || b.material.type}`;
+      // A material may ask to be drawn after the rest of its landmark. Glass
+      // does: it is a skin hung centimetres in front of a solid body, and at a
+      // kilometre the depth buffer cannot tell the two apart. See
+      // `GLASS_RENDER_ORDER` in lib/materials.ts.
+      const order = (b.material.userData as { renderOrder?: number }).renderOrder;
+      if (order) mesh.renderOrder = order;
       g.add(mesh);
     }
     this.buckets.clear();

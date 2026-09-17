@@ -57,6 +57,68 @@ export type Family =
   | 'glass'
   | 'paint';
 
+/**
+ * Draw order for every pane of curtain-wall glass in the city.
+ *
+ * A curtain wall is a skin hung a few centimetres in front of a solid body:
+ * `curtainWall()` puts its panes 5.5 cm proud and the tower draws its own
+ * mullion plane behind them with `prism()`. That is how the building is
+ * actually made, and close up it renders correctly.
+ *
+ * It cannot render correctly far away. With `near` 0.35 m and `far` 26 km, one
+ * step of the depth buffer is `z^2 * (far - near) / (far * near * 2^24)` —
+ * 2.7 cm at 400 m, 11 cm at 820 m and **44 cm at 1.6 km**, which is where the
+ * Hancock stands in the `charles-water` view. Two surfaces 5.5 cm apart at
+ * that range quantise to the same depth value, and which one survives is then
+ * decided per fragment by rasteriser rounding. Blue mirror glass and the
+ * near-black anodised frame behind it interleave into a fine organic mottle
+ * with no window periodicity in it at all — '200 Clarendon looks like peeling
+ * paint'. It survives TAA and a half-res blur because it is a stable,
+ * full-contrast signal rather than aliasing. Hiding the frame leaves a clean
+ * blue mirror; hiding the glass leaves a clean olive slab. Both landmarks the
+ * critic named are built this way, and so are One Dalton, the Prudential,
+ * Snell and MIT.
+ *
+ * Geometry cannot fix it: the separation needed at 1.6 km is over a metre,
+ * which is not a curtain wall any more.
+ *
+ * Ordering gets most of the way there. The depth function is `LessEqualDepth`,
+ * so on an exact tie the *later* draw wins, and the glass is genuinely the
+ * nearer surface, so drawing it after the body it hangs on wins every
+ * ambiguous fragment and loses every unambiguous one. Measured on the Hancock
+ * patch of `charles-water` (see `qa/facade-metrics.mjs`), ordering alone takes
+ * the patch from sd 30.7 / 3339 unique RGB to sd 26.7 / 3286 — better, but the
+ * mottle is still plainly there.
+ *
+ * It is not enough on its own because the tie is not exact. The two surfaces
+ * have different vertices, so the rasteriser interpolates two slightly
+ * different window-space z values that quantise to the same *neighbourhood*
+ * but round either way per fragment; the frame can come out strictly nearer.
+ * A few depth steps of polygon offset removes that last ambiguity. Ordering +
+ * {@link GLASS_DEPTH_BIAS} measures sd 21.7 / 1874 unique RGB — a clean
+ * mirror, and the 'peeling paint' is gone.
+ *
+ * Objects genuinely in front are unaffected: the bias is four depth steps,
+ * 1.8 cm of eye space at 400 m and 1.8 m at 1.6 km, far below the distance to
+ * anything that could occlude a tower.
+ */
+export const GLASS_RENDER_ORDER = 4;
+
+/**
+ * Depth bias applied with {@link GLASS_RENDER_ORDER}; see the note there.
+ *
+ * Four units, not forty: -4 and -60 measure identically on the Hancock patch
+ * (sd 21.65 vs 21.67, 1874 vs 1964 unique RGB), so take the smaller one. The
+ * slope term matters separately — a tower's narrow face is seen nearly
+ * edge-on from across the basin, and there the interpolated depth error is
+ * slope-dominated rather than constant.
+ */
+export const GLASS_DEPTH_BIAS = {
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -4,
+} as const;
+
 const PROBE = '__landmark_probe_does_not_exist__';
 
 export class LandmarkMaterials {
@@ -254,6 +316,10 @@ export class LandmarkMaterials {
    * Curtain-wall glass. `MeshPhysicalMaterial` so we get real Fresnel plus a
    * clear-coat-ish sheen; mirror glass (the Hancock) wants high metalness and
    * very low roughness, vision glass on a residential tower wants more.
+   *
+   * Drawn at {@link GLASS_RENDER_ORDER} — see the note there; a curtain wall
+   * is always a skin a few centimetres in front of a solid body, which is
+   * exactly the case the depth buffer cannot represent at city distances.
    */
   glass(opts: {
     color?: number;
@@ -275,7 +341,9 @@ export class LandmarkMaterials {
       reflectivity: opts.reflectivity ?? 1,
       clearcoat: 0.35,
       clearcoatRoughness: 0.08,
+      ...GLASS_DEPTH_BIAS,
     });
+    m.userData.renderOrder = GLASS_RENDER_ORDER;
     m.name = `landmark:glass${opts.key ? `:${opts.key}` : ''}`;
     const env = this.env();
     if (env) m.envMap = env;
@@ -288,6 +356,8 @@ export class LandmarkMaterials {
    * atlas is sampled through `emissiveMap` with one texel per pane (see
    * `curtainwall.ts` for the UV convention), so every window gets its own
    * brightness and ~45% are dark.
+   *
+   * Drawn at {@link GLASS_RENDER_ORDER}; see the note there.
    */
   litGlass(
     seed: number,
@@ -304,7 +374,9 @@ export class LandmarkMaterials {
       envMapIntensity: base.envMapIntensity ?? 1.25,
       emissive: new THREE.Color(0xffffff),
       emissiveIntensity: 0,
+      ...GLASS_DEPTH_BIAS,
     });
+    m.userData.renderOrder = GLASS_RENDER_ORDER;
     m.name = `landmark:litglass:${seed}`;
     m.emissiveMap = windowLightAtlas(seed, litFraction);
     const env = this.env();
