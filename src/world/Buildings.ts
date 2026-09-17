@@ -519,7 +519,10 @@ export class Buildings implements WorldModule {
     // Nothing to add by day, and the pools are a thousand additive quads that
     // would each shade a screenful of fragments to write zero.
     mesh.visible = (this.uniforms?.uNight.value ?? 0) > 0.003;
-    if (!mesh.visible) return;
+    if (!mesh.visible) {
+      ctx.stats.windowSpillDrawn = 0;
+      return;
+    }
     const cam = ctx.camera.position;
     if (cam.distanceTo(this.lastSpillCull) < 18) return;
     this.lastSpillCull.copy(cam);
