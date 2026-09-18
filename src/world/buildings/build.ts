@@ -112,18 +112,35 @@ export function floorPlan(H: number, levels: number, family: number): FloorPlan 
 function membraneTint(area: number, r: number): [number, number, number] | null {
   // Big-footprint commercial and institutional buildings re-roof soonest, so
   // they carry most of the white membrane; a triple-decker almost never does.
-  const chance = area > 2600 ? 0.42 : area > 700 ? 0.24 : 0.07;
+  //
+  // These shares used to be 0.42 / 0.24 / 0.07 against a roof mix that was
+  // half light gravel ballast, and together they turned the city's low-rise
+  // into a continuous pale sheet from the air: at the opening view, eleven of
+  // the twelve brightest flat pixels in the frame were `BuildingShell` roofs
+  // at luma 143-193, brighter than the roads and brighter than the facades,
+  // so downtown read as a cardboard model standing on white foam board.
+  //
+  // Up-facing geometry sees the entire sky hemisphere, so a roof is the
+  // brightest thing in any daylight frame by construction -- which means its
+  // albedo is the one surface in the city that cannot be authored generously.
+  // A white membrane is a real and increasingly common roof, but it is a
+  // minority of Boston's stock, not half of it.
+  const chance = area > 2600 ? 0.20 : area > 700 ? 0.10 : 0.03;
   if (r > chance) return null;
   const t = (r / chance);
-  if (t < 0.55) return [214, 214, 209];            // white TPO, a little dirty
-  if (t < 0.82) return [176, 176, 172];            // weathered light grey
-  return [150, 152, 150];                          // older, greyer single-ply
+  if (t < 0.55) return [196, 196, 190];            // white TPO, a little dirty
+  if (t < 0.82) return [162, 162, 158];            // weathered light grey
+  return [140, 142, 140];                          // older, greyer single-ply
 }
 
 function roofLayerFor(shape: string, family: number, r: number): number {
   switch (shape) {
     case 'flat':
-      return r < 0.5 ? LAYER.roofTar : LAYER.roofGravel;
+      // Ballast gravel was half of all flat roofs here. Boston's flat stock is
+      // overwhelmingly dark bitumen and EPDM; loose-laid ballast is a minority
+      // and it is the brighter of the two by 76 luma, so a 50/50 split put the
+      // pale half everywhere the camera looks down.
+      return r < 0.82 ? LAYER.roofTar : LAYER.roofGravel;
     case 'mansard':
       return r < 0.82 ? LAYER.roofSlate : LAYER.roofShingle;
     case 'dome':

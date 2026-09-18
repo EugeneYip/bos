@@ -38,7 +38,6 @@ import { type Junction, type Network, type PreparedRoad, buildNetwork } from './
 import { emitMarkings, type ConflictProbe } from './roads/paint';
 import { emitBridge, emitPortal, emitSleepers, emitTrack } from './roads/structures';
 import { TUNE } from './roads/spec';
-import { mem } from './roads/mem';
 import { disposeFallbacks } from './roads/textures';
 
 /* ---------------------------------------------------------------- tuning */
@@ -201,7 +200,6 @@ export class Roads implements WorldModule {
       return;
     }
     if (this.disposed) return;
-    mem('loadRoads', `${records.length} records`);
     await yieldFrame();
 
     const sample: Sample = (x, z) => {
@@ -213,7 +211,6 @@ export class Roads implements WorldModule {
     // rather than from the mapped lamps; see `roads/lamps.ts` for why.
     this.lampField = bakeLampField(records);
     ctx.lampField = this.lampField;
-    mem('lampField');
     await yieldFrame();
 
     const t0 = performance.now();
@@ -223,23 +220,18 @@ export class Roads implements WorldModule {
     // water surface itself.
     this.net = buildNetwork(records, sample, ctx.waterDistAt);
     const tNet = performance.now() - t0;
-    mem('buildNetwork', `${this.net.roads.length} ways`);
     await yieldFrame();
 
     this.bucket();
-    mem('bucket', `${this.items.length} chunks, ${this.baseTiles.size} base tiles`);
     // After `bucket`, which is what fills `this.junctions`.
     this.buildConflictProbe();
-    mem('conflictProbe');
     await yieldFrame();
 
     const t1 = performance.now();
     await this.buildBase();
     const tBase = performance.now() - t1;
-    mem('buildBase');
 
     this.buildStructures(sample);
-    mem('buildStructures');
     await yieldFrame();
 
     ctx.stats.roadKm = Math.round(
@@ -269,6 +261,8 @@ export class Roads implements WorldModule {
   private bucket(): void {
     const net = this.net;
     if (!net) return;
+    // One array, refilled per road. `length = 0` keeps the backing store.
+    const chunkScratch: Chunk[] = [];
 
     for (const road of net.roads) {
       if (road.tunnel) continue;               // the Big Dig stays underground
@@ -297,7 +291,9 @@ export class Roads implements WorldModule {
       );
       const micro = isRail || (road.spec.streetDetail && road.spec.kerb);
 
-      for (const chunk of chunkPolyline(pts, ys, CHUNK)) {
+      chunkScratch.length = 0;
+      chunkPolyline(pts, ys, CHUNK, chunkScratch);
+      for (const chunk of chunkScratch) {
         const idx = this.items.length;
         this.items.push({
           chunk,

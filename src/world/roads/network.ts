@@ -10,14 +10,13 @@
  */
 import type { RoadClass, RoadRecord } from '../../core/types';
 import {
-  type V2, add, cumulative, dedupe, dist, norm, perp, polylineLength,
-  rayIntersect, scale, simplify, smoothProfile, sub, hashStr,
+  type V2, add, dist, norm, perp, polylineLength,
+  rayIntersect, scale, sub, hashStr,
 } from './math2';
 import { SEA_LEVEL } from '../../core/config';
 import {
   CLASS, type ClassSpec, type SurfaceKey, TUNE, crownDy, lanesOf, surfaceOf, widthOf,
 } from './spec';
-import { mem } from './mem';
 
 /** Minimum deck height above the water surface, metres. */
 const BRIDGE_CLEARANCE = 3.6;
@@ -92,19 +91,45 @@ export interface Junction {
   y: number;
   layer: number;
   approaches: Approach[];
-  /** Boundary ring with per-vertex elevation offsets, up-facing when filled. */
-  ring: V2[];
-  ringDy: number[];
-  ringY: number[];
-  /** Rounded kerb returns, one per consecutive approach pair. */
-  corners: Corner[];
   radius: number;
   surface: SurfaceKey;
   /** Widest approach — drives crosswalk length and stop-bar setback. */
   maxWidth: number;
+  /** Corner radius cap, retained so `junctionGeom` can reproduce the ring. */
+  maxR: number;
   seed: number;
   /** True when at least one approach carries painted markings. */
   painted: boolean;
+}
+
+/**
+ * A junction's boundary ring and kerb returns — derived, never stored.
+ *
+ * This used to live on the `Junction`. Each one is a ~21-vertex ring of
+ * `{x,z}` objects with two parallel elevation arrays, plus one `Corner` per
+ * approach pair carrying its own `pts`, `ys` and `normals`: about sixty small
+ * allocations per junction, 700,000 across the city's 11,630 of them, and
+ * measured at ~55 MB of the boot high-water mark. On a 3.5-vertex-average
+ * network the headers and backing stores of that many tiny arrays *are* the
+ * payload.
+ *
+ * Only two functions ever read any of it — `emitJunctionFill` and
+ * `emitKerbReturns` — and both run inside a per-tile build. At boot only six
+ * of the city's ninety-three base tiles are built, so the 55 MB bought
+ * geometry for eighty-seven tiles that nothing would ask for before the peak,
+ * or in most sessions ever. `emitCrossings` never touched it at all.
+ *
+ * Everything here is a pure function of what the `Junction` still stores: the
+ * angle-sorted approaches with their settled `trim` and `y`, and `maxR`. So a
+ * derivation is reproducible, and the numbers are the same ones the eager
+ * version wrote into the struct — which `qa/_roadnet.mjs --digest` checks by
+ * hashing the derived ring rather than the stored one.
+ */
+export interface JunctionGeom {
+  ring: V2[];
+  ringDy: number[];
+  ringY: number[];
+  corners: Corner[];
 }
 
 export interface Network {
@@ -141,22 +166,171 @@ const keyAt = (rx: number, rz: number, layer: number): number =>
 const key = (p: V2, layer: number): number =>
   keyAt(Math.round(p.x * GRID), Math.round(p.z * GRID), layer);
 
-function decode(rec: RoadRecord): { pts: V2[]; ys: number[] } | null {
+/* ------------------------------------------------- the prepare scratch */
+
+/**
+ * One set of reusable rows for the whole prepare pass.
+ *
+ * `decode -> dedupe -> simplify -> smoothProfile` used to hand each other
+ * freshly allocated arrays: four generations of `{x,z}[]` and `number[]` per
+ * record, plus a `Uint8Array` and an array-of-tuples stack inside the
+ * Ramer-Douglas-Peucker, for all 56,655 records -- including the 21,250
+ * sidewalk duplicates that get thrown away two steps later.
+ *
+ * The city's ways average **3.5 vertices**. At that length an array is almost
+ * entirely header and backing store, ~48-64 bytes whatever it holds, and the
+ * ones built with `push` abandon a backing store at every capacity doubling.
+ * So the cost of the pass was never the coordinates; it was ten allocation
+ * headers per record, half a million of them, measured at ~55 MB of the boot
+ * high-water mark.
+ *
+ * Now every stage works in place on these rows and only the surviving
+ * polyline is materialised, once, at its exact final length. `Float64Array`
+ * and not `Float32Array`: these are the numbers the geometry builders consume
+ * and they have to stay bit-identical.
+ */
+let sX = new Float64Array(0);
+let sZ = new Float64Array(0);
+let sY = new Float64Array(0);
+/** Previous-pass elevations: `smoothProfile` is Jacobi, not Gauss-Seidel. */
+let sY2 = new Float64Array(0);
+let sKeep = new Uint8Array(0);
+/** RDP interval stack, two ints per frame; depth cannot exceed the vertex count. */
+let sStack = new Int32Array(0);
+
+function reserve(n: number): void {
+  if (sX.length >= n) return;
+  const cap = 1 << (32 - Math.clz32(Math.max(n - 1, 15)));
+  sX = new Float64Array(cap);
+  sZ = new Float64Array(cap);
+  sY = new Float64Array(cap);
+  sY2 = new Float64Array(cap);
+  sKeep = new Uint8Array(cap);
+  sStack = new Int32Array(cap * 2 + 8);
+}
+
+/** Releases the scratch once the pass is done; it is the largest way in the city. */
+function releaseScratch(): void {
+  sX = sZ = sY = sY2 = new Float64Array(0);
+  sKeep = new Uint8Array(0);
+  sStack = new Int32Array(0);
+}
+
+/** Decodes a record's path into the scratch rows. Returns the vertex count, 0 to reject. */
+function decodeInto(rec: RoadRecord): number {
   const path = rec.path;
-  if (!Array.isArray(path) || path.length < 4) return null;
+  if (!Array.isArray(path) || path.length < 4) return 0;
   const n = path.length >> 1;
-  const pts: V2[] = new Array(n);
-  const ys: number[] = new Array(n);
+  reserve(n);
   const elev = Array.isArray(rec.elevation) ? rec.elevation : [];
   for (let i = 0; i < n; i++) {
     const x = path[i * 2];
     const z = path[i * 2 + 1];
-    if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
-    pts[i] = { x, z };
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return 0;
+    sX[i] = x;
+    sZ[i] = z;
     const e = elev[i];
-    ys[i] = Number.isFinite(e) ? (e as number) : Number.NaN;
+    sY[i] = Number.isFinite(e) ? (e as number) : Number.NaN;
   }
-  return { pts, ys };
+  return n;
+}
+
+/** {@link dedupe} in place: drops consecutive duplicates below `eps` metres. */
+function dedupeInPlace(n: number, eps: number): number {
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    // `m <= i` always, so the compacting write can never clobber an unread
+    // source vertex.
+    if (m === 0 || Math.hypot(sX[m - 1] - sX[i], sZ[m - 1] - sZ[i]) > eps) {
+      sX[m] = sX[i];
+      sZ[m] = sZ[i];
+      sY[m] = sY[i];
+      m++;
+    }
+  }
+  if (m === 1 && n > 1) {
+    sX[m] = sX[n - 1];
+    sZ[m] = sZ[n - 1];
+    sY[m] = sY[n - 1];
+    m++;
+  }
+  return m;
+}
+
+/**
+ * {@link simplify} in place. The interval stack is popped in the same order
+ * the array-of-tuples version popped it -- last pushed first, so `[best, i1]`
+ * before `[i0, best]` -- because RDP's tie-break is first-maximum-wins and a
+ * different traversal would keep a different vertex.
+ */
+function simplifyInPlace(n: number, eps: number): number {
+  if (n <= 2) return n;
+  sKeep.fill(0, 0, n);
+  sKeep[0] = 1;
+  sKeep[n - 1] = 1;
+  let sp = 0;
+  sStack[sp++] = 0;
+  sStack[sp++] = n - 1;
+
+  while (sp > 0) {
+    const i1 = sStack[--sp];
+    const i0 = sStack[--sp];
+    if (i1 - i0 < 2) continue;
+    const ax = sX[i0];
+    const az = sZ[i0];
+    const dx = sX[i1] - ax;
+    const dz = sZ[i1] - az;
+    const l = Math.hypot(dx, dz);
+    const y0 = sY[i0];
+    const y1 = sY[i1];
+    let best = -1;
+    let bestD = eps;
+    for (let i = i0 + 1; i < i1; i++) {
+      const rx = sX[i] - ax;
+      const rz = sZ[i] - az;
+      let dev: number;
+      if (l < 1e-6) {
+        dev = Math.hypot(rx, rz);
+      } else {
+        dev = Math.abs(dx * rz - dz * rx) / l;
+      }
+      // Never simplify away a significant grade break either.
+      const yLerp = y0 + ((y1 - y0) * (i - i0)) / (i1 - i0);
+      dev = Math.max(dev, Math.abs(sY[i] - yLerp) * 1.5);
+      if (dev > bestD) {
+        bestD = dev;
+        best = i;
+      }
+    }
+    if (best >= 0) {
+      sKeep[best] = 1;
+      sStack[sp++] = i0;
+      sStack[sp++] = best;
+      sStack[sp++] = best;
+      sStack[sp++] = i1;
+    }
+  }
+
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    if (sKeep[i]) {
+      sX[m] = sX[i];
+      sZ[m] = sZ[i];
+      sY[m] = sY[i];
+      m++;
+    }
+  }
+  return m;
+}
+
+/** {@link smoothProfile} in place. Endpoints are never touched, as before. */
+function smoothInPlace(n: number, passes: number, strength: number): void {
+  for (let p = 0; p < passes; p++) {
+    for (let i = 0; i < n; i++) sY2[i] = sY[i];
+    for (let i = 1; i < n - 1; i++) {
+      sY[i] = sY2[i] + ((sY2[i - 1] + sY2[i + 1]) * 0.5 - sY2[i]) * strength;
+    }
+  }
 }
 
 /**
@@ -249,30 +423,29 @@ export function buildNetwork(
   sample: (x: number, z: number) => number,
   waterDist?: (x: number, z: number) => number,
 ): Network {
-  mem('net.enter', `${records.length} records`);
   // ---- 1. prepare -------------------------------------------------------
   let prepared: PreparedRoad[] = [];
   for (const rec of records) {
     if (!rec || typeof rec.id !== 'string') continue;
     const cls = (CLASS[rec.class] ? rec.class : 'residential') as RoadClass;
-    const dec = decode(rec);
-    if (!dec) continue;
-    const dd = dedupe(dec.pts, dec.ys, 0.08);
-    if (dd.pts.length < 2) continue;
+    let m = decodeInto(rec);
+    if (!m) continue;
+    m = dedupeInPlace(m, 0.08);
+    if (m < 2) continue;
 
     // Fill any missing elevations from the terrain sampler.
-    for (let i = 0; i < dd.ys.length; i++) {
-      if (!Number.isFinite(dd.ys[i])) {
-        const s = sample(dd.pts[i].x, dd.pts[i].z);
-        dd.ys[i] = Number.isFinite(s) ? s : 0;
+    for (let i = 0; i < m; i++) {
+      if (!Number.isFinite(sY[i])) {
+        const s = sample(sX[i], sZ[i]);
+        sY[i] = Number.isFinite(s) ? s : 0;
       }
     }
 
     // Simplify and grade the profile *before* topology so the junction fill and
     // the ribbon that meets it are computed from identical numbers.
-    const sm = simplify(dd.pts, dd.ys, TUNE.simplifyEps);
-    if (sm.pts.length < 2) continue;
-    let ys = sm.ys.length > 3 ? smoothProfile(sm.ys, 2, 0.45) : sm.ys;
+    m = simplifyInPlace(m, TUNE.simplifyEps);
+    if (m < 2) continue;
+    if (m > 3) smoothInPlace(m, 2, 0.45);
 
     // Lift a bridge deck clear of the water it crosses.
     //
@@ -287,20 +460,41 @@ export function buildNetwork(
     // clearance out in the channel. No kink to smooth afterwards, and a deck
     // that is already high enough is left alone by the `max`.
     if (waterDist && (rec.bridge || /\bbridge\b/i.test(rec.name ?? ''))) {
-      let lifted: number[] | null = null;
-      for (let i = 0; i < sm.pts.length; i++) {
-        const d = waterDist(sm.pts[i].x, sm.pts[i].z);
+      // `sY2` stands in for the old `lifted` copy. The test reads `sY`, the
+      // unlifted profile, throughout -- as it did when it compared against
+      // `ys` while writing into `lifted`.
+      let lifted = false;
+      for (let i = 0; i < m; i++) {
+        const d = waterDist(sX[i], sZ[i]);
         if (!(d > 0)) continue;
         const t = Math.min(1, d / BRIDGE_RAMP);
         const want = SEA_LEVEL + BRIDGE_CLEARANCE * t;
-        if (want <= ys[i]) continue;
-        if (!lifted) lifted = ys.slice();
-        lifted[i] = want;
+        if (want <= sY[i]) continue;
+        if (!lifted) {
+          for (let k = 0; k < m; k++) sY2[k] = sY[k];
+          lifted = true;
+        }
+        sY2[i] = want;
       }
-      if (lifted) ys = smoothProfile(lifted, 1, 0.35);
+      if (lifted) {
+        // One smoothing pass off the lifted profile, endpoints held.
+        for (let i = 0; i < m; i++) sY[i] = sY2[i];
+        for (let i = 1; i < m - 1; i++) {
+          sY[i] = sY2[i] + ((sY2[i - 1] + sY2[i + 1]) * 0.5 - sY2[i]) * 0.35;
+        }
+      }
     }
 
-    const mid = sm.pts[sm.pts.length >> 1];
+    // Materialise the survivor, once, at its exact length.
+    const pts: V2[] = new Array(m);
+    const ys: number[] = new Array(m);
+    for (let i = 0; i < m; i++) {
+      pts[i] = { x: sX[i], z: sZ[i] };
+      ys[i] = sY[i];
+    }
+
+    const midX = sX[m >> 1];
+    const midZ = sZ[m >> 1];
     const width = widthOf(rec);
     const tunnel = isTunnelRecord(rec);
     prepared.push({
@@ -308,7 +502,7 @@ export function buildNetwork(
       name: rec.name,
       cls,
       spec: CLASS[cls],
-      pts: sm.pts,
+      pts,
       ys,
       width,
       halfWidth: width * 0.5,
@@ -317,15 +511,15 @@ export function buildNetwork(
       bridge: !tunnel && (!!rec.bridge || (rec.layer ?? 0) > 0),
       tunnel,
       layer: Number.isFinite(rec.layer) ? rec.layer : 0,
-      surface: surfaceOf(rec, mid.x, mid.z),
-      length: polylineLength(sm.pts),
+      surface: surfaceOf(rec, midX, midZ),
+      length: polylineLength(pts),
       trimStart: 0,
       trimEnd: 0,
       seed: hashStr(rec.id),
     });
   }
 
-  mem('net.prepare', `${prepared.length} prepared`);
+  releaseScratch();
   // ---- 2. vertex degrees ------------------------------------------------
   const degree = new Map<number, number>();
   for (const r of prepared) {
@@ -336,7 +530,6 @@ export function buildNetwork(
     }
   }
 
-  mem('net.degree', `${degree.size} verts`);
   // ---- 3. split ways at interior junction vertices ----------------------
   const split: PreparedRoad[] = [];
   for (const r of prepared) {
@@ -364,16 +557,13 @@ export function buildNetwork(
   }
   prepared = split;
 
-  mem('net.split', `${prepared.length} parts`);
   // ---- 4. weld degree-2 chains so mid-block joints stay mitred ----------
   prepared = weldChains(prepared);
 
-  mem('net.weld', `${prepared.length} welded`);
   // ---- 4b. drop OSM sidewalk footways we are about to rebuild ourselves --
   const dupes = markSidewalkDuplicates(prepared);
   if (dupes.size) prepared = prepared.filter((r) => !dupes.has(r));
 
-  mem('net.dupes', `${dupes.size} dropped`);
   // ---- 5. index the endpoints ------------------------------------------
   const nodes = new Map<number, Approach[]>();
   const surfaceRoads = prepared.filter((r) => !r.tunnel);
@@ -401,7 +591,6 @@ export function buildNetwork(
     }
   }
 
-  mem('net.nodes', `${nodes.size} nodes`);
   // ---- 6. junction polygons --------------------------------------------
   const junctions: Junction[] = [];
   for (const [, apps] of nodes) {
@@ -417,7 +606,6 @@ export function buildNetwork(
     if (j) junctions.push(j);
   }
 
-  mem('net.junctions', `${junctions.length} junctions`);
   // ---- 7. apply trims ---------------------------------------------------
   for (const r of surfaceRoads) {
     const usable = Math.max(0, r.length - 1.2);
@@ -432,7 +620,6 @@ export function buildNetwork(
     r.trimEnd = b;
   }
 
-  mem('net.trims');
   // ---- 8. tunnel portals ------------------------------------------------
   const portals: Network['portals'] = [];
   const surfaceKeys = new Set<number>();
@@ -467,7 +654,6 @@ export function buildNetwork(
     }
   }
 
-  mem('net.portals', `${portals.length} portals`);
   return { roads: prepared, junctions, portals };
 }
 
@@ -482,15 +668,41 @@ function approachDir(pts: V2[], end: 0 | 1): V2 {
   return norm(sub(at(n - 1), p0));
 }
 
-/** Joins ways that meet head-to-tail at a degree-2 node with matching attributes. */
+/**
+ * Joins ways that meet head-to-tail at a degree-2 node with matching
+ * attributes.
+ *
+ * The bookkeeping used to cost more than the welding. Every road got
+ * `pts.slice()` and `ys.slice()` up front and a `{...seed}` spread on the way
+ * out, whether or not it welded to anything -- and only 12,048 of the 66,147
+ * do. Both `for (const end of [0, 1] as const)` loops allocated their literal
+ * once per road, the endpoint index held a `{r, end}` object and an `Array`
+ * per node for 132,294 ends, and the candidate search allocated a closure per
+ * probe. On a network averaging 3.5 vertices a way, that was the whole cost of
+ * the step.
+ *
+ * The opening `slice()` was pure waste in any case: every branch that extends
+ * the chain `concat`s, which copies on its own, so the copy was made twice
+ * when a weld happened and made for nothing when it did not. A road that
+ * welds to nothing is now passed straight through -- `length` is already
+ * `polylineLength(pts)` over the same points, so the spread was rebuilding an
+ * identical object.
+ */
 function weldChains(roads: PreparedRoad[]): PreparedRoad[] {
-  const ends = new Map<number, Array<{ r: PreparedRoad; end: 0 | 1 }>>();
-  for (const r of roads) {
-    for (const end of [0, 1] as const) {
+  const n = roads.length;
+  // Endpoint index, packed as `roadIndex * 2 + end`. Only the first two ends
+  // at a node are named, because a node with any other count is one this pass
+  // refuses to weld; `crowded` records the overflow.
+  const firstAt = new Map<number, number>();
+  const secondAt = new Map<number, number>();
+  const crowded = new Set<number>();
+  for (let i = 0; i < n; i++) {
+    const r = roads[i];
+    for (let end = 0; end < 2; end++) {
       const k = key(end === 0 ? r.pts[0] : r.pts[r.pts.length - 1], r.layer);
-      const l = ends.get(k);
-      if (l) l.push({ r, end });
-      else ends.set(k, [{ r, end }]);
+      if (!firstAt.has(k)) firstAt.set(k, i * 2 + end);
+      else if (!secondAt.has(k)) secondAt.set(k, i * 2 + end);
+      else crowded.add(k);
     }
   }
 
@@ -499,26 +711,41 @@ function weldChains(roads: PreparedRoad[]): PreparedRoad[] {
     a.tunnel === b.tunnel && a.surface === b.surface && a.oneway === b.oneway &&
     a.lanes === b.lanes && Math.abs(a.width - b.width) < 0.35;
 
-  const consumed = new Set<PreparedRoad>();
+  const consumed = new Uint8Array(n);
   const out: PreparedRoad[] = [];
 
-  for (const seed of roads) {
-    if (consumed.has(seed)) continue;
-    consumed.add(seed);
-    let pts = seed.pts.slice();
-    let ys = seed.ys.slice();
+  for (let si = 0; si < n; si++) {
+    if (consumed[si]) continue;
+    consumed[si] = 1;
+    const seed = roads[si];
+    let pts = seed.pts;
+    let ys = seed.ys;
+    let welded = false;
 
-    // Extend in both directions.
-    for (const grow of [1, 0] as const) {
+    // Extend in both directions, forwards first.
+    for (let g = 0; g < 2; g++) {
+      const grow = g === 0 ? 1 : 0;
       for (;;) {
         const tip = grow === 1 ? pts[pts.length - 1] : pts[0];
-        const list = ends.get(key(tip, seed.layer));
-        if (!list || list.length !== 2) break;
-        const other = list.find((e) => e.r !== seed && !consumed.has(e.r));
-        if (!other || !compatible(seed, other.r)) break;
-        consumed.add(other.r);
-        const op = other.end === 0 ? other.r.pts : other.r.pts.slice().reverse();
-        const oy = other.end === 0 ? other.r.ys : other.r.ys.slice().reverse();
+        const k = key(tip, seed.layer);
+        // Exactly two ends here, or nothing to do.
+        if (crowded.has(k)) break;
+        const a = firstAt.get(k);
+        const b = secondAt.get(k);
+        if (a === undefined || b === undefined) break;
+        // First of the two that is neither the seed nor already taken.
+        let oi = a >> 1;
+        let oend = a & 1;
+        if (oi === si || consumed[oi]) {
+          oi = b >> 1;
+          oend = b & 1;
+        }
+        if (oi === si || consumed[oi]) break;
+        const other = roads[oi];
+        if (!compatible(seed, other)) break;
+        consumed[oi] = 1;
+        const op = oend === 0 ? other.pts : other.pts.slice().reverse();
+        const oy = oend === 0 ? other.ys : other.ys.slice().reverse();
         if (grow === 1) {
           pts = pts.concat(op.slice(1));
           ys = ys.concat(oy.slice(1));
@@ -526,26 +753,33 @@ function weldChains(roads: PreparedRoad[]): PreparedRoad[] {
           pts = op.slice().reverse().slice(0, -1).concat(pts);
           ys = oy.slice().reverse().slice(0, -1).concat(ys);
         }
+        welded = true;
         if (pts.length > 4000) break;
       }
     }
 
-    out.push({ ...seed, pts, ys, length: polylineLength(pts) });
+    out.push(welded ? { ...seed, pts, ys, length: polylineLength(pts) } : seed);
   }
   return out;
 }
 
 /**
- * Builds the junction boundary from the incident approaches. Consecutive
- * approaches (clockwise when viewed from above) contribute a kerb corner where
- * the outgoing edge of one meets the incoming edge of the next; each approach's
- * trim distance is then the furthest of its two corners, so the trimmed ribbon
- * end and the junction boundary share exactly the same edge.
+ * Junction topology: which approaches meet here, how far each ribbon is cut
+ * back, and how high the carriageway is at the cut.
+ *
+ * The boundary ring and the kerb returns are no longer built here -- see
+ * {@link junctionGeom}, which derives them on demand from what this function
+ * settles. Storing them cost ~55 MB of the boot high-water mark to have
+ * geometry ready for tiles that would not be asked for before the peak.
  */
 function buildJunction(apps: Approach[]): Junction | null {
   const P = apps[0].end === 0 ? apps[0].road.pts[0] : apps[0].road.pts[apps[0].road.pts.length - 1];
   apps.sort((a, b) => a.angle - b.angle);
   const n = apps.length;
+  // The ring is two vertices per approach before any corner is walked, so a
+  // node with two or more approaches can never fail the old `ring.length < 3`
+  // test. This is that test, asked before the ring is built instead of after.
+  if (n < 2) return null;
 
   let maxWidth = 0;
   let shortest = Infinity;
@@ -555,20 +789,14 @@ function buildJunction(apps: Approach[]): Junction | null {
   }
   const maxR = Math.min(TUNE.maxJunctionRadius, Math.max(maxWidth * 0.95, 3), shortest * 0.44);
 
-  const corners: Array<V2 | null> = new Array(n).fill(null);
   const trims = new Array<number>(n).fill(0);
 
   for (let i = 0; i < n; i++) {
     const a = apps[i];
     const b = apps[(i + 1) % n];
     if (a === b) continue;
-    const na = perp(a.dir);
-    const nb = perp(b.dir);
-    const pa = add(P, scale(na, -a.halfWidth)); // a's right edge
-    const pb = add(P, scale(nb, b.halfWidth)); // b's left edge
-    const hit = rayIntersect(pa, a.dir, pb, b.dir);
-    if (hit && hit.s > 0.02 && hit.t > 0.02 && hit.s < maxR && hit.t < maxR) {
-      corners[i] = hit.p;
+    const hit = cornerHit(P, a, b, maxR);
+    if (hit) {
       trims[i] = Math.max(trims[i], hit.s);
       trims[(i + 1) % n] = Math.max(trims[(i + 1) % n], hit.t);
     } else {
@@ -589,11 +817,79 @@ function buildJunction(apps: Approach[]): Junction | null {
     const own = a.end === 0 ? a.road.pts[0] : a.road.pts[a.road.pts.length - 1];
     const slack = a.dir.x * (P.x - own.x) + a.dir.z * (P.z - own.z);
     const onRoad = Math.max(0, a.trim + slack);
-    const cum = cumulative(a.road.pts);
-    a.y = elevationAt(a.road, onRoad, a.end, cum);
+    a.y = elevationAt(a.road, onRoad, a.end);
     if (a.end === 0) a.road.trimStart = Math.max(a.road.trimStart, onRoad);
     else a.road.trimEnd = Math.max(a.road.trimEnd, onRoad);
   }
+
+  // Pick the dominant surface: the highest-priority approach wins.
+  let best = apps[0];
+  for (const a of apps) if (a.road.spec.priority > best.road.spec.priority) best = a;
+
+  let y = 0;
+  for (const a of apps) y += a.y;
+  y /= n;
+
+  return {
+    p: P,
+    y,
+    layer: apps[0].road.layer,
+    approaches: apps,
+    radius,
+    surface: best.road.surface,
+    maxWidth,
+    maxR,
+    seed: hashStr(`${Math.round(P.x)}:${Math.round(P.z)}`),
+    painted: apps.some((a) => a.road.spec.markings),
+  };
+}
+
+/**
+ * Where the kerb lines of two consecutive approaches cross.
+ *
+ * Shared by the trim pass and the ring derivation so the corner the ribbon is
+ * cut against and the corner the kerb is drawn along can never be computed two
+ * different ways. Returns `null` when the lines are parallel or the crossing
+ * falls outside the corner radius, which is the caller's cue to bevel.
+ *
+ * The `{x,z}` temporaries here look like the obvious thing to scalarise --
+ * eight objects a corner, ~35,000 corners, walked again on every tile that
+ * draws them. Measured, it is worth nothing: none of them escape the call, so
+ * TurboFan has already elided them, and a hand-scalarised version with
+ * out-parameters moved the boot peak 139.4 -> 140.6 MB, i.e. not at all. The
+ * allocations that cost on this path are the ones that *escape* -- what
+ * `junctionGeom` pushes into its ring and normals, what the topology maps
+ * retain. Left readable on purpose.
+ */
+function cornerHit(
+  P: V2, a: Approach, b: Approach, maxR: number,
+): { p: V2; s: number; t: number } | null {
+  if (a === b) return null;
+  const pa = add(P, scale(perp(a.dir), -a.halfWidth)); // a's right edge
+  const pb = add(P, scale(perp(b.dir), b.halfWidth)); // b's left edge
+  const hit = rayIntersect(pa, a.dir, pb, b.dir);
+  if (hit && hit.s > 0.02 && hit.t > 0.02 && hit.s < maxR && hit.t < maxR) return hit;
+  return null;
+}
+
+/**
+ * Builds the junction boundary from the incident approaches. Consecutive
+ * approaches (clockwise when viewed from above) contribute a kerb corner where
+ * the outgoing edge of one meets the incoming edge of the next; each approach's
+ * trim distance is the furthest of its two corners, so the trimmed ribbon end
+ * and the junction boundary share exactly the same edge.
+ *
+ * Called per tile build, from `emitJunctionFill` and `emitKerbReturns`. A
+ * junction that is visible in both the base and the detail tier derives twice;
+ * that is thirty-odd short-lived objects against a `MeshBuilder` push of a
+ * hundred vertices, and they die inside the same frame slice instead of
+ * sitting in old space through the boot peak.
+ */
+export function junctionGeom(j: Junction): JunctionGeom {
+  const apps = j.approaches;
+  const n = apps.length;
+  const P = j.p;
+  const maxR = j.maxR;
 
   const ring: V2[] = [];
   const ringDy: number[] = [];
@@ -627,7 +923,8 @@ function buildJunction(apps: Approach[]): Junction | null {
 
     const start = edgeR[i];
     const end = edgeL[(i + 1) % n];
-    const ctrl = corners[i] ?? lerpMid(start, end, P);
+    const hit = cornerHit(P, a, b, maxR);
+    const ctrl = hit ? hit.p : lerpMid(start, end, P);
     const hw = Math.min(a.halfWidth, b.halfWidth);
     const cornerDy = crownDy(hw, hw, kerbedA && b.road.spec.kerb);
 
@@ -664,31 +961,8 @@ function buildJunction(apps: Approach[]): Junction | null {
       walk: Math.min(a.road.spec.sidewalk, b.road.spec.sidewalk),
     });
   }
-  if (ring.length < 3) return null;
 
-  // Pick the dominant surface: the highest-priority approach wins.
-  let best = apps[0];
-  for (const a of apps) if (a.road.spec.priority > best.road.spec.priority) best = a;
-
-  let y = 0;
-  for (const a of apps) y += a.y;
-  y /= n;
-
-  return {
-    p: P,
-    y,
-    layer: apps[0].road.layer,
-    approaches: apps,
-    ring,
-    ringDy,
-    ringY,
-    corners: arcs,
-    radius,
-    surface: best.road.surface,
-    maxWidth,
-    seed: hashStr(`${Math.round(P.x)}:${Math.round(P.z)}`),
-    painted: apps.some((a) => a.road.spec.markings),
-  };
+  return { ring, ringDy, ringY, corners: arcs };
 }
 
 /** Fallback corner control point when the two kerb lines do not intersect. */
@@ -702,16 +976,35 @@ function lerpMid(a: V2, b: V2, away: V2): V2 {
   return { x: mx + (dx / l) * 0.6, z: mz + (dz / l) * 0.6 };
 }
 
-/** Centreline elevation `d` metres in from the given end of a road. */
-function elevationAt(r: PreparedRoad, d: number, end: 0 | 1, cum: number[]): number {
-  const total = cum[cum.length - 1];
+/**
+ * Centreline elevation `d` metres in from the given end of a road.
+ *
+ * This used to be handed a `cumulative(r.pts)` array, allocated fresh for
+ * every approach of every junction -- 36,938 throwaway arrays on a network
+ * whose ways average three and a half vertices. The running sum below visits
+ * the same segments in the same order and so accumulates bit-identical
+ * partial sums; it just never materialises them.
+ */
+function elevationAt(r: PreparedRoad, d: number, end: 0 | 1): number {
+  const pts = r.pts;
+  const n = pts.length;
+  let total = 0;
+  for (let i = 1; i < n; i++) total += dist(pts[i - 1], pts[i]);
   const target = end === 0 ? d : total - d;
   if (target <= 0) return r.ys[0] ?? 0;
   if (target >= total) return r.ys[r.ys.length - 1] ?? 0;
+  // First vertex whose cumulative length reaches `target`, as the array scan
+  // found it: `prev` is cum[i-1], `cur` is cum[i].
+  let prev = 0;
+  let cur = 0;
   let i = 1;
-  while (i < cum.length && cum[i] < target) i++;
-  const span = Math.max(cum[i] - cum[i - 1], 1e-6);
-  const f = (target - cum[i - 1]) / span;
+  for (; i < n; i++) {
+    cur = prev + dist(pts[i - 1], pts[i]);
+    if (cur >= target) break;
+    prev = cur;
+  }
+  const span = Math.max(cur - prev, 1e-6);
+  const f = (target - prev) / span;
   return (r.ys[i - 1] ?? 0) + ((r.ys[i] ?? 0) - (r.ys[i - 1] ?? 0)) * f;
 }
 

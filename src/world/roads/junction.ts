@@ -12,7 +12,7 @@ import type { MeshBuilder, RGBA } from './builder';
 import { rgba } from './builder';
 import { emitPolygon, emitQuad } from './geom';
 import { type V2, hash01 } from './math2';
-import type { Approach, Junction } from './network';
+import { type Approach, type Junction, junctionGeom } from './network';
 import { emitArrow, wornPaint } from './paint';
 import { surfaceTint } from './carriage';
 import { type Row, emitStrip, frameFromEdge } from './ribbon';
@@ -24,11 +24,12 @@ const LIFT = TUNE.surfaceLift + TUNE.junctionLift;
 
 /** The asphalt apron. One polygon, one material, no overlaps. */
 export function emitJunctionFill(out: MeshBuilder, j: Junction, tile: number): void {
-  const ys = new Array<number>(j.ring.length);
-  for (let i = 0; i < j.ring.length; i++) ys[i] = (j.ringY[i] ?? 0) + (j.ringDy[i] ?? 0);
+  const { ring, ringY, ringDy } = junctionGeom(j);
+  const ys = new Array<number>(ring.length);
+  for (let i = 0; i < ring.length; i++) ys[i] = (ringY[i] ?? 0) + (ringDy[i] ?? 0);
   // Junctions are the most worked-over asphalt in the city: patched, sealed
   // and polished by turning traffic.
-  emitPolygon(out, j.ring, ys, tile, rgba(0xffffff, surfaceTint(j.seed, 0) * 0.95, 1), LIFT);
+  emitPolygon(out, ring, ys, tile, rgba(0xffffff, surfaceTint(j.seed, 0) * 0.95, 1), LIFT);
 }
 
 /* ------------------------------------------------------------ kerb returns */
@@ -47,7 +48,7 @@ export function emitKerbReturns(
   const kerbC = rgba(0xffffff, 1, 1);
   const walkC = rgba(0xffffff, 1, 1);
 
-  for (const corner of j.corners) {
+  for (const corner of junctionGeom(j).corners) {
     if (!corner.kerbed || corner.pts.length < 2) continue;
     const rungs = frameFromEdge(corner.pts, corner.ys, corner.normals);
     if (rungs.length < 2) continue;

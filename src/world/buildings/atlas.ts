@@ -61,8 +61,40 @@ export interface FacadeAtlas {
   surface: THREE.DataArrayTexture;
   width: number;
   height: number;
+  /**
+   * Per layer, the fraction of its area the shader will read as glass —
+   * `mean(smoothstep(GLASS_LO, GLASS_HI, depth))`, counted texel by texel when
+   * the layer is painted, with exactly the curve the fragment shader applies.
+   *
+   * This exists because the night-window model emits per *pane*, and nothing
+   * in the shader otherwise knows how much of the envelope it has been handed
+   * as pane. A punched-window masonry family glazes about a sixth of its wall;
+   * a curtain wall glazes half of it. Give both the same per-pane radiance and
+   * the second one stops being a building with lit windows and becomes a lit
+   * surface. Measuring it here lets the shader normalise, so the defect cannot
+   * come back through a re-authored layer either.
+   */
+  glassFrac: Float32Array;
   dispose(): void;
 }
+
+/**
+ * The glass window of the surface atlas' depth channel. Must match the shader
+ * (`material.ts`, `gGlass`) — the coverage measured below is only meaningful
+ * if it is the same curve.
+ */
+export const GLASS_LO = 0.6;
+export const GLASS_HI = 0.8;
+
+/**
+ * Reference glass coverage for the night-emissive normalisation: what a
+ * punched-window masonry facade glazes. Measured from the brick field layer
+ * (layer 0) — see the `[Buildings] glass coverage` line logged with `?diag=1`.
+ * Facades at or below this are left exactly alone; the ones above it are
+ * scaled so their *average* radiance matches, which is the clamp that stops
+ * an over-glazed family rendering as a lightbox.
+ */
+export const GLASS_REF = 0.16;
 
 // ---------------------------------------------------------------------------
 // Painter — draws the same shapes into the albedo and the aux (tint/rough/depth)
@@ -471,9 +503,25 @@ function familySpec(fi: number): FamilySpec {
             p.style({ c: hex(150 + d, 154 + d, 158 + d), tint: 0.5, rough: 0.3, depth: 0.12 });
             p.ellipse(r() * p.w, r() * p.h, 2 + r() * 4, 2 + r() * 3);
           }
+          // Spandrel. A curtain wall is not glass from slab to slab: the band
+          // over each floor slab and up past the ceiling plenum is an opaque
+          // panel — shadow box, back-pan or insulated metal — and it is the
+          // single most identifying thing about the type, day or night. Without
+          // it `top/bottom` had to be 0.98/0.02 and the family glazed 81% of
+          // its own wall, which is what made these buildings emissive sheets
+          // after dark: see qa/nightshell/NOTES.md.
+          const band = 0.21;
+          p.style({ c: hex(96, 102, 108), tint: 0.35, rough: 0.42, depth: 0.14 });
+          p.fill(0, p.Y(1.0), p.w, p.Y(1.0 - band) - p.Y(1.0));
+          p.fill(0, p.Y(band), p.w, p.Y(0.0) - p.Y(band));
+          // Joint reveals top and bottom of the panel, and the slab shadow.
+          p.style({ c: hex(58, 62, 66), tint: 0.2, rough: 0.5, depth: 0.3 });
+          p.fill(0, p.Y(1.0 - band), p.w, Math.max(1, 0.035 * p.py));
+          p.fill(0, p.Y(band), p.w, Math.max(1, 0.035 * p.py));
+          p.shade(0, p.Y(band), p.w, Math.max(2, 0.1 * p.py), '#000', 0.22);
         },
         windowKind: 'curtain', frame: [118, 122, 126], arch: false, sill: false, mx: 1, my: 2,
-        wFrac: 0.95, top: 0.98, bottom: 0.02, trim: [110, 114, 118], glazedGround: true,
+        wFrac: 0.9, top: 0.79, bottom: 0.21, trim: [110, 114, 118], glazedGround: true,
       };
     case 5: // metal panel
       return {
@@ -699,7 +747,11 @@ const paintRoofTar: LayerFn = (p, rnd) => {
 
 const paintRoofGravel: LayerFn = (p, rnd) => {
   p.metrics(5, 5);
-  p.style({ c: hex(168, 164, 154), tint: 1, rough: 0.96, depth: 0.14 });
+  // Was hex(168, 164, 154): an albedo of 0.66, on the one orientation in the
+  // city that sees the whole sky hemisphere. Ballast is a light grey stone but
+  // it sits in a bed of bitumen and carries years of grime, and at 0.66 it
+  // rendered at luma 174-200 -- brighter than every road and facade around it.
+  p.style({ c: hex(138, 134, 126), tint: 1, rough: 0.96, depth: 0.14 });
   p.fill(0, 0, p.w, p.h);
   for (let i = 0; i < 5200; i++) {
     const g = 120 + rnd() * 120;
@@ -871,6 +923,7 @@ export async function buildFacadeAtlas(
   const stride = W * H * 4;
   const albData = new Uint8Array(stride * LAYER_COUNT);
   const surData = new Uint8Array(stride * LAYER_COUNT);
+  const glassFrac = new Float32Array(LAYER_COUNT);
 
   for (let li = 0; li < LAYER_COUNT; li++) {
     const spec = painters[li];
@@ -904,6 +957,16 @@ export async function buildFacadeAtlas(
         surData[dst + x + 3] = ib[src + x + 2]; // depth
       }
     }
+
+    // How much of this layer the shader will call glass. Same smoothstep the
+    // fragment shader runs, evaluated per texel and *then* averaged — the
+    // whole point is that E[f(depth)] is not f(E[depth]).
+    let cov = 0;
+    for (let i = 0; i < W * H; i++) {
+      const t = Math.min(1, Math.max(0, (surData[base + i * 4 + 3] / 255 - GLASS_LO) / (GLASS_HI - GLASS_LO)));
+      cov += t * t * (3 - 2 * t);
+    }
+    glassFrac[li] = cov / (W * H);
 
     // Normals from the (already flipped) depth channel. Relief is scaled so a
     // full 0..1 depth step reads as ~0.22 m of recess.
@@ -948,11 +1011,19 @@ export async function buildFacadeAtlas(
     t.needsUpdate = true;
   }
 
+  if (typeof location !== 'undefined' && location.search.includes('diag')) {
+    console.info(
+      '[Buildings] glass coverage per layer: '
+      + [...glassFrac].map((v, i) => `${i}:${v.toFixed(3)}`).join(' '),
+    );
+  }
+
   return {
     albedo,
     surface,
     width: W,
     height: H,
+    glassFrac,
     dispose(): void {
       albedo.dispose();
       surface.dispose();
