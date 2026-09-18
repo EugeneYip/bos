@@ -44,8 +44,11 @@ async function armRepeat(label, outDir, basePort) {
   for (let i = 0; i < LOADS; i++) loads.push(await arm(`${label}${i}`, outDir, basePort + i * 4));
   return H.pool(loads);
 }
-const a = await armRepeat('A', A, 4520);
-const b = await armRepeat('B', B, 4540);
+// A random base per run. Two concurrent A/Bs both defaulting to 4520 collide
+// under --strictPort, and one of them dies after twenty minutes of loading.
+const BASE = Number(process.env.PORT_BASE || (4600 + Math.floor(Math.random() * 60) * 16));
+const a = await armRepeat('A', A, BASE);
+const b = await armRepeat('B', B, BASE + 8);
 console.log(`pose ${POSE}   A=${A}  B=${B}${SELFTEST ? '   [SELFTEST: everything must be "not resolvable"]' : ''}`);
 console.log(`${LOADS} independent loads per arm, ${N} frames averaged within each`);
 const res = H.compare(a, b);
