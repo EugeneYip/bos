@@ -76,42 +76,28 @@ export class Quadtree {
     const bz1 = hf.maxZ + pad;
     const mm: [number, number] = [0, 0];
 
+    // Built breadth-first, and that is load-bearing: `descend` reads a node's
+    // four children as `c, c+1, c+2, c+3`, so the four have to be *adjacent*
+    // in the arrays. A depth-first build does not give that — child 0's entire
+    // subtree is allocated before child 1 exists, so `c+1..c+3` land inside
+    // child 0 and siblings 1, 2 and 3 are never reachable. Selection then saw
+    // one quarter of the tree per level: 32-95 chunks for a 1600x900 frame
+    // against a 6144 budget, nothing at all within 730 m of the camera at
+    // Logan, and the sky dome showing through the gap (see qa/logan/NOTES.md).
     let n = 0;
-    const build = (nx: number, nz: number, s: number, lvl: number): number => {
+    const alloc = (nx: number, nz: number, s: number, lvl: number): number => {
       const idx = n++;
       if (idx >= cap) throw new Error('terrain: quadtree capacity exceeded');
       this.x[idx] = nx;
       this.z[idx] = nz;
       this.size[idx] = s;
       this.level[idx] = lvl;
-
-      const inside = nx < bx1 && nx + s > bx0 && nz < bz1 && nz + s > bz0;
-      if (lvl > 0 && inside) {
-        const hs = s * 0.5;
-        const c0 = build(nx, nz, hs, lvl - 1);
-        build(nx + hs, nz, hs, lvl - 1);
-        build(nx, nz + hs, hs, lvl - 1);
-        build(nx + hs, nz + hs, hs, lvl - 1);
-        this.child[idx] = c0;
-        let lo = Infinity;
-        let hi = -Infinity;
-        for (let c = c0; c < c0 + 4; c++) {
-          if (this.minY[c] < lo) lo = this.minY[c];
-          if (this.maxY[c] > hi) hi = this.maxY[c];
-        }
-        this.minY[idx] = lo;
-        this.maxY[idx] = hi;
-      } else {
-        hf.minMaxRect(nx, nz, nx + s, nz + s, mm);
-        this.minY[idx] = mm[0];
-        this.maxY[idx] = mm[1];
-      }
       return idx;
     };
 
     for (let j = 0; j < ROOTS_ACROSS; j++) {
       for (let i = 0; i < ROOTS_ACROSS; i++) {
-        this.roots.push(build(
+        this.roots.push(alloc(
           this.gridOriginX + i * ROOT_SIZE,
           this.gridOriginZ + j * ROOT_SIZE,
           ROOT_SIZE,
@@ -119,6 +105,46 @@ export class Quadtree {
         ));
       }
     }
+
+    // The queue is the index range itself: a node's children are always
+    // allocated after it, so walking 0..n-1 visits every node exactly once and
+    // `n` grows underneath the loop.
+    for (let idx = 0; idx < n; idx++) {
+      const nx = this.x[idx];
+      const nz = this.z[idx];
+      const s = this.size[idx];
+      const lvl = this.level[idx];
+      const inside = nx < bx1 && nx + s > bx0 && nz < bz1 && nz + s > bz0;
+      if (lvl > 0 && inside) {
+        const hs = s * 0.5;
+        const c0 = alloc(nx, nz, hs, lvl - 1);
+        alloc(nx + hs, nz, hs, lvl - 1);
+        alloc(nx, nz + hs, hs, lvl - 1);
+        alloc(nx + hs, nz + hs, hs, lvl - 1);
+        this.child[idx] = c0;
+      } else {
+        hf.minMaxRect(nx, nz, nx + s, nz + s, mm);
+        this.minY[idx] = mm[0];
+        this.maxY[idx] = mm[1];
+      }
+    }
+
+    // Leaves upward. Breadth-first guarantees a child's index exceeds its
+    // parent's, so one reverse sweep has every child finished before its
+    // parent is read.
+    for (let idx = n - 1; idx >= 0; idx--) {
+      const c0 = this.child[idx];
+      if (c0 < 0) continue;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let c = c0; c < c0 + 4; c++) {
+        if (this.minY[c] < lo) lo = this.minY[c];
+        if (this.maxY[c] > hi) hi = this.maxY[c];
+      }
+      this.minY[idx] = lo;
+      this.maxY[idx] = hi;
+    }
+
     this.nodeCount = n;
   }
 
