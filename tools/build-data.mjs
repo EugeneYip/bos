@@ -27,6 +27,7 @@ import { buildAreas } from './lib/areas.mjs';
 import { buildRoads } from './lib/roads.mjs';
 import { buildBuildings } from './lib/buildings.mjs';
 import { buildProps } from './lib/props.mjs';
+import { encodeBuildings } from './pack-buildings.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const argv = Object.fromEntries(
@@ -294,6 +295,11 @@ const terrainName = writeJson('terrain.json', terrainMeta);
 // granularity, not file size: at 9,000 the city came out as seven shards
 // spanning four to ten kilometres each, so a 2.6 km streaming radius reached
 // nearly all of them and nothing was saved.
+// Buildings ship packed, not as JSON: 16.56 MB -> 5.96 MB for the same 61,597
+// records, and no `JSON.parse` object graph on the client. `shardSpatial`
+// still writes the JSON (it is the readable source of truth for the packer and
+// for diffing a data change), and `packBuildingShards` below converts each one
+// and rewrites the manifest entry. See tools/pack-buildings.mjs.
 const buildingShards = shardSpatial('buildings', buildings, 1200, cleanBuilding, (b) => {
   // The centre of the outline's bounding box, which is exactly what
   // `buildShard` buckets on at runtime. The two have to agree: if a record
@@ -309,7 +315,22 @@ const buildingShards = shardSpatial('buildings', buildings, 1200, cleanBuilding,
   }
   return [(minX + maxX) * 0.5, (minZ + maxZ) * 0.5];
 });
-const buildingFiles = buildingShards.names;
+// Convert each shard to the packed form and hand the manifest those names.
+// The JSON stays on disk as the readable source; only the .bin is fetched.
+const buildingFiles = buildingShards.names.map((name) => {
+  const src = JSON.parse(fs.readFileSync(path.join(OUT, name), 'utf8'));
+  const bin = encodeBuildings(src);
+  const out = name.replace(/\.json$/, '.bin');
+  fs.writeFileSync(path.join(OUT, out), Buffer.from(bin));
+  written.push({ name: out, bytes: bin.byteLength });
+  return out;
+});
+{
+  const j = buildingShards.names.reduce((a, n) => a + fs.statSync(path.join(OUT, n)).size, 0);
+  const b = buildingFiles.reduce((a, n) => a + fs.statSync(path.join(OUT, n)).size, 0);
+  console.log(`  buildings: packed ${(j / 1048576).toFixed(2)} MB of JSON -> `
+    + `${(b / 1048576).toFixed(2)} MB of .bin (${(100 * b / j).toFixed(0)}%)`);
+}
 const roadFiles = shard('roads', roads, 12000, cleanRoad);
 const areaFiles = shard('areas', areas, 6000, cleanArea);
 // Trees dwarf everything else, so they get their own shard(s) and the long tail

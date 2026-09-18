@@ -14,6 +14,7 @@
  */
 import type { BuildingRecord } from '../../core/types';
 import { buildShard, shardTransferables } from './build';
+import { decodeBuildingShard, isBinaryShard } from './binrecords';
 
 export interface WorkerRequest {
   type: 'shard';
@@ -39,7 +40,13 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>): Promise<void> => {
   try {
     const res = await fetch(msg.url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const records = (await res.json()) as BuildingRecord[];
+    // Sniff rather than trust the extension, so a stale manifest pointing at
+    // .json still works and a half-deployed mix of the two cannot break a
+    // shard. The binary form is 36% of the JSON's bytes.
+    const raw = await res.arrayBuffer();
+    const records: BuildingRecord[] = isBinaryShard(raw)
+      ? decodeBuildingShard(raw)
+      : (JSON.parse(new TextDecoder().decode(raw)) as BuildingRecord[]);
     const out = buildShard(records, { skipLandmarks: msg.skipLandmarks });
     const reply: WorkerReply = {
       type: 'done',
